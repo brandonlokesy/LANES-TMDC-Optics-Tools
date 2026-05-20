@@ -23,7 +23,6 @@ try:
 except ImportError:
     _HAS_CRAMERI = False
 
-
 # ---------------------------------------------------------------------------
 # Style
 # ---------------------------------------------------------------------------
@@ -528,7 +527,7 @@ def animate_real_space_PL_map(
     ...     title     = "Power-dependent PL",
     ... )
     """
-    fig, ax = plot_real_space_PL_map(scan, ax, idx=0, xlabel=xlabel, ylabel=ylabel)
+    fig, ax = plot_real_space_PL_map(scan, ax, idx=0, xlabel=xlabel, ylabel=ylabel, cmap=(cmap))
     im = ax.images[0] if ax.images else ax.imshow(scan.load_frame(0), cmap=get_cmap(cmap))
 
     # Static overall title (suptitle so it doesn't clash with the per-frame subtitle)

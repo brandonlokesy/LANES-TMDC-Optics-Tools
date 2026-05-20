@@ -20,4 +20,4 @@ dependencies = [
 colormaps = ["cmcrameri"]
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["src"]

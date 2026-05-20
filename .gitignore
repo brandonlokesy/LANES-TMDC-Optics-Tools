@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# VSCode — share launch configs, ignore personal settings
+.vscode/settings.json

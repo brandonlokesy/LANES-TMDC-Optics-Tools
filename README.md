@@ -140,6 +140,7 @@ fig, ax, mesh = plotting.plot_pl_map_Vab_scan(
 
 The y-axis is automatically the displacement field if a geometry was supplied, otherwise the top gate voltage.
 
+
 ---
 
 ### 4. Inspect a single spectrum

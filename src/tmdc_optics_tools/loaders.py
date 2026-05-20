@@ -458,6 +458,11 @@ class AttoCubePLVabScan:
     energy_spectra : np.ndarray, shape (n_pixels, n_sweeps)
         Spectra remapped to the energy axis.  Jacobian correction applied
         if *apply_jacobian* is ``True``.  No background subtraction.
+    energy_spectra_pre_jacobian : np.ndarray, shape (n_pixels, n_sweeps)
+        Spectra remapped to the energy axis with **no** Jacobian correction,
+        regardless of *apply_jacobian*.  Useful for comparing raw counts
+        on the energy axis or for peak-position fitting where the density
+        correction is undesirable.  No background subtraction.
     energy_spectra_bg : np.ndarray or None, shape (n_pixels, n_sweeps)
         Background-subtracted version of *energy_spectra*.  Background is
         removed in wavelength space *before* the Jacobian is applied, so
@@ -580,6 +585,16 @@ class AttoCubePLVabScan:
         self.energy_spectra = self._build_energy_spectra(
             self.spectra, self.wavelength, _sort_idx, apply_jacobian
         )
+
+        # energy_spectra_pre_jacobian: always no Jacobian, no background subtraction.
+        # Identical to energy_spectra when apply_jacobian=False; a separate array
+        # when apply_jacobian=True so both representations are always available.
+        if apply_jacobian:
+            self.energy_spectra_pre_jacobian = self._build_energy_spectra(
+                self.spectra, self.wavelength, _sort_idx, apply_jacobian=False
+            )
+        else:
+            self.energy_spectra_pre_jacobian = self.energy_spectra
 
         # energy_spectra_bg: background subtracted in wavelength space first,
         # then Jacobian applied (or not). None if no bg_region supplied.

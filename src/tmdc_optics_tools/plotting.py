@@ -123,15 +123,21 @@ def plot_pl_map_Vab_scan(
     colorbar       : bool  = True,
     colorbar_label : str   = "PL intensity (counts)",
     rescale_img    : bool  = True,
-    bg_region      : tuple = None,
 ) -> tuple:
     """
     Plot a gate-dependent PL map from an
-    :class:`~tmdc_optics_tools.loaders.AttoCubePLScan`.
+    :class:`~tmdc_optics_tools.loaders.AttoCubePLVabScan`.
+
+    Background subtraction and Jacobian correction are configured at
+    load time on the scan object (via ``bg_region_nm``, ``bg_region_eV``,
+    and ``apply_jacobian``).  This function always uses
+    :attr:`~tmdc_optics_tools.loaders.AttoCubePLVabScan.best_energy_spectra`,
+    which automatically returns the background-corrected array when one
+    is available, and falls back to the uncorrected array otherwise.
 
     Parameters
     ----------
-    scan : AttoCubePLScan
+    scan : AttoCubePLVabScan
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
     x_axis : {"energy", "wavelength"}
@@ -145,11 +151,6 @@ def plot_pl_map_Vab_scan(
     colorbar_label : str
     rescale_img : bool
         Rescale intensity to [0, 1] before plotting.
-    bg_region : tuple of (x_min, x_max), optional
-        Spectral range used to estimate and subtract a background level
-        before plotting. Units match *x_axis* (eV or nm). The mean
-        counts in this region are subtracted from every sweep point.
-        The raw scan data is not modified. Omitted when ``None``.
 
     Returns
     -------
@@ -166,11 +167,9 @@ def plot_pl_map_Vab_scan(
     x_m = np.tile(x[:, np.newaxis], (1, scan.n_sweeps))
     y_m = np.tile(y[np.newaxis, :], (scan.n_pixels, 1))
 
-    # data = scan.energy_spectra.copy() if x_axis == "energy" else scan.spectra.copy()
-    data = scan.best_energy_spectra if x_axis == "energy" else scan.spectra.copy()
-
-    if bg_region is not None:
-        data = processing.subtract_background(data, bg_region=bg_region, x=x, axis=0)
+    # Use best_energy_spectra (BG-corrected if available) for energy axis;
+    # raw spectra for wavelength axis (BG correction is a loader concern).
+    data = scan.best_energy_spectra.copy() if x_axis == "energy" else scan.spectra.copy()
 
     if median_kernel > 1:
         data = processing.smooth_median(data, kernel=median_kernel)
@@ -238,7 +237,7 @@ def plot_spectrum(
 
     x, xlabel = _resolve_x_axis(scan, x_axis)
     if x_axis == "energy":
-        y=scan.energy_spectra[:, sweep_index].astype(float)
+        y = scan.best_energy_spectra[:, sweep_index].astype(float)
     else:
         y = scan.spectra[:, sweep_index].astype(float)
     if normalize:

@@ -300,41 +300,44 @@ def fit_multi_lorentzian(
 
 def fit_scan_peak(
     scan,
-    x_axis  : str   = "energy",
-    x_range : tuple = None,
-    model   : str   = "lorentzian",
-    bg_region : tuple = None,
+    x_axis     : str        = "energy",
+    x_range    : tuple      = None,
+    model      : str        = "lorentzian",
     sweep_mask : np.ndarray = None,
 ) -> list[FitResult]:
     """
     Fit a single peak in every sweep of an
-    :class:`~tmdc_optics_tools.loaders.AttoCubePLScan`.
+    :class:`~tmdc_optics_tools.loaders.AttoCubePLVabScan`.
+
+    Background subtraction and Jacobian correction are configured at load
+    time on the scan object (via ``bg_region_nm`` / ``bg_region_eV`` and
+    ``apply_jacobian``).  This function always uses
+    :attr:`~tmdc_optics_tools.loaders.AttoCubePLVabScan.best_energy_spectra`
+    for the energy axis, which automatically returns the background-corrected
+    array when one is available.
 
     Parameters
     ----------
-    scan : AttoCubePLScan
+    scan : AttoCubePLVabScan
     x_axis : {"energy", "wavelength"}
     x_range : tuple of (x_min, x_max), optional
-        Restrict the fit to this spectral window. Fits the full range
-        if ``None``.
+        Restrict the fit to this spectral window. Units match *x_axis*.
+        Fits the full range if ``None``.
     model : {"lorentzian", "gaussian"}
         Peak shape to fit.
-    bg_region : tuple of (x_min, x_max), optional
-        Spectral range (nm) for background subtraction
+    sweep_mask : np.ndarray of bool, optional
+        Boolean mask of length ``scan.n_sweeps``. Only sweeps where the
+        mask is ``True`` are fitted; the rest receive a non-converged
+        placeholder so that result indices stay aligned with ``scan.ef``.
+        Fits all sweeps when ``None``.
 
     Returns
     -------
     list of FitResult, length = scan.n_sweeps
     """
-
-    from .processing import subtract_background
-
     x       = scan.energy     if x_axis == "energy" else scan.wavelength
-    spectra = scan.energy_spectra if x_axis == "energy" else scan.spectra
+    spectra = scan.best_energy_spectra if x_axis == "energy" else scan.spectra
     fit_fn  = fit_lorentzian if model == "lorentzian" else fit_gaussian
-
-    if bg_region is not None:
-        spectra = subtract_background(spectra, bg_region=bg_region, x=x, axis=0)
 
     if x_range is not None:
         px_mask = (x >= x_range[0]) & (x <= x_range[1])
@@ -443,10 +446,9 @@ class DipoleResult:
 
 def extract_dipole_length(
     scan,
-    x_range  : tuple = None,
-    model    : str   = "lorentzian",
-    ef_range : tuple = None,
-    bg_region : tuple = None,
+    x_range      : tuple = None,
+    model        : str   = "lorentzian",
+    ef_range     : tuple = None,
     Efield_range : tuple = None,
 ) -> DipoleResult:
     """
@@ -466,17 +468,15 @@ def extract_dipole_length(
     4. Derive the dipole length and propagate uncertainties.
 
     .. note::
-        ``fit_scan_peak`` is used rather than ``extract_spectra_peak``
-        because:
-
-        * The fit center is insensitive to single noisy/hot pixels.
-        * The fit operates on the energy axis, avoiding the
-          wavelength→energy Jacobian bias that affects a raw ``argmax``.
-        * Per-point uncertainties are propagated into the final error.
+        Background subtraction is configured at load time on the scan
+        object via ``bg_region_nm`` or ``bg_region_eV``.
+        :func:`fit_scan_peak` automatically uses
+        :attr:`~tmdc_optics_tools.loaders.AttoCubePLVabScan.best_energy_spectra`,
+        which returns the background-corrected array when available.
 
     Parameters
     ----------
-    scan : AttoCubePLScan
+    scan : AttoCubePLVabScan
         Must have ``ef`` set (requires a
         :class:`~tmdc_optics_tools.loaders.DeviceGeometry`).
     x_range : tuple of (E_min, E_max) in eV, optional
@@ -487,8 +487,8 @@ def extract_dipole_length(
         homogeneously broadened excitons.
     ef_range : tuple of (F_min, F_max) in mV/nm, optional
         Restrict the linear fit to this field range.
-    bg_region : tuple of (x_min, x_max) in nm, optional
-        Spectral range for background subtraction before fitting. 
+    Efield_range : tuple of (F_min, F_max) in mV/nm, optional
+        Alias for *ef_range*. Takes precedence if both are supplied.
 
     Returns
     -------
@@ -518,9 +518,11 @@ def extract_dipole_length(
         sweep_mask = None
 
     # --- Step 1: lineshape fit at selected sweep points only ---
-    fit_results   = fit_scan_peak(
+    # fit_scan_peak uses scan.best_energy_spectra, which automatically
+    # returns the BG-corrected array when one was configured at load time.
+    fit_results = fit_scan_peak(
         scan, x_axis="energy", x_range=x_range, model=model,
-        bg_region=bg_region, sweep_mask=sweep_mask,
+        sweep_mask=sweep_mask,
     )
     peak_energies = np.array([r.params["center"] for r in fit_results])
     peak_errors   = np.array([r.errors["center"]  for r in fit_results])

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tmdc_optics_tools"
+version = "0.1.0a0"
+description = "Toolkit for gate-dependent PL spectroscopy on TMDC devices"
+requires-python = ">=3.9"
+authors = [{ name = "Brandon Loke" }]
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "pandas",
+    "scikit-image",
+]
+
+[project.optional-dependencies]
+colormaps = ["cmcrameri"]
+
+[tool.setuptools.packages.find]
+where = ["."]

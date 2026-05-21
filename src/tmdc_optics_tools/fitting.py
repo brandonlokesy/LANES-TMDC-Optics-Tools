@@ -416,6 +416,10 @@ class DipoleResult:
         Lineshape model used to extract peak centers (e.g. ``"lorentzian"``).
     converged_mask : np.ndarray of bool
         True for sweep points where the lineshape fit converged.
+    method : str
+        Linear-fit method used: ``"wls"``, ``"minmax"``, or ``"bootstrap"``.
+    n_bootstrap : int or None
+        Number of bootstrap iterations. ``None`` unless ``method="bootstrap"``.
     """
     ef                    : np.ndarray
     peak_energies         : np.ndarray
@@ -430,8 +434,13 @@ class DipoleResult:
     r_squared             : float
     peak_model            : str
     converged_mask        : np.ndarray
+    method                : str = "wls"
+    n_bootstrap           : int = None   # only meaningful for method="bootstrap"
 
     def __repr__(self) -> str:
+        method_str = self.method
+        if self.method == "bootstrap" and self.n_bootstrap is not None:
+            method_str += f" (n={self.n_bootstrap})"
         return (
             f"DipoleResult\n"
             f"  Dipole length : {self.dipole_length:.4f} ± {self.dipole_length_err:.4f} nm"
@@ -440,8 +449,261 @@ class DipoleResult:
             f"  Intercept E₀  : {self.intercept:.4f} ± {self.intercept_err:.4f} eV\n"
             f"  R²            : {self.r_squared:.4f}\n"
             f"  Peak model    : {self.peak_model}\n"
+            f"  Method        : {method_str}\n"
             f"  Sweep points  : {self.converged_mask.sum()} / {len(self.converged_mask)} converged"
         )
+
+
+def _prepare_dipole_data(
+    scan,
+    x_range      : tuple,
+    model        : str,
+    active_range : tuple,
+) -> tuple:
+    """
+    Shared setup for all dipole extraction methods.
+
+    Runs the per-sweep lineshape fits and constructs the masked arrays
+    (ef_fit, E_fit, sig_fit) ready for a linear fit.
+
+    Parameters
+    ----------
+    scan : AttoCubePLVabScan
+    x_range : tuple or None
+    model : str
+    active_range : tuple or None
+        Combined ef_range / Efield_range already resolved by the caller.
+
+    Returns
+    -------
+    ef : np.ndarray
+        Full electric field array (all sweeps).
+    peak_energies : np.ndarray
+        Fitted peak centers (all sweeps, NaN where not converged).
+    peak_errors : np.ndarray
+        1-sigma uncertainties on peak centers (NaN where not converged or
+        where the covariance was unusable).
+    converged : np.ndarray of bool
+    ef_fit, E_fit, sig_fit : np.ndarray
+        Masked arrays for the linear fit (converged + within active_range).
+        sig_fit contains NaN where the covariance was unusable; each
+        linear fitter handles these internally.
+    """
+    sweep_mask = None
+    if active_range is not None:
+        sweep_mask = (scan.ef >= active_range[0]) & (scan.ef <= active_range[1])
+
+    fit_results   = fit_scan_peak(
+        scan, x_axis="energy", x_range=x_range, model=model,
+        sweep_mask=sweep_mask,
+    )
+    peak_energies = np.array([r.params["center"] for r in fit_results])
+    peak_errors   = np.array([r.errors["center"]  for r in fit_results])
+    converged     = np.array([r.converged          for r in fit_results])
+
+    # Mark bad/zero errors as inf so they act as zero-weight points
+    peak_errors = np.where(
+        np.isfinite(peak_errors) & (peak_errors > 0), peak_errors, np.inf
+    )
+
+    ef   = scan.ef.copy()
+    mask = converged.copy()
+    if active_range is not None:
+        mask &= (ef >= active_range[0]) & (ef <= active_range[1])
+
+    if mask.sum() < 2:
+        raise ValueError(
+            f"Only {mask.sum()} usable sweep point(s) after applying field range "
+            f"and removing non-converged fits. Need at least 2."
+        )
+
+    # Restore inf → NaN for the returned full arrays (clean display)
+    peak_errors_out = np.where(np.isinf(peak_errors), np.nan, peak_errors)
+    # sig_fit passed to fitters: NaN where inf (each fitter handles it)
+    sig_fit = np.where(np.isinf(peak_errors[mask]), np.nan, peak_errors[mask])
+
+    return ef, peak_energies, peak_errors_out, converged, ef[mask], peak_energies[mask], sig_fit
+
+
+def _dipole_wls(
+    ef_fit  : np.ndarray,
+    E_fit   : np.ndarray,
+    sig_fit : np.ndarray,
+) -> tuple:
+    """
+    Weighted least squares (WLS / χ² minimisation) linear fit.
+
+    Each point is weighted by 1/σ², and ``absolute_sigma=True`` ensures
+    the covariance matrix has correct physical units so slope_err is a
+    genuine 1-sigma uncertainty in eV/(mV/nm).
+
+    Points with NaN sigma are given a very large sigma (effectively zero
+    weight) so they don't influence the fit but don't cause it to fail.
+    Falls back to unweighted polyfit if curve_fit fails.
+
+    Returns
+    -------
+    slope, slope_err, intercept, intercept_err
+    """
+    sig_safe = np.where(np.isfinite(sig_fit), sig_fit, 1e10)
+    try:
+        popt, pcov = curve_fit(
+            _linear, ef_fit, E_fit,
+            sigma=sig_safe, absolute_sigma=True,
+        )
+        slope, intercept         = popt
+        slope_err, intercept_err = np.sqrt(np.diag(pcov))
+    except (RuntimeError, ValueError):
+        warnings.warn("WLS fit failed; falling back to unweighted polyfit.")
+        slope, intercept         = np.polyfit(ef_fit, E_fit, 1)
+        slope_err = intercept_err = np.nan
+    return slope, slope_err, intercept, intercept_err
+
+
+def _dipole_minmax(
+    ef_fit  : np.ndarray,
+    E_fit   : np.ndarray,
+    sig_fit : np.ndarray,
+) -> tuple:
+    """
+    Min/max slope method (extremal fit).
+
+    Finds the steepest and shallowest lines still consistent with the
+    data by solving a linear program with per-point slack variables s_i ≥ 0:
+
+        minimise / maximise   slope
+        subject to            slope·F_i + intercept ≤ E_i + σ_i + s_i
+                              slope·F_i + intercept ≥ E_i - σ_i - s_i
+                              s_i ≥ 0  for all i
+
+    The slack terms penalise constraint violations so the LP is always
+    feasible. A large penalty (1e6) on Σ s_i discourages slack from being
+    used except where unavoidable (e.g. a point whose noise exceeds σ_i).
+
+    Points with NaN σ are skipped — they impose no constraint.
+
+    The best-fit slope and intercept come from an unweighted polyfit of
+    the valid points.
+
+    Returns
+    -------
+    slope, slope_err, intercept, intercept_err
+
+    Notes
+    -----
+    slope_err     = (slope_max - slope_min) / 2
+    intercept_err = (intercept_max - intercept_min) / 2
+    """
+    from scipy.optimize import linprog
+
+    finite = np.isfinite(sig_fit)
+    ef_v, E_v, sig_v = ef_fit[finite], E_fit[finite], sig_fit[finite]
+    n = len(ef_v)
+
+    if n < 2:
+        warnings.warn("minmax: fewer than 2 finite-error points; returning NaN errors.")
+        slope, intercept = np.polyfit(ef_fit, E_fit, 1)
+        return slope, np.nan, intercept, np.nan
+
+    # Variables: x = [slope, intercept, s_0, ..., s_{n-1}]
+    # Constraints (2n inequalities):
+    #   upper:  slope·F_i + intercept - s_i ≤  E_i + σ_i
+    #   lower: -slope·F_i - intercept - s_i ≤ -(E_i - σ_i)
+    A_ub = np.vstack([
+        np.hstack([np.column_stack([ ef_v,  np.ones(n)]), -np.eye(n)]),
+        np.hstack([np.column_stack([-ef_v, -np.ones(n)]), -np.eye(n)]),
+    ])
+    b_ub    = np.concatenate([E_v + sig_v, -(E_v - sig_v)])
+    bounds  = [(None, None), (None, None)] + [(0, None)] * n
+
+    slack_penalty = 1e6
+    slopes, intercepts = [], []
+    for sign in (+1, -1):   # maximise then minimise slope
+        c     = np.zeros(2 + n)
+        c[0]  = sign
+        c[2:] = slack_penalty
+        res = linprog(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method="highs")
+        if res.success:
+            slopes.append(res.x[0])
+            intercepts.append(res.x[1])
+        else:
+            warnings.warn(f"minmax linprog did not converge (sign={sign:+d}).")
+            slopes.append(np.nan)
+            intercepts.append(np.nan)
+
+    slope_max, slope_min         = max(slopes), min(slopes)
+    intercept_max, intercept_min = max(intercepts), min(intercepts)
+
+    slope, intercept = np.polyfit(ef_v, E_v, 1)
+    slope_err        = (slope_max - slope_min) / 2.0
+    intercept_err    = (intercept_max - intercept_min) / 2.0
+
+    return slope, slope_err, intercept, intercept_err
+
+
+def _dipole_bootstrap(
+    ef_fit      : np.ndarray,
+    E_fit       : np.ndarray,
+    sig_fit     : np.ndarray,
+    n_bootstrap : int = 2000,
+    rng         : np.random.Generator = None,
+) -> tuple:
+    """
+    Bootstrap resampling of the linear slope.
+
+    For each iteration, each energy point is perturbed by a Gaussian
+    draw scaled by its 1-sigma uncertainty:
+
+        E'_i = E_i + ε_i,   ε_i ~ N(0, σ_i)
+
+    A weighted least squares line is then fitted to the perturbed dataset.
+    The slope uncertainty is the standard deviation of the resulting slope
+    distribution. The best-fit slope and intercept come from a single WLS
+    fit to the unperturbed data.
+
+    Points with NaN σ receive zero perturbation (their uncertainty is
+    unknown, so they are kept fixed) and very large sigma in the WLS
+    weight (effectively zero weight).
+
+    Parameters
+    ----------
+    ef_fit, E_fit, sig_fit : np.ndarray
+    n_bootstrap : int
+        Number of resampling iterations. Default 2000.
+    rng : np.random.Generator, optional
+        For reproducibility: pass ``np.random.default_rng(seed)``.
+
+    Returns
+    -------
+    slope, slope_err, intercept, intercept_err
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    slope, _, intercept, _ = _dipole_wls(ef_fit, E_fit, sig_fit)
+
+    sig_perturb = np.where(np.isfinite(sig_fit), sig_fit, 0.0)
+    sig_wls     = np.where(np.isfinite(sig_fit), sig_fit, 1e10)
+
+    boot_slopes     = np.empty(n_bootstrap)
+    boot_intercepts = np.empty(n_bootstrap)
+
+    for i in range(n_bootstrap):
+        E_perturbed = E_fit + rng.normal(0.0, sig_perturb)
+        try:
+            popt, _ = curve_fit(
+                _linear, ef_fit, E_perturbed,
+                sigma=sig_wls, absolute_sigma=True,
+            )
+            boot_slopes[i], boot_intercepts[i] = popt
+        except (RuntimeError, ValueError):
+            boot_slopes[i]     = np.nan
+            boot_intercepts[i] = np.nan
+
+    slope_err     = np.nanstd(boot_slopes)
+    intercept_err = np.nanstd(boot_intercepts)
+
+    return slope, slope_err, intercept, intercept_err
 
 
 def extract_dipole_length(
@@ -450,6 +712,9 @@ def extract_dipole_length(
     model        : str   = "lorentzian",
     ef_range     : tuple = None,
     Efield_range : tuple = None,
+    method       : str   = "wls",
+    n_bootstrap  : int   = 2000,
+    rng          : np.random.Generator = None,
 ) -> DipoleResult:
     """
     Extract the excitonic dipole length from the DC Stark shift in a
@@ -463,8 +728,7 @@ def extract_dipole_length(
        per-point uncertainty σ from the covariance matrix.
     2. Optionally restrict the field range used for the linear fit to
        *ef_range* (e.g. to exclude the non-linear high-field regime).
-    3. Perform a weighted linear fit E(F) = slope · F + intercept, using
-       per-point weights 1/σ². Non-converged sweep points are excluded.
+    3. Fit a line E(F) = slope · F + intercept using the chosen *method*.
     4. Derive the dipole length and propagate uncertainties.
 
     .. note::
@@ -489,6 +753,34 @@ def extract_dipole_length(
         Restrict the linear fit to this field range.
     Efield_range : tuple of (F_min, F_max) in mV/nm, optional
         Alias for *ef_range*. Takes precedence if both are supplied.
+    method : {"wls", "minmax", "bootstrap"}
+        Linear-fit method used to extract the slope and its uncertainty:
+
+        ``"wls"``
+            Weighted least squares (χ² minimisation). Each point is
+            weighted by 1/σ². The slope uncertainty comes from the
+            covariance matrix with ``absolute_sigma=True``. Statistically
+            optimal when the σ_i are accurate and errors are Gaussian.
+
+        ``"minmax"``
+            Extremal fit (min/max slope). Finds the steepest and
+            shallowest lines still consistent with all error bars via a
+            linear program. The uncertainty is half the range between
+            these extremes. Conservative and visually intuitive — the two
+            extreme lines can be overlaid directly on the Stark-shift plot.
+
+        ``"bootstrap"``
+            Bootstrap resampling. Perturbs each E_i by a Gaussian draw
+            scaled by σ_i, refits the slope n_bootstrap times, and
+            reports the standard deviation of the slope distribution.
+            Makes no assumptions beyond Gaussian per-point errors.
+
+    n_bootstrap : int
+        Number of bootstrap iterations. Only used when
+        ``method="bootstrap"``. Default 2000.
+    rng : np.random.Generator, optional
+        Random number generator for reproducibility when using bootstrap,
+        e.g. ``np.random.default_rng(42)``.
 
     Returns
     -------
@@ -497,72 +789,58 @@ def extract_dipole_length(
     Raises
     ------
     ValueError
-        If ``scan.ef`` is ``None`` or fewer than 2 usable sweep points remain.
+        If ``scan.ef`` is ``None``, fewer than 2 usable sweep points remain,
+        or *method* is not recognised.
 
     Examples
     --------
+    >>> # Default: weighted least squares
     >>> result = extract_dipole_length(scan, x_range=(1.30, 1.42))
+
+    >>> # Min/max slope (conservative, visually intuitive)
+    >>> result = extract_dipole_length(scan, x_range=(1.30, 1.42), method="minmax")
+
+    >>> # Bootstrap with fixed seed for reproducibility
+    >>> result = extract_dipole_length(
+    ...     scan, x_range=(1.30, 1.42),
+    ...     method="bootstrap", n_bootstrap=5000,
+    ...     rng=np.random.default_rng(42),
+    ... )
     >>> print(result)
     """
+    _METHODS = ("wls", "minmax", "bootstrap")
+    if method not in _METHODS:
+        raise ValueError(
+            f"method='{method}' is not recognised. Choose from {_METHODS}."
+        )
 
     if scan.ef is None:
         raise ValueError(
             "scan.ef is None — supply a DeviceGeometry when loading the scan."
         )
 
-    # Efield_range restricts which sweeps are fitted at all
     active_range = Efield_range if Efield_range is not None else ef_range
-    if active_range is not None:
-        sweep_mask = (scan.ef >= active_range[0]) & (scan.ef <= active_range[1])
-    else:
-        sweep_mask = None
 
-    # --- Step 1: lineshape fit at selected sweep points only ---
-    # fit_scan_peak uses scan.best_energy_spectra, which automatically
-    # returns the BG-corrected array when one was configured at load time.
-    fit_results = fit_scan_peak(
-        scan, x_axis="energy", x_range=x_range, model=model,
-        sweep_mask=sweep_mask,
+    # --- Shared setup: lineshape fits + masking ---
+    ef, peak_energies, peak_errors, converged, ef_fit, E_fit, sig_fit = (
+        _prepare_dipole_data(scan, x_range, model, active_range)
     )
-    peak_energies = np.array([r.params["center"] for r in fit_results])
-    peak_errors   = np.array([r.errors["center"]  for r in fit_results])
-    converged     = np.array([r.converged          for r in fit_results])
 
-    peak_errors = np.where(np.isfinite(peak_errors) & (peak_errors > 0),
-                           peak_errors, np.inf)
-
-    # --- Step 2: mask for linear fit (converged + within Efield_range) ---
-    ef   = scan.ef.copy()
-    mask = converged.copy()
-    if active_range is not None:
-        mask &= (ef >= active_range[0]) & (ef <= active_range[1])
-
-    if mask.sum() < 2:
-        raise ValueError(
-            f"Only {mask.sum()} usable sweep point(s) after applying Efield_range "
-            f"and removing non-converged fits. Need at least 2."
+    # --- Linear fit: dispatch to chosen method ---
+    if method == "wls":
+        slope, slope_err, intercept, intercept_err = _dipole_wls(
+            ef_fit, E_fit, sig_fit
+        )
+    elif method == "minmax":
+        slope, slope_err, intercept, intercept_err = _dipole_minmax(
+            ef_fit, E_fit, sig_fit
+        )
+    else:  # bootstrap
+        slope, slope_err, intercept, intercept_err = _dipole_bootstrap(
+            ef_fit, E_fit, sig_fit, n_bootstrap=n_bootstrap, rng=rng,
         )
 
-    ef_fit  = ef[mask]
-    E_fit   = peak_energies[mask]
-    sig_fit = peak_errors[mask]
-
-    # --- Step 3: weighted linear fit ---
-    try:
-        popt, pcov = curve_fit(
-            _linear, ef_fit, E_fit,
-            sigma=sig_fit, absolute_sigma=True,
-        )
-        slope, intercept         = popt
-        slope_err, intercept_err = np.sqrt(np.diag(pcov))
-    except (RuntimeError, ValueError):
-        warnings.warn(
-            "Weighted linear fit failed; falling back to unweighted polyfit."
-        )
-        slope, intercept = np.polyfit(ef_fit, E_fit, 1)
-        slope_err = intercept_err = np.nan
-
-    # --- Step 4: derived quantities ---
+    # --- Derived quantities ---
     r_squared         = _r_squared(E_fit, slope * ef_fit + intercept)
     dipole_length     = abs(slope) * 1000.0
     dipole_length_err = abs(slope_err) * 1000.0 if np.isfinite(slope_err) else np.nan
@@ -570,7 +848,7 @@ def extract_dipole_length(
     return DipoleResult(
         ef                     = ef,
         peak_energies          = peak_energies,
-        peak_errors            = np.where(np.isinf(peak_errors), np.nan, peak_errors),
+        peak_errors            = peak_errors,
         slope                  = slope,
         slope_err              = slope_err,
         intercept              = intercept,
@@ -581,4 +859,6 @@ def extract_dipole_length(
         r_squared              = r_squared,
         peak_model             = model,
         converged_mask         = converged,
+        method                 = method,
+        n_bootstrap            = n_bootstrap if method == "bootstrap" else None,
     )

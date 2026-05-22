@@ -34,12 +34,12 @@ EPS_TMDC = {
 # Rough literature values for encapsulated monolayers at low temperature;
 # useful as starting guesses for fits. Update as needed.
 EXCITON_ENERGY = {
-    "WS2"   : {"XA0": 2.02, # Scientific Reports 5, 9218 (2015)
+    "WS2"   : {"XA0": 2.02, # Scientific Reports 5, 9218 (2015), Nature volume 513, pages 214–218 (2014)
                "XB0": 2.41, # Phys. Rev. Lett. 113, 076802 (2014). Value at 5K. 
                },
-    "WSe2"  : {"XA0": 2.35, # Phys. Rev. Lett. 114, 097403 (2015). Value at 4K
+    "WSe2"  : {"XA0": 1.75, # Nature Nanotechnology volume 8, pages 634–638 (2013)
                 },
-    "MoSe2" : {"XA0": 2.18, # Nat Mat. 13, 1091–1095 (2014). Value at 5 K.
+    "MoSe2" : {"XA0": 1.66, # Nature Communications volume 4, Article number: 1474 (2013). Value at 20 K
                },
     "MoS2"  : {"XA0": 1.86, # Phys. Rev. B 94, 075440 (2016), Phys. Rev. Lett. 105, 136805 (2010)
                "XB0" : 2.00, # Phys. Rev. B 94, 075440 (2016).

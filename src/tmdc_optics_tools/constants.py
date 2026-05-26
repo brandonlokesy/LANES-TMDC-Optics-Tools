@@ -44,8 +44,15 @@ EXCITON_ENERGY = {
     "MoS2"  : {"XA0": 1.86, # Phys. Rev. B 94, 075440 (2016), Phys. Rev. Lett. 105, 136805 (2010)
                "XB0" : 2.00, # Phys. Rev. B 94, 075440 (2016).
                },
-
 }
+
+INTERLAYER_EXCITON_ENERGY = {
+    "WSe2/MoS2" : 1.55, # Proc. Natl. Acad. Sci. U.S.A. 111 (17) 6198-6202 (2014)
+}
+
+for heterostructure in INTERLAYER_EXCITON_ENERGY.keys():
+    layer1, layer2 = heterostructure.split("/")
+    INTERLAYER_EXCITON_ENERGY[layer2 + "/" + layer1] = INTERLAYER_EXCITON_ENERGY[heterostructure]
 
 BINDING_ENERGY = {
     "MoS2" : 0.310, # Phys. Rev. B 94, 075440 (2016)

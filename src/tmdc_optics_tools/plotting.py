@@ -121,7 +121,7 @@ def plot_pl_map_Vab_scan(
     median_kernel  : int   = 3,
     clim           : tuple = None,
     colorbar       : bool  = True,
-    colorbar_label : str   = "PL intensity (counts)",
+    colorbar_label : str   = "PL intensity (norm.)",
     rescale_img    : bool  = True,
 ) -> tuple:
     """
@@ -190,6 +190,7 @@ def plot_pl_map_Vab_scan(
     if colorbar:
         cb = fig.colorbar(mesh, ax=ax, pad=0.02)
         cb.set_label(colorbar_label)
+        cb.set_ylabel("PL intensity (norm.)" if rescale_img else "PL intensity (counts)")
 
     return fig, ax, mesh
 

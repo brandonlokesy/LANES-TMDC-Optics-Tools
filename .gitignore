@@ -12,3 +12,6 @@ site/
 
 # VSCode — share launch configs, ignore personal settings
 .vscode/settings.json
+
+# Cygwin/MSYS bash crash dumps
+*.stackdump

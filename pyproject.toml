@@ -18,6 +18,12 @@ dependencies = [
 
 [project.optional-dependencies]
 colormaps = ["cmcrameri"]
+docs = [
+    "mkdocs-material",
+    "mkdocstrings[python]",
+    "black",
+    "cmcrameri",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

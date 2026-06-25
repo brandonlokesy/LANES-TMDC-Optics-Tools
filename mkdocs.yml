@@ -1,0 +1,60 @@
+site_name: TMDC Optics Tools
+site_description: Toolkit for gate-dependent PL spectroscopy on TMDC devices
+site_url: https://brandonlokesy.github.io/LANES-TMDC-Optics-Tools/
+repo_url: https://github.com/brandonlokesy/LANES-TMDC-Optics-Tools
+repo_name: brandonlokesy/LANES-TMDC-Optics-Tools
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: numpy
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            members_order: source
+            separate_signature: true
+            signature_crossrefs: true
+            merge_init_into_class: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.snippets:
+      base_path: ["."]
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - API Reference:
+      - Loaders: api/loaders.md
+      - Processing: api/processing.md
+      - Fitting: api/fitting.md
+      - Plotting: api/plotting.md
+      - Constants: api/constants.md

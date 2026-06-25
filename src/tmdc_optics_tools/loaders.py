@@ -939,14 +939,12 @@ class AttoCubePLScanRealSpace:
         """
         Return True if the first line of *path* is parseable as floats.
         Spectral scan files begin with a text header and return False.
+
+        Delegates to :func:`tmdc_optics_tools.converters.is_image_csv` so the
+        detection logic has a single source of truth.
         """
-        try:
-            with open(path, "r") as fh:
-                first_line = fh.readline()
-            float(first_line.strip().split(",")[0])
-            return True
-        except (ValueError, OSError):
-            return False
+        from .converters import is_image_csv
+        return is_image_csv(path)
 
     def load_frame(self, idx: int) -> np.ndarray:
         """Load and return a single frame as a 2-D NumPy array."""

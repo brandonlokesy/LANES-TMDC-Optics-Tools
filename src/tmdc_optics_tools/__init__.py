@@ -11,6 +11,7 @@ loaders     Data loaders (DeviceGeometry, AttoCubePLScan).
 plotting    Publication-ready figure style and common plot types.
 fitting     Spectral fitting (Lorentzian, Gaussian, multi-peak).
 processing  Smoothing, normalisation, spectral conversions.
+converters  CSV -> HDF5 / TIFF converters for AttoCube exports.
 
 Quick start
 -----------
@@ -37,7 +38,16 @@ from .loaders import (
     SingleSpectrum,
     SingleImage,
 )
-from . import processing
+from . import processing, converters
+from .converters import (
+    convert_csv,
+    convert_path,
+    convert_spectral_csv_to_hdf5,
+    convert_image_csv_to_tiff,
+    convert_image_dir_to_tiff_stack,
+    parse_spectral_csv,
+    is_image_csv,
+)
 
 __all__ = [
     "StackLayer",
@@ -50,4 +60,12 @@ __all__ = [
     "plotting",
     "fitting",
     "processing",
+    "converters",
+    "convert_csv",
+    "convert_path",
+    "convert_spectral_csv_to_hdf5",
+    "convert_image_csv_to_tiff",
+    "convert_image_dir_to_tiff_stack",
+    "parse_spectral_csv",
+    "is_image_csv",
 ]

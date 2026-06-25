@@ -14,10 +14,16 @@ dependencies = [
     "matplotlib",
     "pandas",
     "scikit-image",
+    "h5py",
+    "tifffile",
 ]
+
+[project.scripts]
+tmdc-convert = "tmdc_optics_tools.converters:main"
 
 [project.optional-dependencies]
 colormaps = ["cmcrameri"]
+dev = ["pytest"]
 docs = [
     "mkdocs-material",
     "mkdocstrings[python]",

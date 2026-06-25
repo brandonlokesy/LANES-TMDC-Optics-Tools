@@ -189,8 +189,8 @@ def plot_pl_map_Vab_scan(
 
     if colorbar:
         cb = fig.colorbar(mesh, ax=ax, pad=0.02)
-        cb.set_label(colorbar_label)
-        cb.set_ylabel("PL intensity (norm.)" if rescale_img else "PL intensity (counts)")
+        # cb.set_label(colorbar_label)
+        cb.set_label("PL intensity (norm.)" if rescale_img else "PL intensity (counts)")
 
     return fig, ax, mesh
 

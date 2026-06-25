@@ -258,6 +258,61 @@ def plot_spectrum(
     return fig, ax, line
 
 
+def plot_single_spectrum(
+    spectrum,
+    ax          = None,
+    figsize     : tuple = (5, 3),
+    dpi         : int   = None,
+    x_axis      : str   = "wavelength",
+    normalize   : bool  = False,
+    label       : str   = None,
+    **line_kwargs,
+) -> tuple:
+    """
+    Plot a single PL spectrum from a
+    :class:`~tmdc_optics_tools.loaders.SingleSpectrum`.
+
+    Parameters
+    ----------
+    spectrum : SingleSpectrum
+        Any object exposing ``wavelength``, ``energy``, ``best_spectra`` and
+        ``best_energy_spectra`` attributes. Background-corrected arrays are
+        used automatically when a background region was set at load time.
+    ax : matplotlib.axes.Axes, optional
+        Creates a new figure if ``None``.
+    x_axis : {"wavelength", "energy"}
+        Axis to plot against. Default ``"wavelength"`` (the native axis).
+    normalize : bool
+        Normalise the spectrum to its peak value.
+    label : str, optional
+        Legend label. A legend is shown only when a label is given.
+    **line_kwargs
+        Passed directly to ``ax.plot``.
+
+    Returns
+    -------
+    fig, ax, line
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.get_figure()
+
+    x, xlabel = _resolve_x_axis(spectrum, x_axis)
+    y = (spectrum.best_energy_spectra if x_axis == "energy"
+         else spectrum.best_spectra).astype(float)
+    if normalize:
+        y = y / y.max()
+
+    line, = ax.plot(x, y, label=label, **line_kwargs)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("PL intensity (norm.)" if normalize else "PL intensity (counts)")
+    if label:
+        ax.legend(frameon=False)
+
+    return fig, ax, line
+
+
 # ---------------------------------------------------------------------------
 # Breakdown / leakage current monitor
 # ---------------------------------------------------------------------------
@@ -413,6 +468,76 @@ def plot_real_space_PL_map(
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     return fig, ax
+
+
+def plot_image(
+    image,
+    ax             = None,
+    figsize        : tuple = (6, 5),
+    dpi            : int   = None,
+    cmap           : str   = "vik",
+    colorbar       : bool  = True,
+    colorbar_label : str   = "Intensity (counts)",
+    rescale_img    : bool  = False,
+    clim           : tuple = None,
+    xlabel         : str   = "x (px)",
+    ylabel         : str   = "y (px)",
+    show_axes      : bool  = True,
+) -> tuple:
+    """
+    Plot a single 2-D image with a colormap and an optional colorbar.
+
+    Parameters
+    ----------
+    image : np.ndarray or object with ``.img``
+        A 2-D array, or any object exposing a 2-D ``img`` attribute
+        (e.g. :class:`~tmdc_optics_tools.loaders.SingleImage`,
+        :class:`~tmdc_optics_tools.loaders.AttoCubeSampleImage`).
+    ax : matplotlib.axes.Axes, optional
+        Creates a new figure if ``None``.
+    cmap : str
+        Colormap name passed to :func:`get_cmap`.
+    colorbar : bool
+        Show a colorbar alongside the image.
+    colorbar_label : str
+        Colorbar label (overridden to "Intensity (norm.)" when *rescale_img*).
+    rescale_img : bool
+        Rescale intensity to [0, 1] before plotting.
+    clim : tuple of (vmin, vmax), optional
+        Colour axis limits. Auto-scaled if ``None``.
+    xlabel, ylabel : str
+        Axis labels (ignored when *show_axes* is ``False``).
+    show_axes : bool
+        Show axis ticks/labels. Set ``False`` to hide them entirely.
+
+    Returns
+    -------
+    fig, ax, im
+    """
+    img = image.img if hasattr(image, "img") else np.asarray(image)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.get_figure()
+
+    if rescale_img:
+        img = rescale_intensity(img, in_range="image", out_range=(0, 1))
+
+    vmin, vmax = clim if clim is not None else (None, None)
+    im = ax.imshow(img, cmap=get_cmap(cmap), vmin=vmin, vmax=vmax)
+
+    if show_axes:
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+    else:
+        ax.axis("off")
+
+    if colorbar:
+        cb = fig.colorbar(im, ax=ax, pad=0.02)
+        cb.set_label("Intensity (norm.)" if rescale_img else colorbar_label)
+
+    return fig, ax, im
 
 
 def _format_frame_title(

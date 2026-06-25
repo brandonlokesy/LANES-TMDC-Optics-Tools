@@ -724,6 +724,164 @@ class AttoCubePLVabScan:
 
 
 # ---------------------------------------------------------------------------
+# SingleSpectrum
+# ---------------------------------------------------------------------------
+
+class SingleSpectrum:
+    """
+    Single PL spectrum loaded from a 2-row CSV.
+
+    The file must contain exactly two comma-separated rows:
+
+    * **Row 0** : wavelength axis in nm (ascending).
+    * **Row 1** : counts (PL intensity).
+
+    Attribute names mirror :class:`AttoCubePLVabScan` so the same plotting
+    helpers (e.g. :func:`~tmdc_optics_tools.plotting.plot_single_spectrum`,
+    :func:`~tmdc_optics_tools.plotting._resolve_x_axis`) work unchanged.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the ``.csv`` file.
+    apply_jacobian : bool
+        If ``True``, apply the ``dλ/dE = λ²/hc`` density correction when
+        building :attr:`energy_spectra`, conserving integrated intensity
+        under the wavelength → energy change of variables. Default ``False``.
+    bg_region_nm : tuple of (wl_min, wl_max), optional
+        Wavelength range in **nm** used to estimate the background level.
+        The mean counts in this window are subtracted in wavelength space
+        *before* any Jacobian correction is applied (the correct order of
+        operations). Mutually exclusive with *bg_region_eV*.
+    bg_region_eV : tuple of (E_min, E_max), optional
+        Same as *bg_region_nm* but specified in **eV** (internally converted
+        to a wavelength range, with the order flipped). Mutually exclusive
+        with *bg_region_nm*.
+
+    Attributes
+    ----------
+    wavelength : np.ndarray, shape (n_pixels,)
+        Wavelength axis in nm (ascending).
+    spectra : np.ndarray, shape (n_pixels,)
+        Raw counts in wavelength space. Never modified after loading.
+    spectra_bg : np.ndarray or None, shape (n_pixels,)
+        Background-subtracted counts in wavelength space, or ``None`` when no
+        background region was supplied.
+    energy : np.ndarray, shape (n_pixels,)
+        Photon energy axis in eV (ascending).
+    energy_spectra : np.ndarray, shape (n_pixels,)
+        Raw counts remapped to the energy axis, Jacobian-corrected if
+        *apply_jacobian* is ``True``. No background subtraction.
+    energy_spectra_bg : np.ndarray or None, shape (n_pixels,)
+        Background-subtracted version of :attr:`energy_spectra` (background
+        removed in wavelength space before the Jacobian). ``None`` when no
+        background region was supplied.
+    bg_region_nm : tuple or None
+        The background window actually used, always in nm.
+    apply_jacobian : bool
+    path : str
+
+    Notes
+    -----
+    Use :attr:`best_spectra` / :attr:`best_energy_spectra` in downstream code
+    to automatically pick the background-corrected array when one is available
+    and fall back to the raw array otherwise.
+    """
+
+    def __init__(
+        self,
+        path           : str,
+        apply_jacobian : bool  = False,
+        bg_region_nm   : tuple = None,
+        bg_region_eV   : tuple = None,
+    ):
+        if bg_region_nm is not None and bg_region_eV is not None:
+            raise ValueError(
+                "Provide at most one of bg_region_nm or bg_region_eV, not both."
+            )
+
+        arr = np.loadtxt(path, delimiter=",")
+        if arr.ndim != 2 or arr.shape[0] != 2:
+            raise ValueError(
+                f"Expected a 2-row CSV [wavelength; counts], got array of "
+                f"shape {arr.shape} from '{path}'."
+            )
+
+        self.path           = str(path)
+        self.apply_jacobian = apply_jacobian
+
+        # Resolve background window to nm (always work in wavelength space).
+        # E and λ are inversely related, so the nm interval order flips.
+        if bg_region_eV is not None:
+            self.bg_region_nm = (HC_EV_NM / bg_region_eV[1],   # E_max → λ_min
+                                 HC_EV_NM / bg_region_eV[0])   # E_min → λ_max
+        else:
+            self.bg_region_nm = bg_region_nm                   # may be None
+
+        self.wavelength = arr[0]                      # nm, ascending
+        self.spectra    = arr[1].astype(float)        # raw counts, wavelength space
+
+        # Energy axis (ascending) and matching energy-space spectra.
+        energy        = HC_EV_NM / self.wavelength    # descending
+        self._sort_idx = np.argsort(energy)
+        self.energy   = energy[self._sort_idx]
+
+        self.energy_spectra = self._to_energy(self.spectra)
+
+        # Background subtracted in wavelength space first, then to energy.
+        if self.bg_region_nm is not None:
+            self.spectra_bg = subtract_background(
+                self.spectra, bg_region=self.bg_region_nm,
+                x=self.wavelength, axis=0,
+            )
+            self.energy_spectra_bg = self._to_energy(self.spectra_bg)
+        else:
+            self.spectra_bg        = None
+            self.energy_spectra_bg = None
+
+    # --- Private helpers ---------------------------------------------------
+
+    def _to_energy(self, spectra: np.ndarray) -> np.ndarray:
+        """Apply the Jacobian (if enabled) and reorder onto the energy axis."""
+        y = (jacobian_correction_wvl2E(spectra, self.wavelength, axis=0)
+             if self.apply_jacobian else spectra)
+        return y[self._sort_idx]
+
+    # --- Convenience properties --------------------------------------------
+
+    @property
+    def n_pixels(self) -> int:
+        """Number of spectrometer pixels."""
+        return self.spectra.shape[0]
+
+    @property
+    def best_spectra(self) -> np.ndarray:
+        """Background-subtracted wavelength-space counts if available, else raw."""
+        return self.spectra_bg if self.spectra_bg is not None else self.spectra
+
+    @property
+    def best_energy_spectra(self) -> np.ndarray:
+        """Background-subtracted energy-space counts if available, else raw."""
+        return (self.energy_spectra_bg
+                if self.energy_spectra_bg is not None
+                else self.energy_spectra)
+
+    def __repr__(self) -> str:
+        bg_str = (
+            f"  BG region: {self.bg_region_nm[0]:.1f} – {self.bg_region_nm[1]:.1f} nm\n"
+            if self.bg_region_nm is not None else ""
+        )
+        return (
+            f"SingleSpectrum — {self.n_pixels} pixels\n"
+            f"  File     : {self.path}\n"
+            f"  λ range  : {self.wavelength.min():.1f} – {self.wavelength.max():.1f} nm"
+            f"  ({self.energy.min():.3f} – {self.energy.max():.3f} eV)\n"
+            f"{bg_str}"
+            f"  Jacobian : {'applied' if self.apply_jacobian else 'not applied'}\n"
+        )
+
+
+# ---------------------------------------------------------------------------
 # AttoCubePLScanRealSpace
 # ---------------------------------------------------------------------------
 
@@ -1004,4 +1162,32 @@ class AttoCubeLaserReferenceImage(_AttoCubeImage):
             f"  Center                : ({self.center_x:.1f}, {self.center_y:.1f}) px\n"
             f"  Estimated 1/e² Radius : {self.radius:.1f} px\n"
             f"  Estimated 1/e² Diameter: {2 * self.radius:.1f} px"
+        )
+
+
+# ---------------------------------------------------------------------------
+# SingleImage
+# ---------------------------------------------------------------------------
+
+class SingleImage(_AttoCubeImage):
+    """
+    Generic single 2-D image loaded from a numeric CSV grid.
+
+    Exposes the image as :attr:`img`, so it can be displayed in grayscale via
+    the inherited :meth:`show_image` or with a colormap (and optional colorbar)
+    via :func:`~tmdc_optics_tools.plotting.plot_image`.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the CSV image file (numeric grid, comma-delimited).
+    """
+
+    def __init__(self, path: str):
+        super().__init__(path, laser_ref=None)
+
+    def __repr__(self) -> str:
+        return (
+            f"SingleImage — {self.img.shape[0]} × {self.img.shape[1]} px\n"
+            f"  File : {self.path}\n"
         )

@@ -29,13 +29,23 @@ __author__  = "Brandon Loke"
 
 from . import constants, fitting, plotting
 
-from .loaders import DeviceGeometry, AttoCubePLVabScan, AttoCubePLScanRealSpace, StackLayer
+from .loaders import (
+    DeviceGeometry,
+    AttoCubePLVabScan,
+    AttoCubePLScanRealSpace,
+    StackLayer,
+    SingleSpectrum,
+    SingleImage,
+)
 from . import processing
 
 __all__ = [
     "StackLayer",
     "DeviceGeometry",
     "AttoCubePLVabScan",
+    "AttoCubePLScanRealSpace",
+    "SingleSpectrum",
+    "SingleImage",
     "constants",
     "plotting",
     "fitting",

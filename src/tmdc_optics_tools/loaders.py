@@ -487,8 +487,22 @@ class AttoCubePLVabScan:
         Excitation power in µW.
     ef : np.ndarray or None, shape (n_sweeps,)
         Displacement field in mV/nm, or ``None`` if no geometry supplied.
+    parameters : dict[str, np.ndarray]
+        Every labeled parameter row from the CSV, mapped to its per-sweep
+        array in the file's **raw** units (one entry per row, shape
+        ``(n_sweeps,)``).  Exposes the full instrument state — e.g.
+        ``"Scanner X"``, ``"Scanner Y"``, ``"Galvo_X"``, ``"Galvo_Y"``,
+        ``"Excitation Power"``, ``"T"`` — beyond the curated attributes above.
+        The curated attributes (:attr:`v_top`, :attr:`power`, …) are scaled
+        views into this store; the values here are unscaled.
     geometry : DeviceGeometry or None
     path : str
+
+    Notes
+    -----
+    Use :attr:`parameter_labels` to list every available row name and
+    :meth:`get_parameter` (or ``scan["label"]``) to pull any one of them, with
+    an optional ``scale`` factor for unit conversion.
 
     Examples
     --------
@@ -496,6 +510,11 @@ class AttoCubePLVabScan:
 
     >>> # No background subtraction, Jacobian applied (default)
     >>> scan = AttoCubePLVabScan("myscan.csv", geometry=geom)
+
+    >>> # Discover and pull any instrument parameter
+    >>> scan.parameter_labels                 # ['Excitation Power', 'Galvo_X', ...]
+    >>> scan.get_parameter("Scanner X")       # (n_sweeps,) raw units
+    >>> scan["Galvo_Y"]                        # sugar for get_parameter
 
     >>> # Background from a wavelength window, Jacobian applied
     >>> scan = AttoCubePLVabScan("myscan.csv", geometry=geom, bg_region_nm=(930, 960))
@@ -571,11 +590,24 @@ class AttoCubePLVabScan:
         roi2_cols = np.arange(3, n_cols, 4)
         spec_cols = roi1_cols if roi == 1 else roi2_cols
 
-        self.v_top = self._get_row(d, par_cols, top_gate_label)
-        self.v_bot = self._get_row(d, par_cols, bot_gate_label)
-        self.power = self._get_row(d, par_cols, power_label) * power_scale
-        self.Ich1  = self._get_row(d, par_cols, ich1_label) * 1e9   # → nA
-        self.Ich2  = self._get_row(d, par_cols, ich2_label) * 1e9   # → nA
+        # Generic parameter store: every labeled row -> per-sweep array, in the
+        # file's raw units.  This exposes the full instrument state (Scanner X/Y,
+        # Galvo X/Y, temperature, laser settings, …), not just the curated few.
+        # The Par column of each sweep block carries the scalar for that row.
+        self.parameters = {
+            str(label): d[i, par_cols]
+            for i, label in enumerate(self._row_labels)
+            if not pd.isna(label) and str(label).strip()
+        }
+
+        # Curated, unit-scaled convenience attributes (backward compatible).
+        # Sourced from the generic store via get_parameter, which raises a
+        # helpful KeyError listing the available labels if one is missing.
+        self.v_top = self.get_parameter(top_gate_label)
+        self.v_bot = self.get_parameter(bot_gate_label)
+        self.power = self.get_parameter(power_label, scale=power_scale)
+        self.Ich1  = self.get_parameter(ich1_label, scale=1e9)   # → nA
+        self.Ich2  = self.get_parameter(ich2_label, scale=1e9)   # → nA
 
         wl_raw   = d[:, wl_cols[0]]
         valid_px = np.isfinite(wl_raw)
@@ -657,17 +689,42 @@ class AttoCubePLVabScan:
     def _load_raw(path: str) -> pd.DataFrame:
         return pd.read_csv(path, header=0, index_col=0, low_memory=False)
 
-    def _get_row(
-        self, d: np.ndarray, col_idx: np.ndarray, label: str
-    ) -> np.ndarray:
-        if label not in self._row_labels:
+    def get_parameter(self, label: str, scale: float = 1.0) -> np.ndarray:
+        """
+        Return the per-sweep values for *label* as a NumPy array.
+
+        Parameters
+        ----------
+        label : str
+            Exact row label as it appears in the CSV, e.g. ``"Galvo_X"``,
+            ``"Scanner Y"``, ``"Excitation Power"``.  See
+            :attr:`parameter_labels` for the available names.
+        scale : float
+            Multiplicative factor applied to the raw values (e.g. unit
+            conversion).  Default ``1.0`` (raw units, as stored in the file).
+
+        Returns
+        -------
+        np.ndarray, shape (n_sweeps,)
+
+        Raises
+        ------
+        KeyError
+            If *label* is not present, with the available labels listed.
+        """
+        if label not in self.parameters:
             raise KeyError(
-                f"Label '{label}' not found in CSV rows. "
-                f"Available: {self._row_labels}"
+                f"Parameter '{label}' not found in CSV rows. "
+                f"Available: {self.parameter_labels}"
             )
-        return d[self._row_labels.index(label), col_idx]
+        return self.parameters[label] * scale
 
     # --- Convenience properties --------------------------------------------
+
+    @property
+    def parameter_labels(self) -> list:
+        """Sorted list of every parameter label available via :attr:`parameters`."""
+        return sorted(self.parameters)
 
     @property
     def n_sweeps(self) -> int:
@@ -705,6 +762,10 @@ class AttoCubePLVabScan:
                 else self.energy_spectra)
 
     # --- Dunder methods ----------------------------------------------------
+
+    def __getitem__(self, label: str) -> np.ndarray:
+        """Sugar for :meth:`get_parameter` — ``scan["Galvo_X"]``."""
+        return self.get_parameter(label)
 
     def __repr__(self) -> str:
         ef_str = (

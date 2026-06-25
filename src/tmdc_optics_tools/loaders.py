@@ -513,7 +513,7 @@ class AttoCubePLVabScan:
         geometry        : DeviceGeometry = None,
         bg_region_nm    : tuple = None,
         bg_region_eV    : tuple = None,
-        apply_jacobian  : bool  = True,
+        apply_jacobian  : bool  = False,
         top_gate_label  : str   = "V_A",
         bot_gate_label  : str   = "V_B",
         power_label     : str   = "Excitation Power",

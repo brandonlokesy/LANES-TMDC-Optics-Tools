@@ -28,7 +28,7 @@ A Python toolkit for gate-dependent photoluminescence spectroscopy on TMDC monol
 Clone the repository and install in editable mode:
 
 ```bash
-https://github.com/brandonlokesy/LANES-TMDC-Optics-Tools.git
+git clone https://github.com/brandonlokesy/LANES-TMDC-Optics-Tools.git
 cd LANES-TMDC-Optics-Tools
 pip install -e .
 ```

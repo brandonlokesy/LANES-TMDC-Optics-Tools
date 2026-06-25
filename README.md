@@ -2,6 +2,8 @@
 
 A Python toolkit for gate-dependent photoluminescence spectroscopy on TMDC monolayers and van der Waals heterostructure devices. Covers data loading from AttoCube cryogenic confocal setups, device geometry modelling, spectral processing, peak fitting, DC Stark shift and dipole length extraction, and publication-ready plotting and animation.
 
+📖 **Documentation:** https://brandonlokesy.github.io/LANES-TMDC-Optics-Tools/
+
 > ⚠️ **Alpha stage.** This library is under active development. Class names, function signatures, and module structure are all subject to change without notice. Pin to a specific commit if you need stability.
 
 ---

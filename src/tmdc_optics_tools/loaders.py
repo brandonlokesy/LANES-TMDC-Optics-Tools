@@ -273,9 +273,9 @@ class DeviceGeometry:
     # --- Derived quantities ------------------------------------------------
 
     @property
-    def eps_2d(self) -> float:
+    def eps_hs(self) -> float:
         """
-        Effective out-of-plane dielectric constant of the full heterostructure
+        Effective out-of-plane dielectric constant of the heterostructure (TMDCs and hBN)
         computed with the series-capacitor (harmonic-mean) model:
 
             d_total / ε_eff = Σ_i  d_i / ε_i
@@ -284,19 +284,25 @@ class DeviceGeometry:
         and bottom hBN — with their individual thicknesses and dielectric
         constants.
         """
+        slabs   = self._slabs()
+        d_hs = sum(layer.thickness for layer in slabs)
+        return d_hs / sum(layer.thickness / layer.eps for layer in slabs)
+    
+    @property
+    def eps_2d(self) -> float:
+        """
+        Effective out-of-plane dielectric constant of the TMDC layers
+        computed with the series-capacitor (harmonic-mean) model:
+
+            d_total / ε_eff = Σ_i  d_i / ε_i
+
+        This accounts for only TMDC layers in the stack with their individual thicknesses and dielectric
+        constants.
+        """
         tmdc_slabs   = self.tmdc_stack
         d_2d = sum(layer.thickness for layer in tmdc_slabs)
         return d_2d / sum(layer.thickness / layer.eps for layer in tmdc_slabs)
     
-    @property
-    def eps_hs(self) -> float:
-        """
-        Effective dielectric constant of the heterostructure region (TMDC layers
-        only, excluding hBN) computed with the series-capacitor model.
-        """
-        slabs   = self._slabs()
-        d_hs = sum(layer.thickness for layer in slabs)
-        return d_hs / sum(layer.thickness / layer.eps for layer in slabs)
 
     @property
     def optical_thickness(self) -> float:

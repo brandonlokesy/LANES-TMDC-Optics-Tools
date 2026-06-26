@@ -14,6 +14,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import matplotlib.patches as patches
+import matplotlib.patheffects as path_effects
 from skimage.exposure import rescale_intensity
 
 from . import processing
@@ -669,12 +670,15 @@ def animate_real_space_PL_map(
 
     if laser_annotation and scan.laser_ref is not None:
         lr = scan.laser_ref
-        ax.add_patch(patches.Circle(
+        circle = patches.Circle(
             (lr.center_x, lr.center_y), radius=lr.radius,
             edgecolor="red", facecolor="none",
-            linewidth=1, linestyle="--",
+            linewidth=1.5, linestyle="--",
             label=f"Laser Spot (1/e² Radius: {lr.radius:.1f} px)",
-        ))
+            zorder = 10
+        )
+        circle.set_path_effects([pe.withStroke(linewidth=2.5, foreground="black")])
+        ax.add_patch(circle)
 
     def update(frame):
         im.set_data(scan.load_frame(frame))
@@ -832,6 +836,17 @@ class ImageSequencePanel(AnimationPanel):
         Overlay the laser-spot circle when ``scan.laser_ref`` is set.
     laser_color : str
         Edge colour of the laser circle.
+    laser_linewidth : float
+        Line width of the laser circle.
+    laser_linestyle : str
+        Line style of the laser circle.  Defaults to a solid line (``"-"``),
+        which survives GIF palette quantization far better than a dashed one.
+    laser_halo : bool
+        Draw a contrasting outline (halo) behind the circle so it stays
+        visible over bright hot spots, where a thin coloured line would
+        otherwise be quantized away in the 256-colour GIF palette.
+    laser_halo_color : str
+        Colour of the halo stroke.
     xlabel, ylabel : str
         Axis labels forwarded to :func:`plot_real_space_PL_map`.
     """
@@ -839,18 +854,26 @@ class ImageSequencePanel(AnimationPanel):
     def __init__(
         self,
         scan,
-        title            : str  = "",
-        cmap             : str  = "vik",
-        laser_annotation : bool = True,
-        laser_color      : str  = "red",
-        xlabel           : str  = "x-axis (pixels)",
-        ylabel           : str  = "y-axis (pixels)",
+        title            : str   = "",
+        cmap             : str   = "vik",
+        laser_annotation : bool  = True,
+        laser_color      : str   = "red",
+        laser_linewidth  : float = 1.5,
+        laser_linestyle  : str   = "-",
+        laser_halo       : bool  = True,
+        laser_halo_color : str   = "white",
+        xlabel           : str   = "x-axis (pixels)",
+        ylabel           : str   = "y-axis (pixels)",
     ):
         self.scan             = scan
         self.title            = title
         self.cmap             = cmap
         self.laser_annotation = laser_annotation
         self.laser_color      = laser_color
+        self.laser_linewidth  = laser_linewidth
+        self.laser_linestyle  = laser_linestyle
+        self.laser_halo       = laser_halo
+        self.laser_halo_color = laser_halo_color
         self.xlabel           = xlabel
         self.ylabel           = ylabel
         self._im              = None
@@ -869,11 +892,22 @@ class ImageSequencePanel(AnimationPanel):
 
         if self.laser_annotation and getattr(self.scan, "laser_ref", None) is not None:
             lr = self.scan.laser_ref
-            ax.add_patch(patches.Circle(
+            circle = patches.Circle(
                 (lr.center_x, lr.center_y), radius=lr.radius,
                 edgecolor=self.laser_color, facecolor="none",
-                linewidth=1, linestyle="--", zorder=3,
-            ))
+                linewidth=self.laser_linewidth, linestyle=self.laser_linestyle,
+                zorder=3,
+            )
+            if self.laser_halo:
+                # Draw a thicker contrasting stroke behind the coloured line so
+                # it stays legible over bright hot spots after GIF quantization.
+                circle.set_path_effects([
+                    path_effects.withStroke(
+                        linewidth=self.laser_linewidth + 2.0,
+                        foreground=self.laser_halo_color,
+                    ),
+                ])
+            ax.add_patch(circle)
 
     def update(self, frame: int) -> tuple:
         self._im.set_data(self.scan.load_frame(frame))
@@ -968,6 +1002,24 @@ class SpectrumLinePanel(AnimationPanel):
         return (self._line, self._title)
 
 
+# Map output file extensions to the Matplotlib animation writer that handles
+# them.  GIF (Pillow) is the default; the video formats go through FFmpeg,
+# which is full-colour and avoids the 256-colour palette quantization that can
+# wash out thin overlays like the laser circle.
+_WRITER_BY_EXT = {
+    ".gif" : "pillow",
+    ".mp4" : "ffmpeg",
+    ".m4v" : "ffmpeg",
+    ".mov" : "ffmpeg",
+    ".webm": "ffmpeg",
+}
+
+
+def _writer_for_path(path: str) -> str:
+    """Infer the animation writer from a save path's extension (default GIF)."""
+    return _WRITER_BY_EXT.get(Path(path).suffix.lower(), "pillow")
+
+
 def animate_panels(
     panels,
     n_frames           : int   = None,
@@ -979,7 +1031,7 @@ def animate_panels(
     constrained_layout : bool  = True,
     save               : str   = None,
     fps                : float = None,
-    writer             : str   = "pillow",
+    writer             : str   = None,
 ) -> tuple:
     """
     Assemble and animate a row of :class:`AnimationPanel` objects.
@@ -1007,11 +1059,17 @@ def animate_panels(
         ``None`` or ``""`` to omit it.
     constrained_layout : bool
     save : str, optional
-        If given, save the animation to this path.
+        If given, save the animation to this path.  The output format is
+        chosen from the file extension: ``.gif`` (default) uses the Pillow
+        writer; ``.mp4`` / ``.m4v`` / ``.mov`` / ``.webm`` use FFmpeg
+        (full-colour, no 256-colour quantization — best when a thin overlay
+        such as the laser circle must stay crisp).
     fps : float, optional
         Frames per second for saving.  Defaults to ``1000 / interval_ms``.
-    writer : str
-        Matplotlib animation writer (default ``"pillow"`` for GIFs).
+    writer : str, optional
+        Matplotlib animation writer.  When ``None`` (default) it is inferred
+        from the *save* extension (GIF by default).  Pass an explicit writer
+        name (e.g. ``"pillow"``, ``"ffmpeg"``) to override.
 
     Returns
     -------
@@ -1065,6 +1123,8 @@ def animate_panels(
     if save is not None:
         if fps is None:
             fps = 1000.0 / interval_ms
+        if writer is None:
+            writer = _writer_for_path(save)
         anim.save(save, writer=writer, fps=fps)
 
     return fig, anim
@@ -1083,6 +1143,7 @@ def animate_wl_pl_spectra(
     sweep_attr       : str = "scanner_y",
     sweep_unit       : str = "V",
     laser_ref_kwargs : dict = None,
+    laser_style      : dict = None,
     save             : str  = None,
     **engine_kwargs,
 ) -> tuple:
@@ -1120,11 +1181,18 @@ def animate_wl_pl_spectra(
         Extra keyword arguments for
         :class:`~tmdc_optics_tools.loaders.AttoCubeLaserReferenceImage` when
         *laser_ref* is a path (e.g. ``{"expected_radius_px": 10}``).
+    laser_style : dict, optional
+        Laser-circle styling forwarded to both image
+        :class:`ImageSequencePanel` panels, e.g.
+        ``{"laser_color": "red", "laser_linewidth": 1.5, "laser_linestyle": "-",
+        "laser_halo": True, "laser_halo_color": "white", "laser_annotation": True}``.
     save : str, optional
-        Output path for the animation.
+        Output path for the animation.  Format is chosen from the extension
+        (``.gif`` by default; ``.mp4`` etc. via FFmpeg) — see
+        :func:`animate_panels`.
     **engine_kwargs
         Forwarded to :func:`animate_panels` (e.g. ``interval_ms``,
-        ``suptitle_fmt``, ``n_frames``).
+        ``suptitle_fmt``, ``n_frames``, ``writer``).
 
     Returns
     -------
@@ -1172,14 +1240,18 @@ def animate_wl_pl_spectra(
             return spec
         return AttoCubePLVabScan(path=str(spec))
 
+    laser_style = laser_style or {}
+
     panels = []
     wl_scan = _image_scan(wl)
     if wl_scan is not None:
-        panels.append(ImageSequencePanel(wl_scan, title=wl_title, cmap=wl_cmap))
+        panels.append(ImageSequencePanel(
+            wl_scan, title=wl_title, cmap=wl_cmap, **laser_style))
 
     pl_scan = _image_scan(pl)
     if pl_scan is not None:
-        panels.append(ImageSequencePanel(pl_scan, title=pl_title, cmap=pl_cmap))
+        panels.append(ImageSequencePanel(
+            pl_scan, title=pl_title, cmap=pl_cmap, **laser_style))
 
     spec_scan = _spectrum_scan(spectra)
     if spec_scan is not None:

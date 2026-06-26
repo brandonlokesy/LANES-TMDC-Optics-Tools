@@ -8,6 +8,8 @@ the most common plot types encountered in gate-dependent PL experiments.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -764,3 +766,431 @@ def plot_stark_shift(
     ax.set_ylabel("Peak energy (eV)")
     ax.legend(frameon=False, fontsize=7)
     return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# Composable multi-panel animation
+# ---------------------------------------------------------------------------
+#
+# The building blocks below decouple *what* each panel draws from *how* the
+# figure is assembled and animated.  An :class:`AnimationPanel` knows how to
+# draw frame 0 and how to mutate its artists for a given frame; the engine
+# :func:`animate_panels` lays out ``1 x N`` subplots and drives them in lock
+# step.  "Any combination of panels" is then simply "pass whichever panels you
+# want, in any order" — a 2-panel figure is a 3-panel figure minus one entry.
+
+
+class AnimationPanel:
+    """
+    Base class for one panel of a multi-panel animation.
+
+    Subclasses implement the two halves of an animated panel:
+
+    * :meth:`init_artists` — draw frame 0 onto a given axes and stash the
+      dynamic artists.  It receives the engine-resolved ``n_frames`` so the
+      panel can truncate its data and fix its axes limits once (preventing the
+      autoscale "jump" you would otherwise get as frames advance).
+    * :meth:`update` — mutate the stored artists for ``frame`` and return the
+      ones that changed, so the engine can blit efficiently.
+
+    The :attr:`n_frames` property reports the panel's *native* number of frames;
+    the engine takes the minimum across all panels (unless overridden) so panels
+    of differing length stay in sync.
+    """
+
+    @property
+    def n_frames(self) -> int:
+        raise NotImplementedError
+
+    def init_artists(self, ax, n_frames: int) -> None:
+        raise NotImplementedError
+
+    def update(self, frame: int) -> tuple:
+        raise NotImplementedError
+
+
+class ImageSequencePanel(AnimationPanel):
+    """
+    A panel that animates a sequence of real-space images.
+
+    Wraps an
+    :class:`~tmdc_optics_tools.loaders.AttoCubePLScanRealSpace` (or any object
+    exposing ``n_frames`` and ``load_frame(idx)``).  Frame 0 is drawn with
+    :func:`plot_real_space_PL_map`; subsequent frames swap the image data.  If
+    the scan carries a ``laser_ref`` and *laser_annotation* is ``True``, the
+    1/e² laser-spot circle is overlaid (static, so it sits in the blit
+    background and is redrawn for free).
+
+    Parameters
+    ----------
+    scan : AttoCubePLScanRealSpace
+    title : str
+        Per-panel heading.
+    cmap : str
+        Colormap name passed to :func:`get_cmap` via :func:`plot_real_space_PL_map`.
+    laser_annotation : bool
+        Overlay the laser-spot circle when ``scan.laser_ref`` is set.
+    laser_color : str
+        Edge colour of the laser circle.
+    xlabel, ylabel : str
+        Axis labels forwarded to :func:`plot_real_space_PL_map`.
+    """
+
+    def __init__(
+        self,
+        scan,
+        title            : str  = "",
+        cmap             : str  = "vik",
+        laser_annotation : bool = True,
+        laser_color      : str  = "red",
+        xlabel           : str  = "x-axis (pixels)",
+        ylabel           : str  = "y-axis (pixels)",
+    ):
+        self.scan             = scan
+        self.title            = title
+        self.cmap             = cmap
+        self.laser_annotation = laser_annotation
+        self.laser_color      = laser_color
+        self.xlabel           = xlabel
+        self.ylabel           = ylabel
+        self._im              = None
+
+    @property
+    def n_frames(self) -> int:
+        return self.scan.n_frames
+
+    def init_artists(self, ax, n_frames: int) -> None:
+        plot_real_space_PL_map(
+            self.scan, ax=ax, idx=0, cmap=self.cmap,
+            xlabel=self.xlabel, ylabel=self.ylabel,
+        )
+        ax.set_title(self.title)
+        self._im = ax.images[0]
+
+        if self.laser_annotation and getattr(self.scan, "laser_ref", None) is not None:
+            lr = self.scan.laser_ref
+            ax.add_patch(patches.Circle(
+                (lr.center_x, lr.center_y), radius=lr.radius,
+                edgecolor=self.laser_color, facecolor="none",
+                linewidth=1, linestyle="--", zorder=3,
+            ))
+
+    def update(self, frame: int) -> tuple:
+        self._im.set_data(self.scan.load_frame(frame))
+        return (self._im,)
+
+
+class SpectrumLinePanel(AnimationPanel):
+    """
+    A panel that animates one PL spectrum per frame.
+
+    Wraps an :class:`~tmdc_optics_tools.loaders.AttoCubePLVabScan` (or any object
+    exposing ``energy``/``wavelength`` plus ``best_energy_spectra``/``spectra``
+    of shape ``(n_pixels, n_sweeps)``).  The x-axis is fixed; each frame swaps
+    the y-values and updates a per-panel subtitle showing the swept value.
+
+    Both axes limits are fixed once over the *truncated* extent
+    (``[:, :n_frames]``) so the trace does not rescale or jump between frames.
+
+    Parameters
+    ----------
+    scan : AttoCubePLVabScan
+    x_axis : {"energy", "wavelength"}
+    sweep_attr : str
+        Name of the per-sweep array used for the subtitle value
+        (e.g. ``"scanner_y"``, ``"ef"``, ``"v_top"``).
+    sweep_label : str
+        Human-readable label shown before the value.  Defaults to *sweep_attr*.
+    sweep_unit : str
+        Unit string appended to the value (e.g. ``"V"``).
+    title_fmt : str
+        Format string with ``{label}``, ``{value}`` and ``{unit}`` fields.
+    color : str, optional
+        Line colour.  Matplotlib default when ``None``.
+    ylabel : str
+        Y-axis label.
+    """
+
+    def __init__(
+        self,
+        scan,
+        x_axis      : str = "energy",
+        sweep_attr  : str = "scanner_y",
+        sweep_label : str = None,
+        sweep_unit  : str = "V",
+        title_fmt   : str = "{label} = {value:.3g} {unit}",
+        color       : str = None,
+        ylabel      : str = "Counts",
+    ):
+        self.scan        = scan
+        self.x_axis      = x_axis
+        self.sweep_attr  = sweep_attr
+        self.sweep_label = sweep_label if sweep_label is not None else sweep_attr
+        self.sweep_unit  = sweep_unit
+        self.title_fmt   = title_fmt
+        self.color       = color
+        self.ylabel      = ylabel
+        self._line       = None
+        self._title      = None
+        self._y          = None
+        self._sweep_vals = None
+
+    @property
+    def n_frames(self) -> int:
+        return self.scan.n_sweeps
+
+    def init_artists(self, ax, n_frames: int) -> None:
+        x, xlabel = _resolve_x_axis(self.scan, self.x_axis)
+        y_full = (self.scan.best_energy_spectra if self.x_axis == "energy"
+                  else self.scan.spectra)
+        self._y          = np.asarray(y_full[:, :n_frames], dtype=float)
+        self._sweep_vals = np.asarray(getattr(self.scan, self.sweep_attr))[:n_frames]
+
+        # Fix both axes over the truncated extent so the trace doesn't jump.
+        ax.set_xlim(x.min(), x.max())
+        ax.set_ylim(self._y.min(), self._y.max())
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(self.ylabel)
+
+        (self._line,) = ax.plot(x, self._y[:, 0], color=self.color)
+        self._title = ax.set_title(self._frame_title(0))
+
+    def _frame_title(self, frame: int) -> str:
+        return self.title_fmt.format(
+            label=self.sweep_label,
+            value=self._sweep_vals[frame],
+            unit=self.sweep_unit,
+        )
+
+    def update(self, frame: int) -> tuple:
+        self._line.set_ydata(self._y[:, frame])
+        self._title.set_text(self._frame_title(frame))
+        return (self._line, self._title)
+
+
+def animate_panels(
+    panels,
+    n_frames           : int   = None,
+    panel_width        : float = 5.0,
+    panel_height       : float = 4.0,
+    figsize            : tuple = None,
+    interval_ms        : int   = 250,
+    suptitle_fmt       : str   = "Frame {frame}",
+    constrained_layout : bool  = True,
+    save               : str   = None,
+    fps                : float = None,
+    writer             : str   = "pillow",
+) -> tuple:
+    """
+    Assemble and animate a row of :class:`AnimationPanel` objects.
+
+    Lays out ``1 x len(panels)`` subplots, initialises each panel, and drives
+    them in lock step with a single :class:`~matplotlib.animation.FuncAnimation`.
+    Because the panel list is the only thing that determines the layout, any
+    subset/combination/order of panels works with no special-casing.
+
+    Parameters
+    ----------
+    panels : sequence of AnimationPanel
+        One panel per subplot, left to right.
+    n_frames : int, optional
+        Number of frames to animate.  Defaults to the minimum native
+        ``n_frames`` across all panels.
+    panel_width, panel_height : float
+        Per-panel figure size in inches (used when *figsize* is ``None``).
+    figsize : tuple, optional
+        Overrides the computed ``(panel_width * n, panel_height)``.
+    interval_ms : int
+        Delay between frames in milliseconds.
+    suptitle_fmt : str or None
+        Shared heading above all panels, formatted with ``{frame}``.  Pass
+        ``None`` or ``""`` to omit it.
+    constrained_layout : bool
+    save : str, optional
+        If given, save the animation to this path.
+    fps : float, optional
+        Frames per second for saving.  Defaults to ``1000 / interval_ms``.
+    writer : str
+        Matplotlib animation writer (default ``"pillow"`` for GIFs).
+
+    Returns
+    -------
+    fig, anim
+
+    Examples
+    --------
+    >>> panels = [
+    ...     ImageSequencePanel(white_light_map, title="White light", cmap="gray"),
+    ...     ImageSequencePanel(real_space_PL_map, title="Real-space PL", cmap="lipari"),
+    ...     SpectrumLinePanel(spectra_linescan, x_axis="energy"),
+    ... ]
+    >>> fig, anim = animate_panels(panels, save="three_panel_scan.gif")
+    """
+    panels = list(panels)
+    n = len(panels)
+    if n == 0:
+        raise ValueError("animate_panels requires at least one panel.")
+
+    if n_frames is None:
+        n_frames = min(p.n_frames for p in panels)
+    if figsize is None:
+        figsize = (panel_width * n, panel_height)
+
+    fig, axes = plt.subplots(
+        1, n, figsize=figsize,
+        constrained_layout=constrained_layout, squeeze=False,
+    )
+    axes = axes[0]
+
+    for panel, ax in zip(panels, axes):
+        panel.init_artists(ax, n_frames)
+
+    suptitle = (
+        fig.suptitle(suptitle_fmt.format(frame=0)) if suptitle_fmt else None
+    )
+
+    def update(frame):
+        artists = []
+        for panel in panels:
+            artists.extend(panel.update(frame))
+        if suptitle is not None:
+            suptitle.set_text(suptitle_fmt.format(frame=frame))
+            artists.append(suptitle)
+        return tuple(artists)
+
+    anim = animation.FuncAnimation(
+        fig, update, frames=n_frames, blit=True, interval=interval_ms,
+    )
+
+    if save is not None:
+        if fps is None:
+            fps = 1000.0 / interval_ms
+        anim.save(save, writer=writer, fps=fps)
+
+    return fig, anim
+
+
+def animate_wl_pl_spectra(
+    wl               = None,
+    pl               = None,
+    spectra          = None,
+    laser_ref        = None,
+    x_axis           : str = "energy",
+    wl_cmap          : str = "gray",
+    pl_cmap          : str = "lipari",
+    wl_title         : str = "White light",
+    pl_title         : str = "Real-space PL",
+    sweep_attr       : str = "scanner_y",
+    sweep_unit       : str = "V",
+    laser_ref_kwargs : dict = None,
+    save             : str  = None,
+    **engine_kwargs,
+) -> tuple:
+    """
+    Convenience wrapper: build a white-light / real-space-PL / spectrum
+    animation straight from file paths (or pre-built loaders).
+
+    Each of the three panels is optional — omit one (leave it ``None``) and the
+    figure simply drops to two (or one) panels.  This is how every combination
+    is supported without a separate function per layout.
+
+    Parameters
+    ----------
+    wl, pl : (dir, prefix) tuple or AttoCubePLScanRealSpace or None
+        White-light and real-space-PL image sequences.  A ``(dir, prefix)``
+        tuple is loaded into an
+        :class:`~tmdc_optics_tools.loaders.AttoCubePLScanRealSpace`; an existing
+        scan object is used as-is.
+    spectra : str or AttoCubePLVabScan or None
+        Spectrum line-scan.  A path is loaded into an
+        :class:`~tmdc_optics_tools.loaders.AttoCubePLVabScan`.
+    laser_ref : str or AttoCubeLaserReferenceImage or None
+        Shared laser-spot reference for the image panels.  A path is loaded
+        into an :class:`~tmdc_optics_tools.loaders.AttoCubeLaserReferenceImage`
+        (with *laser_ref_kwargs*).
+    x_axis : {"energy", "wavelength"}
+        Spectrum panel x-axis.
+    wl_cmap, pl_cmap : str
+        Colormaps for the two image panels.
+    wl_title, pl_title : str
+        Titles for the two image panels.
+    sweep_attr, sweep_unit : str
+        Per-sweep attribute and unit shown in the spectrum subtitle.
+    laser_ref_kwargs : dict, optional
+        Extra keyword arguments for
+        :class:`~tmdc_optics_tools.loaders.AttoCubeLaserReferenceImage` when
+        *laser_ref* is a path (e.g. ``{"expected_radius_px": 10}``).
+    save : str, optional
+        Output path for the animation.
+    **engine_kwargs
+        Forwarded to :func:`animate_panels` (e.g. ``interval_ms``,
+        ``suptitle_fmt``, ``n_frames``).
+
+    Returns
+    -------
+    fig, anim
+
+    Examples
+    --------
+    >>> # All three panels
+    >>> fig, anim = animate_wl_pl_spectra(
+    ...     wl=("./wl/", "wl_"), pl=("./PL/", "PL_"),
+    ...     spectra="./PL/PL_..iter_0.csv",
+    ...     laser_ref="laser_ref.csv", save="three_panel_scan.gif",
+    ... )
+
+    >>> # PL map + spectra only
+    >>> fig, anim = animate_wl_pl_spectra(
+    ...     pl=("./PL/", "PL_"), spectra="./PL/PL_..iter_0.csv",
+    ...     laser_ref="laser_ref.csv",
+    ... )
+    """
+    from .loaders import (
+        AttoCubePLScanRealSpace,
+        AttoCubePLVabScan,
+        AttoCubeLaserReferenceImage,
+    )
+
+    # Resolve the shared laser reference (path -> loader, object -> as-is).
+    if isinstance(laser_ref, (str, Path)):
+        laser_ref = AttoCubeLaserReferenceImage(
+            str(laser_ref), **(laser_ref_kwargs or {})
+        )
+
+    def _image_scan(spec):
+        if spec is None:
+            return None
+        if isinstance(spec, AttoCubePLScanRealSpace):
+            return spec
+        directory, prefix = spec
+        return AttoCubePLScanRealSpace(
+            path=str(directory), prefix=prefix, laser_ref=laser_ref,
+        )
+
+    def _spectrum_scan(spec):
+        if spec is None or isinstance(spec, AttoCubePLVabScan):
+            return spec
+        return AttoCubePLVabScan(path=str(spec))
+
+    panels = []
+    wl_scan = _image_scan(wl)
+    if wl_scan is not None:
+        panels.append(ImageSequencePanel(wl_scan, title=wl_title, cmap=wl_cmap))
+
+    pl_scan = _image_scan(pl)
+    if pl_scan is not None:
+        panels.append(ImageSequencePanel(pl_scan, title=pl_title, cmap=pl_cmap))
+
+    spec_scan = _spectrum_scan(spectra)
+    if spec_scan is not None:
+        panels.append(SpectrumLinePanel(
+            spec_scan, x_axis=x_axis,
+            sweep_attr=sweep_attr, sweep_unit=sweep_unit,
+        ))
+
+    if not panels:
+        raise ValueError(
+            "animate_wl_pl_spectra needs at least one of wl, pl, or spectra."
+        )
+
+    return animate_panels(panels, save=save, **engine_kwargs)

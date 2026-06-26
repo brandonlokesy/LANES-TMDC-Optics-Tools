@@ -28,6 +28,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from skimage.exposure import rescale_intensity
+from skimage.morphology import white_tophat, disk
+from skimage.measure import label, regionprops
+from skimage.filters import threshold_otsu
+from scipy import ndimage as ndi
 from scipy.optimize import curve_fit
 import matplotlib.patches as patches
 
@@ -1255,49 +1259,174 @@ class AttoCubeLaserReferenceImage(_AttoCubeImage):
     """
     Laser-spot reference image taken on the AttoCube cryogenic confocal.
 
-    On construction the laser spot centre and 1/e² radius are extracted
-    by fitting a 1-D Gaussian to the row- and column-summed intensity
-    profiles.
+    On construction the laser-spot centre and 1/e² radius are extracted with a
+    pipeline that is robust to white-light illumination (where the spot sits on
+    a structured background of flake contrast and reflectivity gradients):
+
+    1. Median filter to despeckle hot pixels.
+    2. **White top-hat** background suppression (optional, on by default): the
+       laser PSF is a compact bright blob while white light is large-scale
+       background.  A structuring element larger than the spot keeps the laser
+       and removes the broad illumination/flake structure.
+    3. Robust threshold + connected components → pick the brightest *compact,
+       round* region (rejecting elongated flake edges) → intensity-weighted
+       centroid as the seed.
+    4. **2-D Gaussian fit with a tilted-plane baseline** on a local window
+       around the seed → precise centre and σ (radius = 2σ).
+    5. If the fit fails or returns an implausible σ, fall back to the weighted
+       centroid and a second-moment radius estimate.
+
+    Set ``white_light=False`` to skip the top-hat step for clean dark-background
+    images.
 
     Parameters
     ----------
     path : str or Path
         Path to the CSV image file.
+    expected_radius_px : float
+        Approximate 1/e² laser radius in pixels.  Seeds the fit and sizes the
+        top-hat structuring element and fit window.  Default ``10.0``.
+    white_light : bool
+        Apply white top-hat background suppression before fitting.  Default
+        ``True``; set ``False`` for clean dark-background reference images.
+    tophat_radius : float, optional
+        Override the top-hat structuring-element radius in pixels.  ``None``
+        (default) uses ``2.5 * expected_radius_px`` (must exceed the spot size).
+
+    Attributes
+    ----------
+    center_x, center_y : float
+        Fitted laser-spot centre (column, row) in pixels.
+    radius : float
+        Fitted 1/e² radius in pixels (``2σ``).
     """
 
-    def __init__(self, path: str):
+    def __init__(
+        self,
+        path               : str,
+        expected_radius_px : float = 10.0,
+        white_light        : bool  = True,
+        tophat_radius      : float = None,
+    ):
         super().__init__(path, laser_ref=None)   # no external ref needed
+        self.expected_radius_px = float(expected_radius_px)
+        self.white_light        = bool(white_light)
+        self.tophat_radius      = tophat_radius
         self.center_x, self.center_y, self.radius = self._fit_laser_spot()
+
+    # --- Preprocessing -----------------------------------------------------
+
+    def _preprocess(self) -> np.ndarray:
+        """
+        Despeckle and (optionally) remove the white-light background.
+
+        Returns a non-negative image in which the laser spot dominates.
+        """
+        img = ndi.median_filter(np.nan_to_num(self.img.astype(float)), size=3)
+        if self.white_light:
+            r = self.tophat_radius
+            if r is None:
+                r = max(3, int(round(2.5 * self.expected_radius_px)))
+            img = white_tophat(img, footprint=disk(int(r)))
+        return img - img.min()           # ensure non-negative for weighting
+
+    # --- Seed detection ----------------------------------------------------
+
+    def _seed(self, proc: np.ndarray) -> tuple:
+        """
+        Robust (x0, y0) seed for the laser centre.
+
+        Thresholds the preprocessed image, labels connected components, and
+        picks the brightest *compact, round* region (rejecting elongated flake
+        edges), returning its intensity-weighted centroid.  Falls back to the
+        global intensity centroid if no region qualifies.
+        """
+        ny, nx = proc.shape
+        if not np.any(proc > 0):
+            return nx / 2.0, ny / 2.0
+        try:
+            thr = threshold_otsu(proc)
+        except Exception:                       # noqa: BLE001 - degenerate image
+            thr = float(np.median(proc) + 3 * np.std(proc))
+
+        mask = proc > thr
+        if not mask.any():
+            cy, cx = ndi.center_of_mass(proc)
+            return float(cx), float(cy)
+
+        regions = regionprops(label(mask), intensity_image=proc)
+        exp_area = np.pi * self.expected_radius_px ** 2
+        good = [
+            r for r in regions
+            if r.eccentricity < 0.85 and 0.1 * exp_area <= r.area <= 10 * exp_area
+        ]
+        pool = good or regions
+        best = max(pool, key=lambda r: r.intensity_mean * r.area)  # total intensity
+        cy, cx = best.centroid_weighted                            # (row, col)
+        return float(cx), float(cy)
 
     # --- Gaussian fitting --------------------------------------------------
 
     @staticmethod
-    def _gaussian_1d(x, A, x0, y0, sigma):
-        """1-D Gaussian: y0 + A·exp(−(x−x0)²/(2σ²))."""
-        return y0 + A * np.exp(-((x - x0) ** 2) / (2 * sigma**2))
+    def _gaussian2d_plane(coords, A, x0, y0, sigma, c0, cx, cy):
+        """Isotropic 2-D Gaussian plus a tilted-plane baseline."""
+        x, y = coords
+        g = A * np.exp(-((x - x0) ** 2 + (y - y0) ** 2) / (2.0 * sigma ** 2))
+        return (g + c0 + cx * x + cy * y).ravel()
 
-    def _fit_profile(self, axis: int) -> tuple:
-        """
-        Sum the image along *axis*, fit a Gaussian, return (center, sigma).
-        """
-        x       = np.arange(self.img.shape[axis])
-        profile = self.img.sum(axis=axis)
-        p0 = [
-            profile.max() - profile.min(),   # amplitude
-            float(np.argmax(profile)),        # center
-            float(profile.min()),             # baseline
-            10.0,                             # sigma
-        ]
-        popt, _ = curve_fit(self._gaussian_1d, x, profile, p0=p0)
-        center, sigma = popt[1], abs(popt[3])
-        return center, sigma
+    def _window(self, proc: np.ndarray, x0: float, y0: float) -> tuple:
+        """Return (sub, X, Y) for a local window of ±3·expected_radius."""
+        ny, nx = proc.shape
+        half = int(round(3 * self.expected_radius_px)) + 1
+        x_lo, x_hi = max(0, int(x0) - half), min(nx, int(x0) + half + 1)
+        y_lo, y_hi = max(0, int(y0) - half), min(ny, int(y0) + half + 1)
+        sub = proc[y_lo:y_hi, x_lo:x_hi]
+        X, Y = np.meshgrid(np.arange(x_lo, x_hi), np.arange(y_lo, y_hi))
+        return sub, X, Y
+
+    def _fit_2d(self, proc: np.ndarray, x0: float, y0: float) -> tuple:
+        """2-D Gaussian + plane fit on a local window. Returns (cx, cy, sigma)."""
+        sub, X, Y = self._window(proc, x0, y0)
+        base = float(np.median(sub))
+        p0 = [float(sub.max() - base), x0, y0, self.expected_radius_px,
+              base, 0.0, 0.0]
+        lo = [0.0, X.min(), Y.min(), 0.5, -np.inf, -np.inf, -np.inf]
+        hi = [np.inf, X.max(), Y.max(),
+              max(2 * self.expected_radius_px, (X.max() - X.min()) + 1),
+              np.inf, np.inf, np.inf]
+        popt, _ = curve_fit(
+            self._gaussian2d_plane, (X.ravel(), Y.ravel()), sub.ravel(),
+            p0=p0, bounds=(lo, hi), maxfev=10000,
+        )
+        return float(popt[1]), float(popt[2]), abs(float(popt[3]))
+
+    def _fallback(self, proc: np.ndarray, x0: float, y0: float) -> tuple:
+        """Intensity-weighted centroid + second-moment radius on a window."""
+        sub, X, Y = self._window(proc, x0, y0)
+        sub = np.clip(sub - np.median(sub), 0, None)
+        total = sub.sum()
+        if total <= 0:
+            return x0, y0, 2.0 * self.expected_radius_px
+        cx = float((sub * X).sum() / total)
+        cy = float((sub * Y).sum() / total)
+        var = float((sub * ((X - cx) ** 2 + (Y - cy) ** 2)).sum() / total)
+        sigma = np.sqrt(var / 2.0)          # <r²> = 2σ² for a 2-D Gaussian
+        return cx, cy, 2.0 * sigma
 
     def _fit_laser_spot(self) -> tuple:
-        """Return (center_x, center_y, avg_1e2_radius) from 2-D Gaussian fits."""
-        center_x, sigma_x = self._fit_profile(axis=0)
-        center_y, sigma_y = self._fit_profile(axis=1)
-        radius = (2 * sigma_x + 2 * sigma_y) / 2.0   # average 1/e² radius
-        return center_x, center_y, radius
+        """Return (center_x, center_y, 1/e² radius) using the robust pipeline."""
+        proc = self._preprocess()
+        x0, y0 = self._seed(proc)
+        ny, nx = proc.shape
+        try:
+            cx, cy, sigma = self._fit_2d(proc, x0, y0)
+            plausible = (0 <= cx < nx and 0 <= cy < ny
+                         and 0.5 <= sigma <= 0.5 * max(ny, nx))
+            if not plausible:
+                raise RuntimeError("implausible fit result")
+            return cx, cy, 2.0 * sigma
+        except Exception:                       # noqa: BLE001 - graceful fallback
+            return self._fallback(proc, x0, y0)
 
     # --- Display -----------------------------------------------------------
 

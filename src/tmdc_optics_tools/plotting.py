@@ -438,8 +438,8 @@ def plot_real_space_PL_map(
     figsize : tuple = (6, 3.5),
     dpi     : int   = None,
     idx    : int = 0,
-    xlabel : str = "x-axis (um)",
-    ylabel : str = "y-axis (um)",
+    xlabel : str = "x-axis (pixels)",
+    ylabel : str = "y-axis (pixels)",
     cmap   : str = "cork"
 ) -> tuple:
     """

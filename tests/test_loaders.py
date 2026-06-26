@@ -10,12 +10,13 @@ the backward-compatible curated attributes.
 import numpy as np
 import pytest
 
-from tmdc_optics_tools.loaders import AttoCubePLVabScan
+from tmdc_optics_tools.loaders import AttoCubePLVabScan, DeviceGeometry
 
-# 3 sweeps x 8 pixels; the first six pixel rows also carry labeled scalars.
+# 3 sweeps x 10 pixels; the first eight pixel rows also carry labeled scalars,
+# leaving 2 unlabeled pixel rows to exercise the labeled-row filter.
 N_SWEEPS = 3
-N_PIXELS = 8
-WAVELENGTH = 800.0 + np.arange(N_PIXELS)          # 800 .. 807 nm
+N_PIXELS = 10
+WAVELENGTH = 800.0 + np.arange(N_PIXELS)          # 800 .. 809 nm
 
 PARAMS = {
     "V_A":              np.array([0.0, 0.5, 1.0]),
@@ -23,6 +24,8 @@ PARAMS = {
     "Excitation Power": np.array([1e-6, 2e-6, 3e-6]),
     "I_A":              np.array([1e-9, 2e-9, 3e-9]),
     "I_B":              np.array([4e-9, 5e-9, 6e-9]),
+    "Scanner X":        np.array([5.0, 5.0, 5.0]),
+    "Scanner Y":        np.array([7.0, 7.5, 8.0]),
     "Galvo_X":          np.array([10.0, 11.0, 12.0]),
 }
 POWER_SCALE = 0.303e6  # AttoCubePLVabScan default
@@ -159,3 +162,61 @@ def test_padding_columns_stripped(scan):
     # 2 padding cols make raw n_cols = 14 (not divisible by 4); they must be
     # stripped to 12 -> 3 sweeps without raising.
     assert scan.n_sweeps == N_SWEEPS
+
+
+# ---------------------------------------------------------------------------
+# Curated registry (#2) and property backing (#1)
+# ---------------------------------------------------------------------------
+
+
+def test_curated_parameters_registry(scan):
+    reg = scan.curated_parameters
+    assert reg["v_top"] == ("V_A", 1.0, "V")
+    assert reg["power"] == ("Excitation Power", 0.303e6, "µW")
+    assert reg["Ich1"] == ("I_A", 1e9, "nA")
+    assert reg["scanner_x"] == ("Scanner X", 1.0, "µm")
+    assert reg["scanner_y"] == ("Scanner Y", 1.0, "µm")
+
+
+def test_scanner_position_properties(scan):
+    assert np.allclose(scan.scanner_x, PARAMS["Scanner X"])
+    assert np.allclose(scan.scanner_y, PARAMS["Scanner Y"])
+    # scale 1.0 -> curated view equals the raw parameter row
+    assert np.allclose(scan.scanner_x, scan.parameters["Scanner X"])
+
+
+def test_curated_properties_are_read_only(scan):
+    # Properties backed by self.parameters -> no setter.
+    with pytest.raises(AttributeError):
+        scan.v_top = np.zeros(N_SWEEPS)
+    with pytest.raises(AttributeError):
+        scan.ef = np.zeros(N_SWEEPS)
+
+
+def test_constructor_overrides_flow_through_registry(tmp_path):
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    s = AttoCubePLVabScan(str(csv), power_scale=1.0, top_gate_label="V_B")
+    # scale override: power now equals the raw row
+    assert np.allclose(s.power, s.parameters["Excitation Power"])
+    assert s.curated_parameters["power"] == ("Excitation Power", 1.0, "µW")
+    # label override: v_top now reads the V_B row
+    assert np.allclose(s.v_top, s.parameters["V_B"])
+    assert s.curated_parameters["v_top"][0] == "V_B"
+
+
+def test_ef_property_with_geometry(tmp_path):
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    s = AttoCubePLVabScan(str(csv), geometry=geom)
+    assert s.ef is not None
+    assert np.allclose(s.ef, geom.electric_field(s.v_top, s.v_bot))
+    assert np.allclose(s.gate_axis, s.ef)
+
+
+def test_fail_fast_on_missing_curated_row(tmp_path):
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    with pytest.raises(KeyError):
+        AttoCubePLVabScan(str(csv), power_label="NoSuchRow")

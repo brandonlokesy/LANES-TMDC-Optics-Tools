@@ -440,16 +440,21 @@ class AttoCubePLVabScan:
         wavelength → energy change of variables.  Set to ``False`` to
         skip the correction (useful when only peak *positions* are
         needed and the density distortion is undesirable).
-    top_gate_label : str
-        Row label for the top-gate voltage channel. Default ``"V_A"``.
-    bot_gate_label : str
-        Row label for the bottom-gate voltage channel. Default ``"V_B"``.
-    power_label : str
-        Row label for the excitation power channel.
-        Default ``"Excitation Power"``.
-    power_scale : float
-        Multiplicative factor applied to the raw power values to convert
-        to µW. Default ``0.303e6`` (calibrated by CdG).
+    top_gate_label : str, optional
+        Override the CSV row label for the top-gate voltage channel.
+        ``None`` (default) uses the :attr:`_CURATED` registry value (``"V_A"``).
+    bot_gate_label : str, optional
+        Override the bottom-gate voltage row label.
+        ``None`` (default) uses the registry value (``"V_B"``).
+    power_label : str, optional
+        Override the excitation power row label.
+        ``None`` (default) uses the registry value (``"Excitation Power"``).
+    power_scale : float, optional
+        Override the multiplicative factor that converts raw power to µW.
+        ``None`` (default) uses the registry value ``0.303e6`` (calibrated by CdG).
+    ich1_label, ich2_label : str, optional
+        Override the current-channel row labels (registry defaults ``"I_A"`` /
+        ``"I_B"``, both scaled to nA).
     roi : {1, 2}
         Which spectrometer ROI to load. Default ``1``.
 
@@ -479,14 +484,24 @@ class AttoCubePLVabScan:
         caller supplied *bg_region_eV*).
     apply_jacobian : bool
         Whether the Jacobian correction was applied.
-    v_top : np.ndarray, shape (n_sweeps,)
-        Top gate voltages in V.
-    v_bot : np.ndarray, shape (n_sweeps,)
-        Bottom gate voltages in V.
+    v_top, v_bot : np.ndarray, shape (n_sweeps,)
+        Top / bottom gate voltages in V.  Read-only properties (scaled views
+        into :attr:`parameters`).
     power : np.ndarray, shape (n_sweeps,)
-        Excitation power in µW.
+        Excitation power in µW.  Read-only property (scaled view).
+    Ich1, Ich2 : np.ndarray, shape (n_sweeps,)
+        Gate-channel currents in nA.  Read-only properties (scaled views).
+    scanner_x, scanner_y : np.ndarray, shape (n_sweeps,)
+        Sample-stage X / Y position, assumed µm (scale 1.0 until the raw
+        AttoCube unit is confirmed).  Read-only properties (views).
     ef : np.ndarray or None, shape (n_sweeps,)
         Displacement field in mV/nm, or ``None`` if no geometry supplied.
+        Read-only property computed from :attr:`v_top` / :attr:`v_bot`.
+    curated_parameters : dict[str, tuple]
+        Mapping ``attr -> (csv_label, scale, unit)`` documenting which rows are
+        promoted to the curated properties above, the scale applied, and the
+        resulting unit.  Configurable via the class-level :attr:`_CURATED`
+        registry and the constructor ``*_label`` / ``power_scale`` overrides.
     parameters : dict[str, np.ndarray]
         Every labeled parameter row from the CSV, mapped to its per-sweep
         array in the file's **raw** units (one entry per row, shape
@@ -503,6 +518,11 @@ class AttoCubePLVabScan:
     Use :attr:`parameter_labels` to list every available row name and
     :meth:`get_parameter` (or ``scan["label"]``) to pull any one of them, with
     an optional ``scale`` factor for unit conversion.
+
+    Beware the raw-vs-scaled distinction: :attr:`parameters` holds the file's
+    **raw** values, whereas the curated properties apply a scale — e.g.
+    ``scan.power`` (µW) differs from ``scan.parameters["Excitation Power"]``
+    (raw).  See :attr:`curated_parameters` for the exact label/scale/unit map.
 
     Examples
     --------
@@ -532,6 +552,24 @@ class AttoCubePLVabScan:
     _COL_ROI1 = 2
     _COL_ROI2 = 3
 
+    # Canonical curated parameters: attribute name -> (CSV row label, scale, unit).
+    # These are the analysis-primary quantities promoted to first-class
+    # properties (scaled views into :attr:`parameters`).  The label and/or scale
+    # of any entry can be overridden per-instance via the matching constructor
+    # argument; everything else in the file is reached through the generic
+    # :attr:`parameters` store.
+    _CURATED = {
+        "v_top":     ("V_A",              1.0,      "V"),
+        "v_bot":     ("V_B",              1.0,      "V"),
+        "power":     ("Excitation Power", 0.303e6,  "µW"),
+        "Ich1":      ("I_A",              1e9,      "nA"),
+        "Ich2":      ("I_B",              1e9,      "nA"),
+        # Sample-stage position.  Unit assumed µm with scale 1.0 until the raw
+        # AttoCube units are confirmed (adjust the scale here if not microns).
+        "scanner_x": ("Scanner X",        1.0,      "µm"),
+        "scanner_y": ("Scanner Y",        1.0,      "µm"),
+    }
+
     def __init__(
         self,
         path            : str,
@@ -539,12 +577,12 @@ class AttoCubePLVabScan:
         bg_region_nm    : tuple = None,
         bg_region_eV    : tuple = None,
         apply_jacobian  : bool  = False,
-        top_gate_label  : str   = "V_A",
-        bot_gate_label  : str   = "V_B",
-        power_label     : str   = "Excitation Power",
-        power_scale     : float = 0.303e6,
-        ich1_label      : str   = "I_A",
-        ich2_label      : str   = "I_B",
+        top_gate_label  : str   = None,
+        bot_gate_label  : str   = None,
+        power_label     : str   = None,
+        power_scale     : float = None,
+        ich1_label      : str   = None,
+        ich2_label      : str   = None,
         roi             : int   = 1,
     ):
         if roi not in (1, 2):
@@ -600,14 +638,27 @@ class AttoCubePLVabScan:
             if not pd.isna(label) and str(label).strip()
         }
 
-        # Curated, unit-scaled convenience attributes (backward compatible).
-        # Sourced from the generic store via get_parameter, which raises a
-        # helpful KeyError listing the available labels if one is missing.
-        self.v_top = self.get_parameter(top_gate_label)
-        self.v_bot = self.get_parameter(bot_gate_label)
-        self.power = self.get_parameter(power_label, scale=power_scale)
-        self.Ich1  = self.get_parameter(ich1_label, scale=1e9)   # → nA
-        self.Ich2  = self.get_parameter(ich2_label, scale=1e9)   # → nA
+        # Resolve the curated registry: class defaults, overridden by any
+        # explicit constructor arguments.  The curated quantities are exposed as
+        # scaled @property views into self.parameters (single source of truth).
+        self._curated = {name: list(cfg) for name, cfg in self._CURATED.items()}
+        for name, override in (
+            ("v_top", top_gate_label), ("v_bot", bot_gate_label),
+            ("power", power_label),    ("Ich1", ich1_label), ("Ich2", ich2_label),
+        ):
+            if override is not None:
+                self._curated[name][0] = override
+        if power_scale is not None:
+            self._curated["power"][1] = power_scale
+        self._curated = {name: tuple(cfg) for name, cfg in self._curated.items()}
+
+        # Fail fast (as before) if a curated row is missing from this file.
+        for name, (label, _, _) in self._curated.items():
+            if label not in self.parameters:
+                raise KeyError(
+                    f"Curated parameter '{name}' expects CSV row '{label}', "
+                    f"which is not present. Available: {self.parameter_labels}"
+                )
 
         wl_raw   = d[:, wl_cols[0]]
         valid_px = np.isfinite(wl_raw)
@@ -648,8 +699,6 @@ class AttoCubePLVabScan:
             )
         else:
             self.energy_spectra_bg = None
-
-        self.ef = geometry.electric_field(self.v_top, self.v_bot) if geometry else None
 
     # --- Private helpers ---------------------------------------------------
 
@@ -718,6 +767,70 @@ class AttoCubePLVabScan:
                 f"Available: {self.parameter_labels}"
             )
         return self.parameters[label] * scale
+
+    def _curated_value(self, name: str) -> np.ndarray:
+        """Return a curated quantity as a scaled view into :attr:`parameters`."""
+        label, scale, _ = self._curated[name]
+        return self.get_parameter(label, scale)
+
+    # --- Curated parameter properties (scaled views into self.parameters) ---
+
+    @property
+    def v_top(self) -> np.ndarray:
+        """Top gate voltage in V (per sweep)."""
+        return self._curated_value("v_top")
+
+    @property
+    def v_bot(self) -> np.ndarray:
+        """Bottom gate voltage in V (per sweep)."""
+        return self._curated_value("v_bot")
+
+    @property
+    def power(self) -> np.ndarray:
+        """Excitation power in µW (per sweep)."""
+        return self._curated_value("power")
+
+    @property
+    def Ich1(self) -> np.ndarray:
+        """Channel-1 current in nA (per sweep)."""
+        return self._curated_value("Ich1")
+
+    @property
+    def Ich2(self) -> np.ndarray:
+        """Channel-2 current in nA (per sweep)."""
+        return self._curated_value("Ich2")
+
+    @property
+    def scanner_x(self) -> np.ndarray:
+        """Sample-stage X position in µm (per sweep). Unit assumed; see _CURATED."""
+        return self._curated_value("scanner_x")
+
+    @property
+    def scanner_y(self) -> np.ndarray:
+        """Sample-stage Y position in µm (per sweep). Unit assumed; see _CURATED."""
+        return self._curated_value("scanner_y")
+
+    @property
+    def ef(self) -> np.ndarray:
+        """
+        Displacement field in mV/nm (per sweep), or ``None`` if no
+        :class:`DeviceGeometry` was supplied.  Computed from the curated
+        :attr:`v_top` / :attr:`v_bot`.
+        """
+        if self.geometry is None:
+            return None
+        return self.geometry.electric_field(self.v_top, self.v_bot)
+
+    @property
+    def curated_parameters(self) -> dict:
+        """
+        Mapping ``attr -> (csv_label, scale, unit)`` for the curated quantities.
+
+        Documents which CSV rows are promoted to first-class properties, the
+        scale applied (e.g. raw amps → nA), and the resulting unit — making the
+        raw-vs-scaled distinction with :attr:`parameters` explicit.
+        """
+        return dict(self._curated)
 
     # --- Convenience properties --------------------------------------------
 

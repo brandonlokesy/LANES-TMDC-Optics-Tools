@@ -1,23 +1,57 @@
-from .processors.Tagarelli2023 import Tagarelli2023Processor
+from .processors.Tagarelli2023 import *
+from .processors.Vaquero2026 import *
 
 REGISTRY = [
     {
         "material":  "WSe2_bilayer",
         "source":    "Tagarelli2023",
-        "zenodo_doi": "10.5281/zenodo.7660668",
+        "dataset_doi": "10.5281/zenodo.7660668",
         "title":     "Electrical control of hybrid exciton transport in a van der Waals heterostructure",
         "doi" : "10.1038/s41566-023-01198-w",
-        "comment" : "",
+        "about" : "Figure 1d: PL spectra of homobilayer WSe2. Nested sweep: electric field (mV/nm) × excitation power (µW).",
+        "spectroscopy": "PL",
         "processor": Tagarelli2023Processor,
     },
+
+    # {
+    #     "material" : "WSe2_monolayer",
+    #     "source"  : "Dijkstra2025",
+    #     "dataset_doi": "https://mediatum.ub.tum.de/1793118",
+    #     "title" : "Ten-valley excitonic complexes in charge-tunable monolayer WSe2",
+    #     "doi" : "10.1038/s41467-025-65731-x",
+    #     "about" : "Figure 1a",
+    #     "spectroscopy": "R",
+    #     "processor" : None
+    # },
+
+    {
+        "material" : "WSe2_monolayer",
+        "source"  : "Vaquero2026",
+        "dataset_doi": "10.48550/arXiv.2604.08382",
+        "title" : "Valley-Controlled Many-Body Exciton Interactions in Monolayer WSe2 Phototransistors",
+        "doi" : "10.1021/acs.nanolett.6c01091",
+        "about" : "Figure 2a: PL spectra of monolayer WSe2 with linearly polarized light sweept by exciton densities.",
+        "spectroscopy": "PL",
+        "processor" : Vaquero2026Processor,
+    },
+
+    # {
+    #     "material" : "MoSe2_monolayer",
+    #     "source"  : "Shimazaki2020",
+    #     "dataset_doi": "10.3929/ethz-b-000399579",
+    #     "title" : "Strongly correlated electrons and hybrid excitons in a moiré heterostructure",
+    #     "doi" : "10.1038/s41586-020-2191-2",
+
+    # }
 ]
 
 if __name__ == "__main__":
     from pathlib import Path
-    Path("reference_data/data").mkdir(exist_ok=True)
+    out_dir = Path(__file__).parent / "data"
+    out_dir.mkdir(exist_ok=True)
 
     for entry in REGISTRY:
         print(f"Processing {entry['source']} ({entry['material']})...")
-        proc = entry["processor"](entry)
+        proc = entry["processor"](entry, out_dir)
         proc.run()
         print(f"  → Done\n")

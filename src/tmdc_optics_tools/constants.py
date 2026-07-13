@@ -37,9 +37,9 @@ EXCITON_ENERGY = {
     "WS2"   : {"XA0": 2.02, # Scientific Reports 5, 9218 (2015), Nature volume 513, pages 214–218 (2014)
                "XB0": 2.41, # Phys. Rev. Lett. 113, 076802 (2014). Value at 5K. 
                },
-    "WSe2"  : {"XA0": 1.75, # Nature Nanotechnology volume 8, pages 634–638 (2013)
+    "WSe2"  : {"XA0": 1.75, # Nature Nanotechnology 8, 634–638 (2013)
                 },
-    "MoSe2" : {"XA0": 1.66, # Nature Communications volume 4, Article number: 1474 (2013). Value at 20 K
+    "MoSe2" : {"XA0": 1.66, # Nature Communications 4, Article number: 1474 (2013). Value at 20 K
                },
     "MoS2"  : {"XA0": 1.86, # Phys. Rev. B 94, 075440 (2016), Phys. Rev. Lett. 105, 136805 (2010)
                "XB0" : 2.00, # Phys. Rev. B 94, 075440 (2016).

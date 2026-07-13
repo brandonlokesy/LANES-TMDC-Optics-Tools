@@ -1,0 +1,94 @@
+import io
+import requests
+import zipfile
+import numpy as np
+import scipy.io
+import h5py
+from pathlib import Path
+import pandas as pd
+
+HEADERS = {"User-Agent": "LANES-Tools/1.0"}
+
+class Vaquero2026Processor:
+    def __init__(self, meta: dict, out_dir: Path):
+        self.meta = meta
+        self.out_path = out_dir / f"{meta['material']}__{meta['source']}.h5"
+
+    def _fetch_zip(self, url: str) -> zipfile.ZipFile:
+        r = requests.get(url, headers=HEADERS)
+        r.raise_for_status()
+        return zipfile.ZipFile(io.BytesIO(r.content))
+    
+    def parse_density(self,s):
+        base, power = s.split("x10")
+        return float(base) * 10**int(power)
+    
+    def run(self):
+        print(f"  Fetching Figure 2.zip from Zenodo ({self.meta['dataset_doi']})...")
+        z = self._fetch_zip(
+            "https://zenodo.org/records/19887546/files/Data.zip?download=1"
+        )
+
+        filepath = "Zenodo_repository/figure_2/panel_a/fig_2a.csv"
+        DEFAULT_EXCITON_DENSITY_CM2 = 1e12  # cm^-2, nearest available index used per file
+
+        with h5py.File(self.out_path, "w") as hf:
+            # --- File-level metadata ---
+            hf.attrs["material"]   = self.meta["material"]
+            hf.attrs["source"]     = self.meta["source"]
+            hf.attrs["title"]      = self.meta["title"]
+            hf.attrs["doi"]        = self.meta["doi"]
+            hf.attrs["dataset_doi"] = self.meta["dataset_doi"]
+            hf.attrs["about"]    = self.meta.get("about", "")
+            hf.attrs["spectroscopy"] = self.meta.get("spectroscopy", "PL")
+
+            nI_sweep = hf.create_group("exciton_density")
+            nI_sweep.attrs["parameter_name"] = "exciton_density"
+            nI_sweep.attrs["parameter_unit"] = "cm^-2" 
+            nI_sweep.attrs["default_value"] = float(DEFAULT_EXCITON_DENSITY_CM2)
+
+            print(f"Processing file...")
+            
+            with z.open(filepath) as f:
+                df = pd.read_csv(io.BytesIO(f.read()), header=[0, 1])
+                new_columns = []
+                current_density = None
+
+                for density, label in df.columns:
+                    if not density.startswith("Unnamed"):
+                        current_density = density
+                    new_columns.append((current_density, label))
+
+                df.columns = pd.MultiIndex.from_tuples(new_columns)
+
+                densities = []
+                for density, _ in df.columns:
+                    if density not in densities:
+                        densities.append(density)
+
+                densities = [self.parse_density(d) for d in densities]
+
+                labels = [f"{d/1e12:g}e12" for d in densities]
+
+                default_density_idx = np.argmin(
+                    np.abs(np.array(densities) - DEFAULT_EXCITON_DENSITY_CM2)
+                )
+
+                for i, density_label in enumerate(df.columns.levels[0]):
+
+                    energy = df[density_label].iloc[:, 0].to_numpy()
+                    counts = df[density_label].iloc[:, 1].to_numpy()
+
+                    grp = nI_sweep.create_group(labels[i])
+
+                    grp.attrs["parameter_value"] = densities[i]
+                    grp.attrs["density_index"] = i
+                    grp.attrs["spectrum_unit"] = "eV"
+                    grp.attrs["is_default"] = (i == default_density_idx)
+
+                    if i == 0:
+                        nI_sweep.create_dataset("energy", data=energy)
+
+                    grp.create_dataset("counts", data=counts)
+        
+        print(f"  → Saved to {self.out_path}")

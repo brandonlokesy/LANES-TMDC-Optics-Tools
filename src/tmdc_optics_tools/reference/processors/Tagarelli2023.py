@@ -1,46 +1,143 @@
-import requests, zipfile, io
+# src/tmdc_optics_tools/reference/processors/tagarelli2023.py
+#
+# Tagarelli et al., Nature Photonics 2023
+# "Electrical control of hybrid exciton transport in a van der Waals heterostructure"
+# DOI: 10.1038/s41566-023-01198-w
+# Zenodo: 10.5281/zenodo.7660668
+#
+# Figure 1d: PL spectra of homobilayer WSe2
+# Nested sweep: electric field (mV/nm) × excitation power (µW)
+#
+# .mat structure:
+#   ef300 and efm300: spectra(1340, 82), power(1, 82), power_rounded(1, 82)
+#   ef0:              spectra(1340, 70),  power(1, 70)  [no power_rounded]
+#
+# Power axes are irregularly spaced and inconsistent across files.
+# Default power is chosen as the index nearest to TARGET_POWER_UW in each file.
+# Default electric field is E=0 (no applied field).
+#
+# Energy slicing: ef0 uses [290:-420], ef300/efm300 use [10:-10]
+# per the original plotting code (authors' choice, removes noisy edges).
+
+import io
+import requests
+import zipfile
 import numpy as np
 import scipy.io
 import h5py
 from pathlib import Path
 
-HEADERS = {"LANES": "LANES-Tools/1.0"}
+HEADERS = {"User-Agent": "LANES-Tools/1.0"}
+
+# Target power for default spectrum — nearest available index used per file
+TARGET_POWER_UW = 40.0
+
 
 class Tagarelli2023Processor:
-    def __init__(self, meta):
-        self.meta = meta
-        self.out_path = Path(f"reference_data/data/{meta['material']}__{meta['source']}.h5")
 
-    def fetch(self):
-        url = "https://zenodo.org/records/7660668/files/Figure%201.zip?download=1"
+    def __init__(self, meta: dict, out_dir: Path):
+        self.meta = meta
+        self.out_path = out_dir / f"{meta['material']}__{meta['source']}.h5"
+
+    def _fetch_zip(self, url: str) -> zipfile.ZipFile:
         r = requests.get(url, headers=HEADERS)
         r.raise_for_status()
         return zipfile.ZipFile(io.BytesIO(r.content))
 
-    def run(self):
-        z = self.fetch()
+    def _nearest_power_index(self, power_array: np.ndarray) -> int:
+        return int(np.argmin(np.abs(power_array - TARGET_POWER_UW)))
 
-        mats = {
-            "E=0":    "Figure 1d/hb_0field.mat",
-            "E=+300": "Figure 1d/homobilayer_ef300_power_spectral.mat",
-            "E=-300": "Figure 1d/homobilayer_efm300_spectral.mat",
+    def run(self):
+        print(f"  Fetching Figure 1.zip from Zenodo ({self.meta['dataset_doi']})...")
+        z = self._fetch_zip(
+            "https://zenodo.org/records/7660668/files/Figure%201.zip?download=1"
+        )
+
+        # Electric field value (mV/nm) → (zip path, energy slice)
+        # Energy slices follow the original authors' plotting code
+        ef_files = {
+             0:   ("Figure 1d/hb_0field.mat",                          slice(290, -420)),
+            +300: ("Figure 1d/homobilayer_ef300_power_spectral.mat",   slice(10, -10)),
+            -300: ("Figure 1d/homobilayer_efm300_spectral.mat",        slice(10, -10)),
         }
 
+        DEFAULT_FIELD = 0
+
         with h5py.File(self.out_path, "w") as hf:
-            # Write metadata
-            for k, v in self.meta.items():
-                if k != "processor":
-                    hf.attrs[k] = v
 
-            for label, path in mats.items():
-                with z.open(path) as f:
+            # --- File-level metadata ---
+            hf.attrs["material"]   = self.meta["material"]
+            hf.attrs["source"]     = self.meta["source"]
+            hf.attrs["title"]      = self.meta["title"]
+            hf.attrs["doi"]        = self.meta["doi"]
+            hf.attrs["dataset_doi"] = self.meta["dataset_doi"]
+            hf.attrs["about"]    = self.meta.get("about", "")
+            hf.attrs["spectroscopy"] = self.meta.get("spectroscopy", "PL")
+            
+            # --- Outer sweep: electric field ---
+            ef_sweep = hf.create_group("electric_field")
+            ef_sweep.attrs["parameter_name"] = "electric_field"
+            ef_sweep.attrs["parameter_unit"] = "mV/nm"
+            ef_sweep.attrs["default_value"]  = float(DEFAULT_FIELD)
+
+            for field_val, (zip_path, energy_slice) in ef_files.items():
+                print(f"  Processing E={field_val:+d} mV/nm ...")
+
+                with z.open(zip_path) as f:
                     mat = scipy.io.loadmat(io.BytesIO(f.read()))
-                    spectrum = mat["spectra"][:, 39].squeeze()
-                    energy   = mat["energy"].squeeze()
 
-                grp = hf.create_group(label)
-                grp.create_dataset("energy",   data=energy)
-                grp.create_dataset("spectrum", data=spectrum)
-                grp.attrs["energy_unit"]   = "eV"
-                grp.attrs["spectrum_unit"] = "counts"
-                grp.attrs["field_mV_nm"]   = int(label.split("=")[-1].replace("+", ""))
+                energy        = mat["energy"].squeeze().astype(np.float64)
+                spectra       = mat["spectra"].astype(np.float64)        # (1340, N)
+                power         = mat["power"].squeeze().astype(np.float64)  # (N,)
+                power_rounded = mat.get("power_rounded", None)
+                if power_rounded is not None:
+                    power_rounded = power_rounded.squeeze().astype(np.float64)
+
+                default_power_idx = self._nearest_power_index(power)
+                default_power_val = float(power[default_power_idx])
+
+                # Sliced energy axis (authors' edge-trimming)
+                energy_sliced = energy[energy_slice]
+
+                # --- Electric field group ---
+                label    = f"{field_val:+d}" if field_val != 0 else "0"
+                ef_group = ef_sweep.create_group(label)
+                ef_group.attrs["parameter_value"]  = float(field_val)
+                ef_group.attrs["is_default"]        = (field_val == DEFAULT_FIELD)
+                ef_group.attrs["energy_slice_start"] = energy_slice.start or 0
+                ef_group.attrs["energy_slice_stop"]  = energy_slice.stop  # may be negative
+
+                # Store sliced energy axis once per field group
+                ef_group.create_dataset("energy", data=energy_sliced)
+                ef_group.attrs["energy_unit"] = "eV"
+
+                # --- Inner sweep: excitation power ---
+                pw_sweep = ef_group.create_group("power")
+                pw_sweep.attrs["parameter_name"]  = "excitation_power"
+                pw_sweep.attrs["parameter_unit"]  = "uW"
+                pw_sweep.attrs["default_value"]   = default_power_val
+                pw_sweep.attrs["target_power_uW"] = TARGET_POWER_UW
+                pw_sweep.attrs["spectroscopy"] = "PL"
+
+                for i, pwr in enumerate(power):
+                    spectrum_sliced = spectra[:, i][energy_slice]
+
+                    # Use rounded power as label if available, else raw
+                    # Include index as tiebreaker to prevent duplicate group names
+                    if power_rounded is not None:
+                        pwr_label = f"{power_rounded[i]:.1f}"
+                        if pwr_label in pw_sweep:          # collision — append index to disambiguate
+                            pwr_label = f"{power_rounded[i]:.1f}_{i}"
+                    else:
+                        pwr_label = f"{pwr:.4f}"
+                        if pwr_label in pw_sweep:
+                            pwr_label = f"{pwr:.6f}"
+
+                    pw_group = pw_sweep.create_group(pwr_label)
+                    pw_group.create_dataset("spectrum", data=spectrum_sliced)
+                    pw_group.attrs["parameter_value"] = pwr
+                    pw_group.attrs["power_index"]     = i
+                    pw_group.attrs["spectrum_unit"]   = "eV"
+                    pw_group.attrs["is_default"]      = (i == default_power_idx)
+
+        print(f"  → Saved to {self.out_path}")

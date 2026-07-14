@@ -131,7 +131,7 @@ class ReferenceDataset:
     material      : e.g. "WSe2_bilayer"
     source        : e.g. "Tagarelli2023"
     doi           : publication DOI
-    zenodo_doi    : Zenodo record DOI
+    dataset_doi   : Zenodo record DOI
     title         : full paper title
     about       : any notes added in the registry
     spectroscopy  : measurement type, one of SPECTROSCOPY_TYPES
@@ -141,7 +141,7 @@ class ReferenceDataset:
     material:     str
     source:       str
     doi:          str  = ""
-    zenodo_doi:   str  = ""
+    dataset_doi:  str  = ""
     title:        str  = ""
     about:        str  = ""
     spectroscopy: str  = "PL"

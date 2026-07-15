@@ -26,6 +26,7 @@ import numpy as np
 import scipy.io
 import h5py
 from pathlib import Path
+from .processor import Processor
 
 HEADERS = {"User-Agent": "LANES-Tools/1.0"}
 
@@ -33,17 +34,8 @@ HEADERS = {"User-Agent": "LANES-Tools/1.0"}
 TARGET_POWER_UW = 40.0
 
 
-class Tagarelli2023Processor:
-
-    def __init__(self, meta: dict, out_dir: Path):
-        self.meta = meta
-        self.out_path = out_dir / f"{meta['material']}__{meta['source']}.h5"
-
-    def _fetch_zip(self, url: str) -> zipfile.ZipFile:
-        r = requests.get(url, headers=HEADERS)
-        r.raise_for_status()
-        return zipfile.ZipFile(io.BytesIO(r.content))
-
+class Tagarelli2023Processor(Processor):
+    
     def _nearest_power_index(self, power_array: np.ndarray) -> int:
         return int(np.argmin(np.abs(power_array - TARGET_POWER_UW)))
 

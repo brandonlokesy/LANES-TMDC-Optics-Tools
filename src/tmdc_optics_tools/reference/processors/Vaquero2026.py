@@ -61,29 +61,27 @@ class Vaquero2026Processor:
 
                 df.columns = pd.MultiIndex.from_tuples(new_columns)
 
-                densities = []
+                density_strings = []   # ordered unique strings, as they appear left-to-right
                 for density, _ in df.columns:
-                    if density not in densities:
-                        densities.append(density)
+                    if density not in density_strings:
+                        density_strings.append(density)
 
-                densities = [self.parse_density(d) for d in densities]
-
-                labels = [f"{d/1e12:g}e12" for d in densities]
+                densities = [self.parse_density(d) for d in density_strings]
+                labels    = [f"{d/1e12:g}e12" for d in densities]
 
                 default_density_idx = np.argmin(
                     np.abs(np.array(densities) - DEFAULT_EXCITON_DENSITY_CM2)
                 )
 
-                for i, density_label in enumerate(df.columns.levels[0]):
-
-                    energy = df[density_label].iloc[:, 0].to_numpy()
-                    counts = df[density_label].iloc[:, 1].to_numpy()
+                for i, density_str in enumerate(density_strings):   # ← iterate the ordered list
+                    energy = df[density_str].iloc[:, 0].to_numpy()
+                    counts = df[density_str].iloc[:, 1].to_numpy()
 
                     grp = nI_sweep.create_group(labels[i])
 
                     grp.attrs["parameter_value"] = densities[i]
                     grp.attrs["density_index"] = i
-                    grp.attrs["spectrum_unit"] = "eV"
+                    grp.attrs["spectrum_unit"] = "counts"
                     grp.attrs["is_default"] = (i == default_density_idx)
 
                     if i == 0:

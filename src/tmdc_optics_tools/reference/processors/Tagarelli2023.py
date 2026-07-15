@@ -137,7 +137,7 @@ class Tagarelli2023Processor:
                     pw_group.create_dataset("spectrum", data=spectrum_sliced)
                     pw_group.attrs["parameter_value"] = pwr
                     pw_group.attrs["power_index"]     = i
-                    pw_group.attrs["spectrum_unit"]   = "eV"
+                    pw_group.attrs["spectrum_unit"]   = "counts"
                     pw_group.attrs["is_default"]      = (i == default_power_idx)
 
         print(f"  → Saved to {self.out_path}")

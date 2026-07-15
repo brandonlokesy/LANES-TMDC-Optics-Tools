@@ -73,11 +73,15 @@ class SweepSeries:
     spectra:        dict   = field(default_factory=dict)
     default_value:  Optional[float] = None
 
-    def default(self) -> Spectrum:
-        """Return the canonical spectrum for this sweep."""
+    def default(self) -> "Spectrum | FieldCondition":
+        """Return the canonical entry, matched by nearest key to avoid float drift."""
         if self.default_value is None:
             raise ValueError(f"No default set for sweep '{self.parameter_name}'")
-        return self.spectra[self.default_value]
+        if self.default_value in self.spectra:
+            return self.spectra[self.default_value]
+        # Nearest-key fallback for float round-trip drift
+        nearest = min(self.spectra.keys(), key=lambda k: abs(k - self.default_value))
+        return self.spectra[nearest]
 
     def values(self) -> list:
         """Return parameter values in sorted order."""
@@ -169,12 +173,20 @@ class ReferenceDataset:
 # Loader
 # ---------------------------------------------------------------------------
 
+SPECTRUM_KEYS = ("spectrum", "counts")
+
+def _find_energy(group: h5py.Group) -> np.ndarray:
+    """Walk up the HDF5 hierarchy to find the nearest 'energy' dataset."""
+    node = group
+    while node is not None:
+        if "energy" in node:
+            return node["energy"][:]
+        if node.name == "/":
+            break
+        node = node.parent
+    return np.array([])
+
 def _read_sweep(group: h5py.Group, spectroscopy: str) -> SweepSeries:
-    """
-    Recursively read a SweepSeries from an HDF5 group.
-    Handles both flat sweeps (spectrum datasets at leaf level)
-    and nested sweeps (inner SweepSeries inside each condition).
-    """
     parameter_name = group.attrs.get("parameter_name", group.name.split("/")[-1])
     parameter_unit = group.attrs.get("parameter_unit", "")
     default_value  = group.attrs.get("default_value", None)
@@ -187,26 +199,30 @@ def _read_sweep(group: h5py.Group, spectroscopy: str) -> SweepSeries:
         if isinstance(subgroup, h5py.Dataset):
             continue
 
-        # Leaf node — contains an actual spectrum dataset
-        if "spectrum" in subgroup:
-            energy_ds = subgroup.parent.parent.get("energy") or subgroup.get("energy")
-            energy = energy_ds[:] if energy_ds is not None else np.array([])
+        # --- Leaf detection (Bug 3 fix) ---
+        # Previously hardcoded "spectrum"; now checks all known intensity keys
+        # so both Tagarelli ("spectrum") and Vaquero ("counts") are handled.
+        spectrum_key = next((k for k in SPECTRUM_KEYS if k in subgroup), None)
+
+        if spectrum_key is not None:
+            # Bug 2 fix: walk up the hierarchy instead of assuming a fixed depth
+            energy = _find_energy(subgroup)
 
             param_val = float(subgroup.attrs.get("parameter_value", float(key)))
             spectrum  = Spectrum(
                 energy          = energy,
-                intensity       = subgroup["spectrum"][:],
+                intensity       = subgroup[spectrum_key][:],
                 label           = key,
                 spectroscopy    = spectroscopy,
-                energy_unit     = subgroup.parent.parent.attrs.get("energy_unit", "eV"),
+                energy_unit     = subgroup.attrs.get("energy_unit", "eV"),
                 intensity_unit  = subgroup.attrs.get("spectrum_unit", "counts"),
                 parameter_value = param_val,
                 is_default      = bool(subgroup.attrs.get("is_default", False)),
             )
             spectra[param_val] = spectrum
 
-        # Non-leaf — this is a FieldCondition group containing an inner sweep
         else:
+            # Non-leaf — FieldCondition containing an inner sweep
             inner_sweeps = {}
             for inner_key in subgroup.keys():
                 if inner_key == "energy":
@@ -275,7 +291,7 @@ def load_reference(material: str, source: str) -> ReferenceDataset:
             material     = hf.attrs.get("material",     material),
             source       = hf.attrs.get("source",       source),
             doi          = hf.attrs.get("doi",          ""),
-            zenodo_doi   = hf.attrs.get("zenodo_doi",   ""),
+            dataset_doi  = hf.attrs.get("dataset_doi",  ""),
             title        = hf.attrs.get("title",        ""),
             about        = hf.attrs.get("about",      ""),
             spectroscopy = hf.attrs.get("spectroscopy", "PL"),

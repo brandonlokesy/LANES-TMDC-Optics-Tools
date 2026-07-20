@@ -1,6 +1,13 @@
-from .processors.Tagarelli2023 import *
-from .processors.Vaquero2026 import *
-from .processors.Dijkstra2025 import *
+from .processors import *
+
+        # "material" : "",
+        # "source"  : "",
+        # "dataset_doi": "",
+        # "title" : "",
+        # "doi" : "",
+        # "about" : "",
+        # "spectroscopy": "",
+        # "processor" : "",
 
 REGISTRY = [
     {
@@ -33,6 +40,50 @@ REGISTRY = [
         "about" : "Figure 2a: PL spectra of monolayer WSe2 with linearly polarized light sweept by exciton densities.",
         "spectroscopy": "PL",
         "processor" : Vaquero2026Processor,
+    },
+
+    {
+        "material" : "WS2_monolayer",
+        "source"  : "Alexeev2019",
+        "dataset_doi": "10.1038/s41586-019-0986-9",
+        "title" : "Resonantly hybridized excitons in moiré superlattices in van der Waals heterostructures",
+        "doi" : "10.1038/s41586-019-0986-9",
+        "about" : "",
+        "spectroscopy": "PL",
+        "processor" : Alexeev2019ProcessorWS2,
+    },
+
+    {
+        "material" : "MoSe2_monolayer",
+        "source"  : "Alexeev2019",
+        "dataset_doi": "10.1038/s41586-019-0986-9",
+        "title" : "Resonantly hybridized excitons in moiré superlattices in van der Waals heterostructures",
+        "doi" : "10.1038/s41586-019-0986-9",
+        "about" : "Fig. 4. T=10K",
+        "spectroscopy": "PL",
+        "processor" : Alexeev2019ProcessorMoSe2,
+    },
+
+    {
+        "material" : "WSe2_monolayer",
+        "source"  : "Lin2024",
+        "dataset_doi": "10.5281/zenodo.13629283",
+        "title" : "Moiré-engineered light-matter interactions in MoS2/WSe2 heterobilayers at room temperature",
+        "doi" : "10.1038/s41467-024-53083-x",
+        "about" : "Fig. 2. T=300K",
+        "spectroscopy": "R",
+        "processor" : Lin2024ProcessorWSe2,
+    },
+
+    {
+        "material" : "MoS2_monolayer",
+        "source"  : "Lin2024",
+        "dataset_doi": "10.5281/zenodo.13629283",
+        "title" : "Moiré-engineered light-matter interactions in MoS2/WSe2 heterobilayers at room temperature",
+        "doi" : "10.1038/s41467-024-53083-x",
+        "about" : "Fig. 2. T=300K",
+        "spectroscopy": "R",
+        "processor" : Lin2024ProcessorMoS2,
     },
 
     # {

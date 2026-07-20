@@ -27,13 +27,8 @@ class Vaquero2026Processor(Processor):
 
         with h5py.File(self.out_path, "w") as hf:
             # --- File-level metadata ---
-            hf.attrs["material"]   = self.meta["material"]
-            hf.attrs["source"]     = self.meta["source"]
-            hf.attrs["title"]      = self.meta["title"]
-            hf.attrs["doi"]        = self.meta["doi"]
-            hf.attrs["dataset_doi"] = self.meta["dataset_doi"]
-            hf.attrs["about"]    = self.meta.get("about", "")
-            hf.attrs["spectroscopy"] = self.meta.get("spectroscopy", "PL")
+            self._write_metadata(hf)
+
 
             nI_sweep = hf.create_group("exciton_density")
             nI_sweep.attrs["parameter_name"] = "exciton_density"

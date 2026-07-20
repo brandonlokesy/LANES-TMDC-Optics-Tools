@@ -165,7 +165,14 @@ class ReferenceDataset:
             f"material={self.material!r}, "
             f"source={self.source!r}, "
             f"spectroscopy={self.spectroscopy!r}, "
-            f"sweeps={sweep_summary})"
+            f"sweeps={sweep_summary})\n\n"
+
+            f"{'Title':<12}: {self.title}\n"
+            f"{'Source':<12}: {self.source}\n"
+            f"{'DOI':<12}: {self.doi}\n"
+            f"{'Dataset':<12}: {self.dataset_doi}\n"
+            f"{'Material':<12}: {self.material}\n"
+            f"{'Measurement':<12}: {self.spectroscopy}"
         )
 
 

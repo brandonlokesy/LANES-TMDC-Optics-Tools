@@ -677,7 +677,7 @@ def animate_real_space_PL_map(
             label=f"Laser Spot (1/e² Radius: {lr.radius:.1f} px)",
             zorder = 10
         )
-        circle.set_path_effects([pe.withStroke(linewidth=2.5, foreground="black")])
+        circle.set_path_effects([path_effects])
         ax.add_patch(circle)
 
     def update(frame):

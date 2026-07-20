@@ -86,6 +86,17 @@ REGISTRY = [
         "processor" : Lin2024ProcessorMoS2,
     },
 
+    {
+        "material" : "MoS2_homobilayer",
+        "source"  : "Louca2023",
+        "dataset_doi": "10.24435/materialscloud:d2-ta",
+        "title" : "Interspecies exciton interactions lead to enhanced nonlinearity of dipolar excitons and polaritons in MoS2 bilayers",
+        "doi" : "10.1038/s41467-023-39358-9",
+        "about" : "Fig. 1. T=4K",
+        "spectroscopy": "R",
+        "processor" : Louca2023Processor,
+    },
+
     # {
     #     "material" : "MoSe2_monolayer",
     #     "source"  : "Shimazaki2020",

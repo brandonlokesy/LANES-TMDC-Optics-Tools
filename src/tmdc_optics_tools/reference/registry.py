@@ -1,5 +1,6 @@
 from .processors.Tagarelli2023 import *
 from .processors.Vaquero2026 import *
+from .processors.Dijkstra2025 import *
 
 REGISTRY = [
     {
@@ -13,16 +14,15 @@ REGISTRY = [
         "processor": Tagarelli2023Processor,
     },
 
-    # {
-    #     "material" : "WSe2_monolayer",
-    #     "source"  : "Dijkstra2025",
-    #     "dataset_doi": "https://mediatum.ub.tum.de/1793118",
-    #     "title" : "Ten-valley excitonic complexes in charge-tunable monolayer WSe2",
-    #     "doi" : "10.1038/s41467-025-65731-x",
-    #     "about" : "Figure 1a",
-    #     "spectroscopy": "R",
-    #     "processor" : None
-    # },
+    {
+        "material" : "WSe2_monolayer",
+        "source"  : "Dijkstra2025",
+        "dataset_doi": "10.14459/2025mp1793118",
+        "title" : "Ten-valley excitonic complexes in charge-tunable monolayer WSe2",
+        "doi" : "10.1038/s41467-025-65731-x",
+        "about": "Figure 1a: gate-dependent reflectance contrast (ΔR/R₀) of monolayer WSe2. Sweep: gate voltage (V).",        "spectroscopy": "R",
+        "processor" : Dijkstra2025Processor,
+    },
 
     {
         "material" : "WSe2_monolayer",

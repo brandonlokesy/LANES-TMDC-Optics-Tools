@@ -199,13 +199,9 @@ def _read_sweep(group: h5py.Group, spectroscopy: str) -> SweepSeries:
         if isinstance(subgroup, h5py.Dataset):
             continue
 
-        # --- Leaf detection (Bug 3 fix) ---
-        # Previously hardcoded "spectrum"; now checks all known intensity keys
-        # so both Tagarelli ("spectrum") and Vaquero ("counts") are handled.
         spectrum_key = next((k for k in SPECTRUM_KEYS if k in subgroup), None)
 
         if spectrum_key is not None:
-            # Bug 2 fix: walk up the hierarchy instead of assuming a fixed depth
             energy = _find_energy(subgroup)
 
             param_val = float(subgroup.attrs.get("parameter_value", float(key)))
@@ -222,7 +218,7 @@ def _read_sweep(group: h5py.Group, spectroscopy: str) -> SweepSeries:
             spectra[param_val] = spectrum
 
         else:
-            # Non-leaf — FieldCondition containing an inner sweep
+
             inner_sweeps = {}
             for inner_key in subgroup.keys():
                 if inner_key == "energy":

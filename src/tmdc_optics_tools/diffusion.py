@@ -27,6 +27,8 @@ from skimage import filters, measure
 from skimage.morphology import label
 from os import PathLike
 from pathlib import Path
+import matplotlib.patches as patches
+
 
 from . import processing
 

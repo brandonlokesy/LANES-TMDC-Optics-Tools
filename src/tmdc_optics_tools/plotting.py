@@ -1511,6 +1511,21 @@ class DiffusionCloudPanel(AnimationPanel):
     centroid_color, centroid_marker, centroid_ms : str / str / float
         Style of the per-frame centroid marker.
     xlabel, ylabel : str
+    var_array : array-like, optional
+        Values of the swept parameter, one per frame (e.g. optical power,
+        gate voltage).  When supplied, the panel's ``ax.set_title`` is
+        updated every frame to show the current value.  If *seq_result* is
+        provided and already carries a ``var_array``, that is used as the
+        default — an explicit *var_array* here overrides it.
+    var_label : str
+        Human-readable label prepended to the per-frame value,
+        e.g. ``\"Power\"`` → ``\"Power: 1.23 µW\"``.
+        Defaults to *seq_result.var_label* when available.
+    var_units : str
+        Unit string appended to the value (e.g. ``\"µW\"``).
+        Defaults to *seq_result.var_units* when available.
+    var_fmt : str
+        Python format spec for the numeric value (e.g. ``\".3g\"``).
     threshold, smooth_sigma, keep_largest, pixel_scale, origin
         Forwarded to :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_sequence`
         when *seq_result* is ``None``.
@@ -1539,6 +1554,11 @@ class DiffusionCloudPanel(AnimationPanel):
         centroid_ms       : float = 30,
         xlabel            : str   = "x (px)",
         ylabel            : str   = "y (px)",
+        # swept-variable display — overrides seq_result fields when not None
+        var_array                 = None,
+        var_label         : str   = None,
+        var_units         : str   = None,
+        var_fmt           : str   = ".3g",
         # analyse kwargs (used when seq_result is None)
         threshold                 = "otsu",
         smooth_sigma      : float = 1.0,
@@ -1565,6 +1585,15 @@ class DiffusionCloudPanel(AnimationPanel):
         self.centroid_ms    = centroid_ms
         self.xlabel         = xlabel
         self.ylabel         = ylabel
+        # swept-variable display (None means "inherit from seq_result later")
+        self._var_array_override = np.asarray(var_array) if var_array is not None else None
+        self._var_label_override = var_label
+        self._var_units_override = var_units
+        self._var_fmt        = var_fmt
+        self._var_array      = None   # resolved in init_artists
+        self._var_label      = None
+        self._var_units      = None
+        self._frame_title_artist = None
         # analysis kwargs stored for lazy computation
         self._threshold     = threshold
         self._smooth_sigma  = smooth_sigma
@@ -1603,12 +1632,48 @@ class DiffusionCloudPanel(AnimationPanel):
                 origin       = self._origin,
                 bg_region    = self._bg_region,
                 bg_stat      = self._bg_stat,
-                roi          = self._roi
+                roi          = self._roi,
             )
         return self._seq_result
 
+    def _resolve_var(self, seq, n_frames: int) -> None:
+        """
+        Resolve the swept-variable array and labels.
+
+        Priority (highest first):
+        1. Explicit ``var_array`` / ``var_label`` / ``var_units`` passed to
+           ``__init__``.
+        2. ``seq_result.var_array`` / ``.var_label`` / ``.var_units`` — the
+           values that were forwarded from ``analyse_diffusion_sequence``.
+        3. ``None`` — no per-frame subtitle is shown.
+        """
+        arr = self._var_array_override
+        if arr is None and seq.var_array is not None:
+            arr = seq.var_array
+        if arr is not None:
+            self._var_array = np.asarray(arr)[:n_frames]
+        else:
+            self._var_array = None
+
+        self._var_label = (
+            self._var_label_override
+            if self._var_label_override is not None
+            else seq.var_label
+        )
+        self._var_units = (
+            self._var_units_override
+            if self._var_units_override is not None
+            else seq.var_units
+        )
+
+    def _make_frame_title(self, frame: int) -> str:
+        """Format the per-frame subtitle string."""
+        value_str = f"{self._var_array[frame]:{self._var_fmt}} {self._var_units}".strip()
+        return f"{self._var_label}: {value_str}" if self._var_label else value_str
+
     def init_artists(self, ax, n_frames: int) -> None:
         seq = self._get_seq_result()
+        self._resolve_var(seq, n_frames)
 
         # Draw frame 0
         frame0 = (self.scan.load_frame(0)
@@ -1619,14 +1684,32 @@ class DiffusionCloudPanel(AnimationPanel):
         )
         ax.set_xlabel(self.xlabel)
         ax.set_ylabel(self.ylabel)
-        ax.set_title(self.title)
+
+        # Static panel heading goes to suptitle territory; per-frame value
+        # goes to ax.set_title so it can be blitted independently.
+        if self._var_array is not None:
+            # Use the panel title as a static suptitle-style label and the
+            # swept value as the live ax title.  If no static title was set,
+            # the swept value alone is shown.
+            if self.title:
+                ax.figure.suptitle(self.title)
+            self._frame_title_artist = ax.set_title(self._make_frame_title(0))
+        else:
+            ax.set_title(self.title)
+            self._frame_title_artist = None
 
         if self.show_roi:
-            processing._draw_region_box(ax, self._roi if self._roi is not None else seq.roi,
-                            self.roi_color, label="ROI")
+            processing._draw_region_box(
+                ax,
+                self._roi if self._roi is not None else getattr(seq, "roi", None),
+                self.roi_color, label="ROI",
+            )
         if self.show_bg_region:
-            processing._draw_region_box(ax, self._bg_region if self._bg_region is not None else getattr(seq, "bg_region", None),
-                            self.bg_region_color, label="bg region")
+            processing._draw_region_box(
+                ax,
+                self._bg_region if self._bg_region is not None else getattr(seq, "bg_region", None),
+                self.bg_region_color, label="bg region",
+            )
 
         r0 = seq.frames[0]
         # Contour lines for frame 0
@@ -1640,7 +1723,7 @@ class DiffusionCloudPanel(AnimationPanel):
             )
             self._contour_lines.append(line)
 
-        # Centroid scatter (wrapped in a list so we can call remove() later)
+        # Centroid marker
         self._centroid_pt = ax.scatter(
             r0.x_pixel, r0.y_pixel,
             s=self.centroid_ms, c=self.centroid_color,
@@ -1672,4 +1755,10 @@ class DiffusionCloudPanel(AnimationPanel):
         # Update centroid
         self._centroid_pt.set_offsets([[r.x_pixel, r.y_pixel]])
 
-        return (self._im, self._centroid_pt, *self._contour_lines)
+        # Update per-frame title if a swept variable is set
+        updated: list = [self._im, self._centroid_pt, *self._contour_lines]
+        if self._frame_title_artist is not None and self._var_array is not None:
+            self._frame_title_artist.set_text(self._make_frame_title(frame))
+            updated.append(self._frame_title_artist)
+
+        return tuple(updated)

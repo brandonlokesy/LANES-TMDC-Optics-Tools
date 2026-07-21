@@ -258,27 +258,53 @@ def analyse_diffusion_cloud(
     """
     img = _load_image(image)
 
+    # --- 1. Background subtraction ----------------------------------------
     if bg_region is not None:
-        img = (
-            processing._apply_bg_region(img, bg_region, bg_stat)
-            if bg_region is not None else img
-        )
+        img = processing._apply_bg_region(img, bg_region, bg_stat)
 
+    # --- 2. ROI crop BEFORE smoothing and thresholding --------------------
+    # The MATLAB reference (find_em1_perimeter_custom) masks the image *before*
+    # computing the maximum and applying the 1/e threshold.  Doing it after
+    # means the global maximum (which may sit outside the ROI) drives the
+    # threshold level, so the cloud region is either missed entirely or the
+    # threshold is set far too high relative to the in-ROI signal.
+    img_roi = img  # full image by default
+    if roi is not None:
+        roi_mask_full = np.zeros(img.shape, dtype=bool)
+        roi_mask_full[roi] = True
+        img_roi = np.where(roi_mask_full, img, 0.0)
+
+    # --- 3. Smoothing (on the ROI-masked image) ---------------------------
     img_processed = (
-        filters.gaussian(img, sigma=smooth_sigma)
+        filters.gaussian(img_roi, sigma=smooth_sigma)
         if smooth_sigma > 0
-        else img
+        else img_roi.copy()
     )
 
-    # 2. Threshold → binary mask
+    # Zero any smoothed bleed outside the ROI back out so the peak/threshold
+    # computation only sees signal inside the ROI.
+    if roi is not None:
+        img_processed = np.where(roi_mask_full, img_processed, 0.0)
+
+    # --- 4. Threshold → binary mask ---------------------------------------
+    # All threshold modes compare against the *in-ROI* maximum, matching the
+    # MATLAB approach: [M,I]=max(im); [maxlaser,I2]=max(M); threshold = maxlaser/e.
+    peak = img_processed.max()
+
     if threshold == "1/e":
-        threshold = img_processed.max() / np.e
+        threshold_val = peak / np.e
 
     elif threshold == "otsu":
-        threshold = filters.threshold_otsu(img_processed)
+        # Otsu on the full array is dominated by zeros outside the ROI.
+        # Restrict to positive (in-ROI) pixels so the histogram is meaningful.
+        in_roi_vals = img_processed[img_processed > 0]
+        if in_roi_vals.size > 1:
+            threshold_val = filters.threshold_otsu(in_roi_vals)
+        else:
+            threshold_val = peak / np.e   # fall back to 1/e for degenerate ROI
 
     elif isinstance(threshold, (int, float)):
-        threshold = float(threshold) * img_processed.max()
+        threshold_val = float(threshold) * peak
 
     else:
         raise ValueError(
@@ -286,25 +312,19 @@ def analyse_diffusion_cloud(
             f"got {threshold!r}."
         )
 
-    mask = img_processed >= threshold
+    mask = img_processed >= threshold_val
+    threshold = threshold_val  # overwrite name so it is stored in the result
 
-    ys, xs = np.nonzero(mask)
-    weights = img_processed[mask]
-    cx_px = np.sum(xs * weights) / np.sum(weights)
-    cy_px = np.sum(ys * weights) / np.sum(weights)
-
-    if roi is not None:
-        roi_mask = np.zeros_like(mask, dtype=bool)
-        roi_mask[roi] = True
-        mask &= roi_mask
-
+    # --- 5. Keep largest connected region (optional) ----------------------
     if keep_largest:
         mask = _largest_region(mask)
 
     contours = measure.find_contours(mask.astype(float), level=0.5)
-    cx_px, cy_px = _intensity_centroid(img_processed, mask)
+    # Use the background-subtracted full image for intensity weighting so
+    # that the centroid reflects true signal, not the zeroed-out ROI surrounds.
+    cx_px, cy_px = _intensity_centroid(img, mask)
     area_px2 = _binary_area(mask)
-    
+
     x_real = y_real = area_real = None
     if pixel_scale is not None:
         x_real, y_real = _pixel_to_realspace(
@@ -328,6 +348,7 @@ def analyse_diffusion_cloud(
         threshold  = threshold,
         pixel_scale= pixel_scale,
         origin     = origin,
+        roi        = roi,
     )
 
 
@@ -380,7 +401,15 @@ def analyse_diffusion_sequence(
     -------
     DiffusionSequenceResult
     """
-    # Support both a raw list of arrays and a scan object
+    # Support both a raw list of arrays and a scan object.
+    # AttoCubePLScanRealSpace.load_frame() returns the raw numeric array —
+    # background subtraction has NOT happened yet — so we can pass bg_region
+    # straight through to analyse_diffusion_cloud.
+    #
+    # If the caller passes a list of _AttoCubeImage instances that were
+    # constructed with a bg_region, _load_image will use img_raw (the
+    # un-subtracted array) and analyse_diffusion_cloud will apply bg_region
+    # once.  There is therefore no double-subtraction risk in either path.
     if hasattr(frames, "load_frame") and hasattr(frames, "n_frames"):
         imgs = [frames.load_frame(i) for i in range(frames.n_frames)]
     else:
@@ -471,7 +500,12 @@ def _load_image(
         return np.loadtxt(image, delimiter=",")
 
     if isinstance(image, _AttoCubeImage):
-        return image.to_numpy()
+        # Return the RAW image array so that any bg_region passed to
+        # analyse_diffusion_cloud is the *only* place subtraction happens.
+        # _AttoCubeImage.img is already bg-subtracted when bg_region was
+        # supplied at construction time; using img_raw here avoids a second
+        # subtraction when the caller passes the same bg_region to this function.
+        return np.asarray(image.img_raw, dtype=float)
 
     return np.asarray(image, dtype=float)
 

@@ -813,6 +813,17 @@ class AnimationPanel:
     def update(self, frame: int) -> tuple:
         raise NotImplementedError
 
+    def frame_label(self, frame: int):
+        """
+        Per-frame label string contributed to the shared suptitle.
+
+        Return a non-empty string (e.g. ``"Power: 1.23 uW"``) to have it
+        included in the figure suptitle, or ``None`` to contribute nothing.
+        The default returns ``None`` so panels without a swept variable are
+        silent.
+        """
+        return None
+
 
 class ImageSequencePanel(AnimationPanel):
     """
@@ -949,26 +960,28 @@ class SpectrumLinePanel(AnimationPanel):
     def __init__(
         self,
         scan,
-        x_axis      : str = "energy",
-        sweep_attr  : str = "scanner_y",
-        sweep_label : str = None,
-        sweep_unit  : str = "V",
-        title_fmt   : str = "{label} = {value:.3g} {unit}",
-        color       : str = None,
-        ylabel      : str = "Counts",
+        x_axis           : str  = "energy",
+        sweep_attr       : str  = "scanner_y",
+        sweep_label      : str  = None,
+        sweep_unit       : str  = "V",
+        title_fmt        : str  = "{label} = {value:.3g} {unit}",
+        show_sweep_title : bool = True,
+        color            : str  = None,
+        ylabel           : str  = "Counts",
     ):
-        self.scan        = scan
-        self.x_axis      = x_axis
-        self.sweep_attr  = sweep_attr
-        self.sweep_label = sweep_label if sweep_label is not None else sweep_attr
-        self.sweep_unit  = sweep_unit
-        self.title_fmt   = title_fmt
-        self.color       = color
-        self.ylabel      = ylabel
-        self._line       = None
-        self._title      = None
-        self._y          = None
-        self._sweep_vals = None
+        self.scan             = scan
+        self.x_axis           = x_axis
+        self.sweep_attr       = sweep_attr
+        self.sweep_label      = sweep_label if sweep_label is not None else sweep_attr
+        self.sweep_unit       = sweep_unit
+        self.title_fmt        = title_fmt
+        self.show_sweep_title = show_sweep_title
+        self.color            = color
+        self.ylabel           = ylabel
+        self._line            = None
+        self._title           = None
+        self._y               = None
+        self._sweep_vals      = None
 
     @property
     def n_frames(self) -> int:
@@ -988,7 +1001,13 @@ class SpectrumLinePanel(AnimationPanel):
         ax.set_ylabel(self.ylabel)
 
         (self._line,) = ax.plot(x, self._y[:, 0], color=self.color)
-        self._title = ax.set_title(self._frame_title(0))
+        # show_sweep_title=True keeps the swept value in ax.set_title (useful
+        # when this panel is used standalone).  Set to False when animate_panels
+        # is already showing it in the suptitle to avoid duplication.
+        if self.show_sweep_title:
+            self._title = ax.set_title(self._frame_title(0))
+        else:
+            self._title = None
 
     def _frame_title(self, frame: int) -> str:
         return self.title_fmt.format(
@@ -997,10 +1016,19 @@ class SpectrumLinePanel(AnimationPanel):
             unit=self.sweep_unit,
         )
 
+    def frame_label(self, frame: int):
+        """Contribute the swept value to the shared suptitle."""
+        if self._sweep_vals is None:
+            return None
+        return self._frame_title(frame)
+
     def update(self, frame: int) -> tuple:
         self._line.set_ydata(self._y[:, frame])
-        self._title.set_text(self._frame_title(frame))
-        return (self._line, self._title)
+        updated = [self._line]
+        if self._title is not None:
+            self._title.set_text(self._frame_title(frame))
+            updated.append(self._title)
+        return tuple(updated)
 
 
 # Map output file extensions to the Matplotlib animation writer that handles
@@ -1028,7 +1056,9 @@ def animate_panels(
     panel_height       : float = 4.0,
     figsize            : tuple = None,
     interval_ms        : int   = 250,
-    suptitle_fmt       : str   = "Frame {frame}",
+    show_frame_count   : bool  = True,
+    frame_count_fmt    : str   = "Frame {frame}/{n_frames}",
+    suptitle_sep       : str   = "  |  ",
     constrained_layout : bool  = True,
     save               : str   = None,
     fps                : float = None,
@@ -1041,6 +1071,16 @@ def animate_panels(
     them in lock step with a single :class:`~matplotlib.animation.FuncAnimation`.
     Because the panel list is the only thing that determines the layout, any
     subset/combination/order of panels works with no special-casing.
+
+    The shared ``suptitle`` is built each frame by concatenating up to three
+    parts with *suptitle_sep*:
+
+    * The frame counter ``"Frame n/N"`` (when *show_frame_count* is ``True``).
+    * Per-panel swept-variable strings returned by each panel's
+      :meth:`~AnimationPanel.frame_label` hook (e.g. ``"Power: 1.23 uW"``).
+
+    Any part that is empty or ``None`` is silently omitted so the separator
+    never appears at the start or end of the string.
 
     Parameters
     ----------
@@ -1055,9 +1095,16 @@ def animate_panels(
         Overrides the computed ``(panel_width * n, panel_height)``.
     interval_ms : int
         Delay between frames in milliseconds.
-    suptitle_fmt : str or None
-        Shared heading above all panels, formatted with ``{frame}``.  Pass
-        ``None`` or ``""`` to omit it.
+    show_frame_count : bool
+        When ``True`` (default), prepend ``"Frame n/N"`` to the suptitle.
+        Set to ``False`` to show only the swept-variable labels.
+    frame_count_fmt : str
+        Format string for the frame counter.  Available fields:
+        ``{frame}`` (0-based current frame) and ``{n_frames}`` (total).
+        Default ``"Frame {frame}/{n_frames}"``.
+    suptitle_sep : str
+        Separator inserted between suptitle segments.
+        Default ``"  |  "``.
     constrained_layout : bool
     save : str, optional
         If given, save the animation to this path.  The output format is
@@ -1083,6 +1130,7 @@ def animate_panels(
     ...     ImageSequencePanel(real_space_PL_map, title="Real-space PL", cmap="lipari"),
     ...     SpectrumLinePanel(spectra_linescan, x_axis="energy"),
     ... ]
+    >>> # suptitle shows e.g. "Frame 3/78  |  Power: 1.23 uW"
     >>> fig, anim = animate_panels(panels, save="three_panel_scan.gif")
     """
     panels = list(panels)
@@ -1104,16 +1152,28 @@ def animate_panels(
     for panel, ax in zip(panels, axes):
         panel.init_artists(ax, n_frames)
 
-    suptitle = (
-        fig.suptitle(suptitle_fmt.format(frame=0)) if suptitle_fmt else None
+    def _build_suptitle(frame: int) -> str:
+        parts = []
+        if show_frame_count:
+            parts.append(frame_count_fmt.format(frame=frame, n_frames=n_frames))
+        for panel in panels:
+            lbl = panel.frame_label(frame)
+            if lbl:
+                parts.append(lbl)
+        return suptitle_sep.join(parts)
+
+    # Only create a suptitle Text object when there is something to show.
+    _has_suptitle = show_frame_count or any(
+        panel.frame_label(0) is not None for panel in panels
     )
+    suptitle = fig.suptitle(_build_suptitle(0)) if _has_suptitle else None
 
     def update(frame):
         artists = []
         for panel in panels:
             artists.extend(panel.update(frame))
         if suptitle is not None:
-            suptitle.set_text(suptitle_fmt.format(frame=frame))
+            suptitle.set_text(_build_suptitle(frame))
             artists.append(suptitle)
         return tuple(artists)
 
@@ -1593,7 +1653,6 @@ class DiffusionCloudPanel(AnimationPanel):
         self._var_array      = None   # resolved in init_artists
         self._var_label      = None
         self._var_units      = None
-        self._frame_title_artist = None
         # analysis kwargs stored for lazy computation
         self._threshold     = threshold
         self._smooth_sigma  = smooth_sigma
@@ -1671,6 +1730,12 @@ class DiffusionCloudPanel(AnimationPanel):
         value_str = f"{self._var_array[frame]:{self._var_fmt}} {self._var_units}".strip()
         return f"{self._var_label}: {value_str}" if self._var_label else value_str
 
+    def frame_label(self, frame: int):
+        """Contribute the swept value to the shared suptitle."""
+        if self._var_array is None:
+            return None
+        return self._make_frame_title(frame)
+
     def init_artists(self, ax, n_frames: int) -> None:
         seq = self._get_seq_result()
         self._resolve_var(seq, n_frames)
@@ -1684,19 +1749,9 @@ class DiffusionCloudPanel(AnimationPanel):
         )
         ax.set_xlabel(self.xlabel)
         ax.set_ylabel(self.ylabel)
-
-        # Static panel heading goes to suptitle territory; per-frame value
-        # goes to ax.set_title so it can be blitted independently.
-        if self._var_array is not None:
-            # Use the panel title as a static suptitle-style label and the
-            # swept value as the live ax title.  If no static title was set,
-            # the swept value alone is shown.
-            if self.title:
-                ax.figure.suptitle(self.title)
-            self._frame_title_artist = ax.set_title(self._make_frame_title(0))
-        else:
-            ax.set_title(self.title)
-            self._frame_title_artist = None
+        # Static panel title only — swept value is handled by frame_label
+        # and composed into the figure suptitle by animate_panels.
+        ax.set_title(self.title)
 
         if self.show_roi:
             processing._draw_region_box(
@@ -1755,10 +1810,4 @@ class DiffusionCloudPanel(AnimationPanel):
         # Update centroid
         self._centroid_pt.set_offsets([[r.x_pixel, r.y_pixel]])
 
-        # Update per-frame title if a swept variable is set
-        updated: list = [self._im, self._centroid_pt, *self._contour_lines]
-        if self._frame_title_artist is not None and self._var_array is not None:
-            self._frame_title_artist.set_text(self._make_frame_title(frame))
-            updated.append(self._frame_title_artist)
-
-        return tuple(updated)
+        return (self._im, self._centroid_pt, *self._contour_lines)

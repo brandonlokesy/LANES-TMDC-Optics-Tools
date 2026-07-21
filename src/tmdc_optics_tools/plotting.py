@@ -18,6 +18,7 @@ import matplotlib.patheffects as path_effects
 from skimage.exposure import rescale_intensity
 
 from . import processing
+from . import diffusion as _diffusion
 
 # Optional: cmcrameri diverging colormaps (pip install cmcrameri)
 try:
@@ -1266,3 +1267,409 @@ def animate_wl_pl_spectra(
         )
 
     return animate_panels(panels, save=save, **engine_kwargs)
+
+# ---------------------------------------------------------------------------
+# Diffusion cloud — single image
+# ---------------------------------------------------------------------------
+
+def plot_diffusion_cloud(
+    image,
+    result             = None,
+    ax                 = None,
+    figsize            : tuple = (4, 4),
+    dpi                : int   = None,
+    cmap               : str   = "inferno",
+    contour_color      : str   = "green",
+    contour_lw         : float = 0.9,
+    contour_ls         : str   = "--",
+    centroid_color     : str   = "white",
+    centroid_marker    : str   = "+",
+    centroid_ms        : float = 30,
+    colorbar           : bool  = True,
+    colorbar_label     : str   = "Intensity (counts)",
+    xlabel             : str   = "x (px)",
+    ylabel             : str   = "y (px)",
+    show_roi           : bool = False,
+    show_bg_region     : bool = False,
+    roi                : tuple = None,
+    bg_region          : tuple = None,
+    bg_stat            : str   = "median",
+    roi_color          : str   = "lime",
+    bg_region_color    : str   = "orange",
+    # analyse_diffusion_cloud kwargs (used when result is None)
+    threshold          : float | str = "1/e",
+    smooth_sigma       : float = 1.0,
+    keep_largest       : bool  = True,
+    pixel_scale        : float = None,
+    origin             : str   = "corner",
+) -> tuple:
+    """
+    Plot a single real-space PL image with the diffusion cloud boundary and
+    centroid overlaid.
+
+    You can either supply a pre-computed :class:`~tmdc_optics_tools.diffusion.DiffusionResult`
+    via *result*, or let the function run the analysis internally (using the
+    keyword arguments that mirror :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_cloud`).
+
+    Parameters
+    ----------
+    image : np.ndarray or object with ``.img``
+        Raw 2-D PL image.
+    result : DiffusionResult, optional
+        Pre-computed result from :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_cloud`.
+        When ``None`` the analysis is run here with the remaining kwargs.
+    ax : matplotlib.axes.Axes, optional
+        Creates a new figure if ``None``.
+    cmap : str
+        Colormap for the image.
+    contour_color, contour_lw, contour_ls : str / float / str
+        Style of the boundary contour.
+    centroid_color, centroid_marker, centroid_ms : str / str / float
+        Style of the centroid marker.
+    colorbar : bool
+    colorbar_label : str
+    xlabel, ylabel : str
+    threshold, smooth_sigma, keep_largest, pixel_scale, origin
+        Forwarded to :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_cloud`
+        when *result* is ``None``.
+
+    Returns
+    -------
+    fig, ax, result : (Figure, Axes, DiffusionResult)
+        The DiffusionResult is always returned so you can inspect the
+        centroid and area without a separate call.
+    """
+    from . import diffusion as _diffusion
+
+    img = image.img if hasattr(image, "img") else np.asarray(image, float)
+
+    if result is None:
+        result = _diffusion.analyse_diffusion_cloud(
+            img,
+            threshold    = threshold,
+            smooth_sigma = smooth_sigma,
+            keep_largest = keep_largest,
+            pixel_scale  = pixel_scale,
+            origin       = origin,
+            roi          = roi,
+            bg_region    = bg_region,
+            bg_stat      = bg_stat
+        )
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.get_figure()
+
+    im = ax.imshow(img, cmap=get_cmap(cmap), origin="upper")
+
+    for contour in result.contours:
+        ax.plot(contour[:, 1], contour[:, 0], color=contour_color,
+                linewidth=contour_lw, linestyle=contour_ls)
+
+    cx, cy = result.x_pixel, result.y_pixel
+    ax.scatter(cx, cy, s=centroid_ms, c=centroid_color, marker=centroid_marker,
+            linewidths=0.8, zorder=5, label=f"({cx:.1f}, {cy:.1f}) px")
+    
+    if show_roi:
+        processing._draw_region_box(ax, roi if roi is not None else result.roi,
+                        roi_color, label="ROI")
+    if show_bg_region:
+        processing._draw_region_box(ax, bg_region if bg_region is not None else getattr(image, "bg_region", None),
+                        bg_region_color, label="bg region")
+    
+    ax.legend(fontsize=5, loc="upper right", frameon=False)
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+
+    if colorbar:
+        cb = fig.colorbar(im, ax=ax, pad=0.02)
+        cb.set_label(colorbar_label)
+
+    return fig, ax, result
+
+
+# ---------------------------------------------------------------------------
+# Diffusion cloud — centroid trajectory plot
+# ---------------------------------------------------------------------------
+
+def plot_centroid_trajectory(
+    seq_result,
+    ax           = None,
+    figsize      : tuple = (5, 3.5),
+    dpi          : int   = None,
+    coord        : str   = "both",
+    use_real     : bool  = False,
+    color_x      : str   = "C0",
+    color_y      : str   = "C1",
+    marker       : str   = "o",
+    markersize   : float = 3,
+    xlabel       : str   = None,
+    ylabel       : str   = None,
+) -> tuple:
+    """
+    Plot the centroid position as a function of an external variable.
+
+    Parameters
+    ----------
+    seq_result : DiffusionSequenceResult
+        Output of :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_sequence`.
+    ax : matplotlib.axes.Axes, optional
+        Creates a new figure if ``None``.
+    coord : {``"x"``, ``"y"``, ``"both"``}
+        Which centroid coordinate(s) to plot.
+    use_real : bool
+        If ``True`` and real-space coordinates are available, plot those
+        instead of pixel coordinates.
+    color_x, color_y : str
+        Line/marker colours for x and y coordinates.
+    marker, markersize : str / float
+        Marker style.
+    xlabel : str, optional
+        X-axis label. Defaults to ``"<var_label> (<var_units>)"`` or
+        ``"Frame"`` when no *var_array* is set.
+    ylabel : str, optional
+        Y-axis label.
+
+    Returns
+    -------
+    fig, ax
+    """
+    sr = seq_result
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.get_figure()
+
+    x_ax = (sr.var_array if sr.var_array is not None
+            else np.arange(sr.n_frames))
+
+    if use_real and sr.x_real is not None:
+        cx = sr.x_real
+        cy = sr.y_real
+        coord_unit = " (real)"
+    else:
+        cx = sr.x_pixel
+        cy = sr.y_pixel
+        coord_unit = " (px)"
+
+    if coord in ("x", "both"):
+        ax.plot(x_ax, cx, color=color_x, marker=marker,
+                markersize=markersize, label="x" + coord_unit)
+    if coord in ("y", "both"):
+        ax.plot(x_ax, cy, color=color_y, marker=marker,
+                markersize=markersize, label="y" + coord_unit)
+
+    if xlabel is None:
+        if sr.var_array is not None and sr.var_label:
+            xlabel = f"{sr.var_label} ({sr.var_units})"
+        elif sr.var_array is not None:
+            xlabel = sr.var_units or "External variable"
+        else:
+            xlabel = "Frame"
+    if ylabel is None:
+        ylabel = "Centroid" + coord_unit
+
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.legend(frameon=False, fontsize=7)
+
+    return fig, ax
+
+
+# ---------------------------------------------------------------------------
+# DiffusionCloudPanel — drop-in AnimationPanel for animate_panels()
+# ---------------------------------------------------------------------------
+
+class DiffusionCloudPanel(AnimationPanel):
+    """
+    An :class:`AnimationPanel` that overlays the exciton diffusion cloud
+    boundary and centroid on each frame of an image sequence animation.
+
+    Plug this into :func:`animate_panels` alongside
+    :class:`ImageSequencePanel` or :class:`SpectrumLinePanel` to build a
+    composite animation that shows the boundary evolving frame-by-frame.
+
+    Parameters
+    ----------
+    scan : AttoCubePLScanRealSpace or list of np.ndarray
+        Image sequence.  Any object exposing ``load_frame(idx)`` and
+        ``n_frames`` (e.g. :class:`~tmdc_optics_tools.loaders.AttoCubePLScanRealSpace`),
+        or a plain list of 2-D arrays.
+    seq_result : DiffusionSequenceResult, optional
+        Pre-computed sequence result.  When ``None`` the analysis is run
+        lazily on ``init_artists`` (requires that *scan* be indexable at
+        that point).
+    title : str
+        Panel heading.
+    cmap : str
+        Colormap for the image.
+    contour_color, contour_lw, contour_ls : str / float / str
+        Style of the per-frame boundary contour.
+    centroid_color, centroid_marker, centroid_ms : str / str / float
+        Style of the per-frame centroid marker.
+    xlabel, ylabel : str
+    threshold, smooth_sigma, keep_largest, pixel_scale, origin
+        Forwarded to :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_sequence`
+        when *seq_result* is ``None``.
+
+    Examples
+    --------
+    >>> seq = analyse_diffusion_sequence(scan, pixel_scale=0.065)
+    >>> panels = [
+    ...     ImageSequencePanel(wl_scan, title="White light"),
+    ...     DiffusionCloudPanel(pl_scan, seq_result=seq, title="Exciton cloud"),
+    ... ]
+    >>> fig, anim = animate_panels(panels, save="diffusion_sweep.gif")
+    """
+
+    def __init__(
+        self,
+        scan,
+        seq_result        = None,
+        title             : str   = "Exciton diffusion cloud",
+        cmap              : str   = "inferno",
+        contour_color     : str   = "cyan",
+        contour_lw        : float = 0.9,
+        contour_ls        : str   = "--",
+        centroid_color    : str   = "white",
+        centroid_marker   : str   = "+",
+        centroid_ms       : float = 30,
+        xlabel            : str   = "x (px)",
+        ylabel            : str   = "y (px)",
+        # analyse kwargs (used when seq_result is None)
+        threshold                 = "otsu",
+        smooth_sigma      : float = 1.0,
+        keep_largest      : bool  = True,
+        pixel_scale       : float = None,
+        origin            : str   = "corner",
+        bg_region         : tuple = None,
+        bg_stat           : str   = "median",
+        roi               : tuple = None,
+        show_roi          : bool  = False,
+        show_bg_region    : bool  = False,
+        roi_color         : str   = "lime",
+        bg_region_color   : str   = "orange",
+    ):
+        self.scan           = scan
+        self._seq_result    = seq_result
+        self.title          = title
+        self.cmap           = cmap
+        self.contour_color  = contour_color
+        self.contour_lw     = contour_lw
+        self.contour_ls     = contour_ls
+        self.centroid_color = centroid_color
+        self.centroid_marker= centroid_marker
+        self.centroid_ms    = centroid_ms
+        self.xlabel         = xlabel
+        self.ylabel         = ylabel
+        # analysis kwargs stored for lazy computation
+        self._threshold     = threshold
+        self._smooth_sigma  = smooth_sigma
+        self._keep_largest  = keep_largest
+        self._pixel_scale   = pixel_scale
+        self._origin        = origin
+        self._bg_region     = bg_region
+        self._bg_stat       = bg_stat
+        self._roi           = roi
+        self.show_roi       = show_roi
+        self.show_bg_region = show_bg_region
+        self.roi_color      = roi_color
+        self.bg_region_color= bg_region_color
+
+        # artists (set in init_artists)
+        self._im            = None
+        self._contour_lines = []
+        self._centroid_pt   = None
+
+    @property
+    def n_frames(self) -> int:
+        if hasattr(self.scan, "n_frames"):
+            return self.scan.n_frames
+        return len(self.scan)
+
+    def _get_seq_result(self):
+        """Run analysis lazily if not pre-supplied."""
+        if self._seq_result is None:
+            from . import diffusion as _diffusion
+            self._seq_result = _diffusion.analyse_diffusion_sequence(
+                self.scan,
+                threshold    = self._threshold,
+                smooth_sigma = self._smooth_sigma,
+                keep_largest = self._keep_largest,
+                pixel_scale  = self._pixel_scale,
+                origin       = self._origin,
+                bg_region    = self._bg_region,
+                bg_stat      = self._bg_stat,
+                roi          = self._roi
+            )
+        return self._seq_result
+
+    def init_artists(self, ax, n_frames: int) -> None:
+        seq = self._get_seq_result()
+
+        # Draw frame 0
+        frame0 = (self.scan.load_frame(0)
+                  if hasattr(self.scan, "load_frame") else self.scan[0])
+        self._im = ax.imshow(
+            np.asarray(frame0, float),
+            cmap=get_cmap(self.cmap), origin="upper",
+        )
+        ax.set_xlabel(self.xlabel)
+        ax.set_ylabel(self.ylabel)
+        ax.set_title(self.title)
+
+        if self.show_roi:
+            processing._draw_region_box(ax, self._roi if self._roi is not None else seq.roi,
+                            self.roi_color, label="ROI")
+        if self.show_bg_region:
+            processing._draw_region_box(ax, self._bg_region if self._bg_region is not None else getattr(seq, "bg_region", None),
+                            self.bg_region_color, label="bg region")
+
+        r0 = seq.frames[0]
+        # Contour lines for frame 0
+        self._contour_lines = []
+        for contour in r0.contours:
+            (line,) = ax.plot(
+                contour[:, 1], contour[:, 0],
+                color=self.contour_color,
+                linewidth=self.contour_lw,
+                linestyle=self.contour_ls,
+            )
+            self._contour_lines.append(line)
+
+        # Centroid scatter (wrapped in a list so we can call remove() later)
+        self._centroid_pt = ax.scatter(
+            r0.x_pixel, r0.y_pixel,
+            s=self.centroid_ms, c=self.centroid_color,
+            marker=self.centroid_marker, linewidths=0.8, zorder=5,
+        )
+
+    def update(self, frame: int) -> tuple:
+        seq = self._get_seq_result()
+        img = (self.scan.load_frame(frame)
+               if hasattr(self.scan, "load_frame") else self.scan[frame])
+        self._im.set_data(np.asarray(img, float))
+
+        r = seq.frames[frame]
+
+        # Update contours — replace lines (variable length per frame)
+        for line in self._contour_lines:
+            line.remove()
+        ax = self._im.axes
+        self._contour_lines = []
+        for contour in r.contours:
+            (line,) = ax.plot(
+                contour[:, 1], contour[:, 0],
+                color=self.contour_color,
+                linewidth=self.contour_lw,
+                linestyle=self.contour_ls,
+            )
+            self._contour_lines.append(line)
+
+        # Update centroid
+        self._centroid_pt.set_offsets([[r.x_pixel, r.y_pixel]])
+
+        return (self._im, self._centroid_pt, *self._contour_lines)

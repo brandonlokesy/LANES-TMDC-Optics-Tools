@@ -42,7 +42,7 @@ from .constants import (
 )
 
 from . import processing
-from .processing import jacobian_correction_wvl2E, subtract_background
+from .processing import _draw_region_box, jacobian_correction_wvl2E, subtract_background
 
 # ---------------------------------------------------------------------------
 # StackLayer — one material slab in the heterostructure
@@ -1097,10 +1097,14 @@ class AttoCubePLScanRealSpace:
         prefix    : str,
         geometry  : DeviceGeometry = None,
         laser_ref : "AttoCubeLaserReferenceImage" = None,
+        bg_region : tuple = None,
+        bg_stat   : str   = "median",
     ):
         self.path      = str(path)
         self.geometry  = geometry
         self.laser_ref = laser_ref
+        self.bg_region = bg_region      # (row_slice, col_slice) in pixel space
+        self.bg_stat   = bg_stat
 
         candidates = sorted(Path(path).glob(f"{prefix}*.csv"))
         files = [f for f in candidates if self._is_image_csv(f)]
@@ -1135,10 +1139,10 @@ class AttoCubePLScanRealSpace:
         """Number of frames loaded."""
         return len(self.files)
 
-    def preview_image(self, idx: int) -> tuple:
+    def preview_image(self, idx: int, cmap = "gray") -> tuple:
         """Plot a single frame and return (fig, ax)."""
         fig, ax = plt.subplots()
-        ax.imshow(self.load_frame(idx), cmap="gray")
+        ax.imshow(self.load_frame(idx), cmap)
         ax.axis("off")
         return fig, ax
 
@@ -1155,10 +1159,16 @@ class _AttoCubeImage:
     circle annotation logic so subclasses do not duplicate it.
     """
 
-    def __init__(self, path: str, laser_ref: "AttoCubeLaserReferenceImage" = None):
+    def __init__(self, path: str, laser_ref: "AttoCubeLaserReferenceImage" = None, bg_region : tuple = None, bg_stat : str = "median"):
         self.path      = str(path)
         self.laser_ref = laser_ref
-        self.img       = np.loadtxt(self.path, delimiter=",")
+        self.bg_region = bg_region
+        self.bg_stat   = bg_stat
+        self.img_raw       = np.loadtxt(self.path, delimiter=",")
+        self.img = (
+            processing._apply_bg_region(self.img_raw, bg_region, bg_stat)
+            if bg_region is not None else self.img_raw
+        )
 
     # --- Internal helpers --------------------------------------------------
 
@@ -1187,7 +1197,23 @@ class _AttoCubeImage:
             ax.legend(handles=[circle], loc="upper right")
         return circle
 
+    def __array__(self, dtype=None):
+        return np.asarray(self.img, dtype=dtype)
+
+
     # --- Public interface --------------------------------------------------
+
+    def to_numpy(self, copy: bool = True) -> np.ndarray:
+        """
+        Return the image data as a NumPy array.
+
+        Parameters
+        ----------
+        copy : bool
+            If True, return a copy of the image data. If False, return the
+            underlying array directly.
+        """
+        return self.img.copy() if copy else self.img
 
     def show_image(
         self,
@@ -1195,6 +1221,8 @@ class _AttoCubeImage:
         laser_annotation : bool = False,
         legend           : bool = False,
         normalise        : bool = False,
+        show_bg_region   : bool = False,
+        bg_region_color  : str  = "orange",
     ) -> tuple:
         """
         Display the image and return (fig, ax).
@@ -1222,6 +1250,9 @@ class _AttoCubeImage:
         ax.imshow(display, cmap="gray")
         ax.axis("off")
 
+        if show_bg_region:
+            processing._draw_region_box(ax, self.bg_region, bg_region_color, label="bg region")
+            legend = True
         if laser_annotation and self.laser_ref is not None:
             self._add_laser_circle(ax, self.laser_ref, legend=legend)
 
@@ -1500,3 +1531,9 @@ class SingleImage(_AttoCubeImage):
             f"SingleImage — {self.img.shape[0]} × {self.img.shape[1]} px\n"
             f"  File : {self.path}\n"
         )
+
+class AttoCubePLImage(_AttoCubeImage):
+    """A single real-space PL frame — same handling as AttoCubePLScanRealSpace,
+    for spot-checking one file without building a full sequence."""
+    def __init__(self, path, laser_ref=None, bg_region=None, bg_stat="median"):
+        super().__init__(path, laser_ref=laser_ref, bg_region=bg_region, bg_stat=bg_stat)

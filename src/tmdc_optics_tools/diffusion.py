@@ -1,0 +1,534 @@
+# tmdc_optics_tools/diffusion.py
+"""
+Exciton diffusion cloud analysis.
+
+Provides routines to detect and characterise the exciton diffusion cloud
+in real-space PL images: thresholding, boundary tracing, centroid extraction,
+and real-space coordinate conversion.
+
+Note: "diffusion" here refers to the spatial spread of the PL cloud as
+imaged in real space. The underlying mechanism may include both diffusion
+and drift (see doi:10.1038/s41566-023-01198-w); separating them requires
+modelling the spatial profiles, which is handled in fitting.py.
+
+The companion plotting helpers live in plotting.py:
+  - plot_diffusion_cloud()          single image with boundary + centroid
+  - plot_centroid_trajectory()      centroid x/y vs. an external variable
+  - DiffusionCloudPanel             AnimationPanel subclass for animate_panels()
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+from scipy import ndimage
+from skimage import filters, measure
+from skimage.morphology import label
+from os import PathLike
+from pathlib import Path
+
+from . import processing
+
+from tmdc_optics_tools.loaders import _AttoCubeImage
+
+# ---------------------------------------------------------------------------
+# Result container
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DiffusionResult:
+    """
+    Analysis result for a single real-space PL image.
+
+    Produced by :func:`analyse_diffusion_cloud`.  All coordinate values are
+    in **pixel** units unless a *pixel_scale* was supplied to the analysis
+    function, in which case the ``x_real`` / ``y_real`` fields are also
+    populated.
+
+    Attributes
+    ----------
+    x_pixel, y_pixel : float
+        Intensity-weighted centroid in pixel coordinates.
+        ``(0, 0)`` is the top-left corner of the image (``origin="corner"``
+        convention).  Use :meth:`centroid_px` / :meth:`centroid_real` for a
+        convenient ``(x, y)`` tuple.
+    x_real, y_real : float or None
+        Centroid in real-space coordinates (same units as *pixel_scale*).
+        ``None`` when no scale was supplied.
+    area_px2 : float
+        Effective cloud area in px².
+    area_real : float or None
+        Effective cloud area in real-space units² (``pixel_scale²``).
+        ``None`` when no scale was supplied.
+    contours : list of np.ndarray
+        Boundary contours as ``(N, 2)`` arrays of ``(row, col)`` coordinates,
+        one per closed region.  Typically a single contour enclosing the cloud.
+    mask : np.ndarray of bool, shape (H, W)
+        Binary mask: ``True`` where the image exceeds the threshold.
+    threshold : float
+        Threshold value that was actually applied (after Otsu / manual
+        fraction conversion).
+    pixel_scale : float or None
+        µm-per-pixel scale used for conversion (echoed from the call).
+    origin : str
+        Origin convention used for real-space conversion
+        (``"corner"`` | ``"center"`` | ``"image_center"``).
+    """
+
+    x_pixel    : float
+    y_pixel    : float
+    x_real     : float | None
+    y_real     : float | None
+    area_px2   : float
+    area_real  : float | None
+    contours   : list
+    mask       : np.ndarray
+    threshold  : float
+    pixel_scale: float | None = None
+    origin     : str          = "corner"
+    roi        : tuple | None = None   # (row_slice, col_slice), echoed from the call
+
+    @property
+    def centroid_px(self) -> tuple[float, float]:
+        """``(x_pixel, y_pixel)`` as a plain tuple."""
+        return (self.x_pixel, self.y_pixel)
+
+    @property
+    def centroid_real(self) -> tuple[float | None, float | None]:
+        """``(x_real, y_real)`` as a plain tuple (``None`` if no scale)."""
+        return (self.x_real, self.y_real)
+
+    def __repr__(self) -> str:
+        lines = [
+            f"DiffusionResult",
+            f"  Centroid (px)   : ({self.x_pixel:.2f}, {self.y_pixel:.2f})",
+        ]
+        if self.x_real is not None:
+            lines.append(
+                f"  Centroid (real) : ({self.x_real:.4g}, {self.y_real:.4g})"
+                f"  [origin='{self.origin}']"
+            )
+        lines.append(f"  Area            : {self.area_px2:.1f} px²")
+        if self.area_real is not None:
+            lines.append(f"  Area (real)     : {self.area_real:.4g}")
+        lines.append(f"  Threshold       : {self.threshold:.4g}")
+        lines.append(f"  Contours        : {len(self.contours)}")
+        return "\n".join(lines)
+
+
+@dataclass
+class DiffusionSequenceResult:
+    """
+    Analysis results for a sequence of real-space PL images.
+
+    Produced by :func:`analyse_diffusion_sequence`.  Provides convenient
+    array access to per-frame scalar quantities so that they can be directly
+    passed to a plotting function alongside an external variable axis (time,
+    power, electric field, …).
+
+    Attributes
+    ----------
+    frames : list of DiffusionResult
+        Per-frame results, one entry per image in the sequence.
+    var_array : np.ndarray or None
+        External variable axis (e.g. power in µW, time in s, E-field in
+        mV/nm).  Echoed from the call for convenience.
+    var_label : str
+        Human-readable label for *var_array* (e.g. ``"Power"``).
+    var_units : str
+        Units string for *var_array* (e.g. ``"µW"``).
+    """
+
+    frames    : list            # list[DiffusionResult]
+    var_array : np.ndarray | None = None
+    var_label : str               = ""
+    var_units : str               = ""
+
+    # --- Convenience array accessors --------------------------------------
+
+    @property
+    def x_pixel(self) -> np.ndarray:
+        """Centroid x in pixel coordinates, shape ``(n_frames,)``."""
+        return np.array([f.x_pixel for f in self.frames])
+
+    @property
+    def y_pixel(self) -> np.ndarray:
+        """Centroid y in pixel coordinates, shape ``(n_frames,)``."""
+        return np.array([f.y_pixel for f in self.frames])
+
+    @property
+    def x_real(self) -> np.ndarray | None:
+        """Centroid x in real space, shape ``(n_frames,)``, or ``None``."""
+        vals = [f.x_real for f in self.frames]
+        return np.array(vals) if vals[0] is not None else None
+
+    @property
+    def y_real(self) -> np.ndarray | None:
+        """Centroid y in real space, shape ``(n_frames,)``, or ``None``."""
+        vals = [f.y_real for f in self.frames]
+        return np.array(vals) if vals[0] is not None else None
+
+    @property
+    def area_px2(self) -> np.ndarray:
+        """Effective cloud area in px², shape ``(n_frames,)``."""
+        return np.array([f.area_px2 for f in self.frames])
+
+    @property
+    def area_real(self) -> np.ndarray | None:
+        """Effective cloud area in real-space units², or ``None``."""
+        vals = [f.area_real for f in self.frames]
+        return np.array(vals) if vals[0] is not None else None
+
+    @property
+    def n_frames(self) -> int:
+        return len(self.frames)
+
+    def __repr__(self) -> str:
+        return (
+            f"DiffusionSequenceResult — {self.n_frames} frames\n"
+            f"  x_pixel range : {self.x_pixel.min():.2f} – {self.x_pixel.max():.2f}\n"
+            f"  y_pixel range : {self.y_pixel.min():.2f} – {self.y_pixel.max():.2f}\n"
+            f"  area range    : {self.area_px2.min():.1f} – {self.area_px2.max():.1f} px²"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Core analysis: single image
+# ---------------------------------------------------------------------------
+
+def analyse_diffusion_cloud(
+    image         : np.ndarray | str | PathLike | "_AttoCubeImage",
+    threshold     : float | str = "1/e",
+    smooth_sigma  : float       = 0.0,
+    keep_largest  : bool        = False,
+    roi           : tuple[slice, slice] | None = None,
+    bg_region     : tuple[slice, slice] | None = None,
+    bg_stat       : str         = "median",
+    pixel_scale   : float | None = None,
+    scale_units   : str         = "µm",
+    origin        : str         = "corner",
+) -> DiffusionResult:
+    """
+    Detect the exciton diffusion cloud boundary and centroid in a single image.
+
+    The routine mirrors the encirclement approach used in the original
+    ``analysis.m`` MATLAB script: smooth → threshold → trace boundary →
+    intensity-weighted centroid.
+
+    Parameters
+    ----------
+    image : np.ndarray, str, pathlib.Path, or _AttoCubeImage
+        Background-subtracted PL image. Accepted inputs are:
+
+        - a 2D NumPy array with shape (H, W),
+        - a path to a CSV file, or
+        - an instance of _AttoCubeImage or any of its subclasses.
+
+        Image data should be numeric (float or int).
+    threshold : float or ``"otsu"``
+        Threshold mode:
+        - 1/e threshold (default) — threshold = image.max() / e.
+        - ``"otsu"`` — automatic Otsu threshold.
+        - ``float`` — fraction of the image maximum, e.g. ``0.15`` means
+          15 % of ``image.max()``.
+    smooth_sigma : float
+        Standard deviation of the Gaussian pre-smoothing kernel in pixels.
+        Set ``0`` to skip smoothing.
+    keep_largest : bool
+        If ``True``, retain only the largest connected region above the
+        threshold (suppresses noise blobs).
+    pixel_scale : float, optional
+        Physical size of one pixel in real-space units (e.g. µm/px).
+        When supplied, ``x_real``, ``y_real``, and ``area_real`` are
+        populated in the returned :class:`DiffusionResult`.
+    scale_units : str
+        Unit label for *pixel_scale* (used only in ``__repr__``).
+    origin : {``"corner"``, ``"center"``, ``"image_center"``}
+        Origin convention for real-space coordinates:
+        - ``"corner"``       — ``(0, 0)`` is the top-left pixel.
+        - ``"center"``       — ``(0, 0)`` is the cloud centroid itself.
+        - ``"image_center"`` — ``(0, 0)`` is the dead-centre of the image.
+
+    Returns
+    -------
+    DiffusionResult
+    """
+    img = _load_image(image)
+
+    if bg_region is not None:
+        img = (
+            processing._apply_bg_region(img, bg_region, bg_stat)
+            if bg_region is not None else img
+        )
+
+    img_processed = (
+        filters.gaussian(img, sigma=smooth_sigma)
+        if smooth_sigma > 0
+        else img
+    )
+
+    # 2. Threshold → binary mask
+    if threshold == "1/e":
+        threshold = img_processed.max() / np.e
+
+    elif threshold == "otsu":
+        threshold = filters.threshold_otsu(img_processed)
+
+    elif isinstance(threshold, (int, float)):
+        threshold = float(threshold) * img_processed.max()
+
+    else:
+        raise ValueError(
+            "threshold must be '1/e', 'otsu', or a float, "
+            f"got {threshold!r}."
+        )
+
+    mask = img_processed >= threshold
+
+    ys, xs = np.nonzero(mask)
+    weights = img_processed[mask]
+    cx_px = np.sum(xs * weights) / np.sum(weights)
+    cy_px = np.sum(ys * weights) / np.sum(weights)
+
+    if roi is not None:
+        roi_mask = np.zeros_like(mask, dtype=bool)
+        roi_mask[roi] = True
+        mask &= roi_mask
+
+    if keep_largest:
+        mask = _largest_region(mask)
+
+    contours = measure.find_contours(mask.astype(float), level=0.5)
+    cx_px, cy_px = _intensity_centroid(img_processed, mask)
+    area_px2 = _binary_area(mask)
+    
+    x_real = y_real = area_real = None
+    if pixel_scale is not None:
+        x_real, y_real = _pixel_to_realspace(
+            cx_px, cy_px,
+            scale=pixel_scale,
+            origin=origin,
+            image_shape=img.shape,
+            centroid_px=(cx_px, cy_px),
+        )
+        area_real = area_px2 * pixel_scale ** 2
+
+    return DiffusionResult(
+        x_pixel    = cx_px,
+        y_pixel    = cy_px,
+        x_real     = x_real,
+        y_real     = y_real,
+        area_px2   = area_px2,
+        area_real  = area_real,
+        contours   = contours,
+        mask       = mask,
+        threshold  = threshold,
+        pixel_scale= pixel_scale,
+        origin     = origin,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Core analysis: image sequence
+# ---------------------------------------------------------------------------
+
+def analyse_diffusion_sequence(
+    frames        : list,
+    threshold     : float | str = "1/e",
+    smooth_sigma  : float       = 1.0,
+    keep_largest  : bool        = True,
+    roi           : tuple[slice, slice] = None,
+    bg_region     : tuple[slice, slice] = None,
+    bg_stat       : str         = "median",
+    pixel_scale   : float       = None,
+    scale_units   : str         = "µm",
+    origin        : str         = "corner",
+    var_array                   = None,
+    var_label     : str         = "",
+    var_units     : str         = "",
+) -> DiffusionSequenceResult:
+    """
+    Run :func:`analyse_diffusion_cloud` on every frame of a sequence.
+
+    The *frames* list can be either a list of ``np.ndarray`` images, or any
+    object exposing ``load_frame(idx)`` and ``n_frames`` (i.e. an
+    :class:`~tmdc_optics_tools.loaders.AttoCubePLScanRealSpace` instance).
+
+    Parameters
+    ----------
+    frames : list of np.ndarray or AttoCubePLScanRealSpace
+        Image sequence.
+    threshold, smooth_sigma, keep_largest, pixel_scale, scale_units, origin
+        Forwarded to :func:`analyse_diffusion_cloud` for every frame.
+        Threshold mode:
+        - 1/e threshold (default) — threshold = image.max() / e.
+        - ``"otsu"`` — automatic Otsu threshold.
+        - ``float`` — fraction of the image maximum, e.g. ``0.15`` means
+          15 % of ``image.max()``.
+    var_array : array-like, optional
+        External variable axis (time, power, E-field, …), one value per
+        frame.  Stored in the result for downstream plotting.
+    var_label : str
+        Human-readable label for *var_array* (e.g. ``"Power"``).
+    var_units : str
+        Unit string for *var_array* (e.g. ``"µW"``).
+
+    Returns
+    -------
+    DiffusionSequenceResult
+    """
+    # Support both a raw list of arrays and a scan object
+    if hasattr(frames, "load_frame") and hasattr(frames, "n_frames"):
+        imgs = [frames.load_frame(i) for i in range(frames.n_frames)]
+    else:
+        imgs = list(frames)
+
+    results = [
+        analyse_diffusion_cloud(
+            img,
+            threshold    = threshold,
+            smooth_sigma = smooth_sigma,
+            keep_largest = keep_largest,
+            roi          = roi,
+            bg_region    = bg_region,
+            bg_stat      = bg_stat,
+            pixel_scale  = pixel_scale,
+            scale_units  = scale_units,
+            origin       = origin,
+        )
+        for img in imgs
+    ]
+
+    return DiffusionSequenceResult(
+        frames    = results,
+        var_array = np.asarray(var_array) if var_array is not None else None,
+        var_label = var_label,
+        var_units = var_units,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+def _largest_region(mask: np.ndarray) -> np.ndarray:
+    """Return a mask containing only the largest connected component."""
+    labeled = label(mask)
+    if labeled.max() == 0:
+        return mask                # nothing above threshold; return as-is
+    sizes = np.bincount(labeled.ravel())
+    sizes[0] = 0                   # exclude background
+    return labeled == sizes.argmax()
+
+
+def _intensity_centroid(img: np.ndarray, mask: np.ndarray) -> tuple[float, float]:
+    """Intensity-weighted centre of mass of the masked region."""
+    weighted = img * mask
+    cy, cx = ndimage.center_of_mass(weighted)
+    return float(cx), float(cy)   # (x=col, y=row)
+
+
+def _pixel_to_realspace(
+    x_px         : float,
+    y_px         : float,
+    scale        : float,
+    origin       : str,
+    image_shape  : tuple,
+    centroid_px  : tuple,
+) -> tuple[float, float]:
+    """
+    Convert a pixel coordinate to real space.
+
+    Parameters
+    ----------
+    x_px, y_px    : pixel coordinates (col, row)
+    scale         : µm (or other unit) per pixel
+    origin        : ``"corner"`` | ``"center"`` | ``"image_center"``
+    image_shape   : ``(n_rows, n_cols)``
+    centroid_px   : ``(cx, cy)`` centroid in pixels (used when origin="center")
+    """
+    if origin == "corner":
+        x0, y0 = 0.0, 0.0
+    elif origin == "center":
+        x0, y0 = centroid_px          # cloud centroid is (0, 0)
+    elif origin == "image_center":
+        x0 = image_shape[1] / 2.0    # dead-centre of the image
+        y0 = image_shape[0] / 2.0
+    else:
+        raise ValueError(f"origin must be 'corner', 'center', or 'image_center'; got {origin!r}.")
+
+    return (x_px - x0) * scale, (y_px - y0) * scale
+
+
+def _load_image(
+    image: np.ndarray | str | PathLike | _AttoCubeImage,
+) -> np.ndarray:
+
+    if isinstance(image, (str, PathLike)):
+        return np.loadtxt(image, delimiter=",")
+
+    if isinstance(image, _AttoCubeImage):
+        return image.to_numpy()
+
+    return np.asarray(image, dtype=float)
+
+def _binary_area(mask: np.ndarray) -> float:
+    """
+    Approximate MATLAB bwarea for a binary image.
+
+    Returns area in pixel².
+    """
+    mask = np.asarray(mask, dtype=bool)
+
+    a = mask[:-1, :-1]
+    b = mask[:-1, 1:]
+    c = mask[1:, :-1]
+    d = mask[1:, 1:]
+
+    pattern = (
+        a.astype(np.uint8)
+        + 2 * b.astype(np.uint8)
+        + 4 * c.astype(np.uint8)
+        + 8 * d.astype(np.uint8)
+    )
+
+    weights = np.zeros(16)
+
+    # 0 foreground pixels
+    weights[0] = 0.0
+
+    # 1 foreground pixel
+    for p in [1, 2, 4, 8]:
+        weights[p] = 0.25
+
+    # 2 foreground pixels
+    # Adjacent pair
+    for p in [3, 5, 6, 9, 10, 12]:
+        weights[p] = 0.5
+
+    # Diagonal pair
+    for p in [6, 9]:
+        weights[p] = 0.5
+
+    # 3 foreground pixels
+    for p in [7, 11, 13, 14]:
+        weights[p] = 0.75
+
+    # 4 foreground pixels
+    weights[15] = 1.0
+
+    return float(np.sum(weights[pattern]))
+
+def _draw_region_box(ax, region, color, label=None, lw=1.2, ls="-"):
+    if region is None:
+        return None
+    row_slice, col_slice = region
+    x0, y0 = (col_slice.start or 0) - 0.5, (row_slice.start or 0) - 0.5
+    width  = col_slice.stop - (col_slice.start or 0)
+    height = row_slice.stop - (row_slice.start or 0)
+    rect = patches.Rectangle((x0, y0), width, height, edgecolor=color,
+                              facecolor="none", linewidth=lw, linestyle=ls,
+                              label=label, zorder=4)
+    ax.add_patch(rect)
+    return rect

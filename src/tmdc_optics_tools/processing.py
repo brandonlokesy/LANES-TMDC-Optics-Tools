@@ -11,6 +11,7 @@ from __future__ import annotations
 import numpy as np
 from scipy.ndimage import median_filter
 from scipy.signal import savgol_filter
+import matplotlib.patches as patches
 
 from .constants import HC_EV_NM
 
@@ -236,3 +237,20 @@ def jacobian_correction_wvl2E(
     shape = [1] * spectra.ndim
     shape[axis] = len(jacobian)
     return spectra * jacobian.reshape(shape)
+
+def _draw_region_box(ax, region, color, label=None, lw=1.2, ls="-"):
+    if region is None:
+        return None
+    row_slice, col_slice = region
+    x0, y0 = (col_slice.start or 0) - 0.5, (row_slice.start or 0) - 0.5
+    width  = col_slice.stop - (col_slice.start or 0)
+    height = row_slice.stop - (row_slice.start or 0)
+    rect = patches.Rectangle((x0, y0), width, height, edgecolor=color,
+                              facecolor="none", linewidth=lw, linestyle=ls,
+                              label=label, zorder=4)
+    ax.add_patch(rect)
+    return rect
+
+def _apply_bg_region(img: np.ndarray, region, stat: str = "median") -> np.ndarray:
+    stat_fn = np.median if stat == "median" else np.mean
+    return img - stat_fn(img[region])

@@ -1811,3 +1811,307 @@ class DiffusionCloudPanel(AnimationPanel):
         self._centroid_pt.set_offsets([[r.x_pixel, r.y_pixel]])
 
         return (self._im, self._centroid_pt, *self._contour_lines)
+
+# ---------------------------------------------------------------------------
+# Power-series spectrum plot
+# ---------------------------------------------------------------------------
+
+# Lazy imports for colour-norm helpers (avoid polluting the module namespace
+# with rarely-used names while keeping the import cost near zero).
+from matplotlib.colors import Normalize, LogNorm, BoundaryNorm
+from matplotlib.cm import ScalarMappable
+
+
+# Mapping of string names → spectra array attribute on AttoCubePLVabScan.
+# The sentinel value None means "wavelength-space spectra" — these are
+# served on the wavelength axis regardless of x_axis.
+_SPECTRA_SOURCES = {
+    "best"                      : None,   # resolved at call time
+    "raw"                       : "spectra",
+    "energy"                    : "energy_spectra",
+    "energy_bg"                 : "energy_spectra_bg",
+    "energy_pre_jacobian"       : "energy_spectra_pre_jacobian",
+}
+
+_SPECTRA_SOURCE_LABELS = {
+    "best"                      : "best available (bg-corrected if set)",
+    "raw"                       : "raw counts, wavelength space",
+    "energy"                    : "energy axis (Jacobian if configured)",
+    "energy_bg"                 : "energy axis, bg-subtracted",
+    "energy_pre_jacobian"       : "energy axis, no Jacobian",
+}
+
+
+def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
+    """
+    Return the ``(n_pixels, n_sweeps)`` array for *spectra_source*.
+
+    Raises ``ValueError`` when the requested source is unavailable (e.g.
+    ``"energy_bg"`` but no ``bg_region`` was set) or incompatible with the
+    chosen *x_axis* (e.g. wavelength-space source with ``x_axis="energy"``).
+    """
+    src = spectra_source.lower()
+    if src not in _SPECTRA_SOURCES:
+        raise ValueError(
+            f"spectra_source {src!r} is not recognised. "
+            f"Choose from: {list(_SPECTRA_SOURCES)}."
+        )
+
+    if src == "best":
+        arr = scan.best_energy_spectra if x_axis == "energy" else scan.spectra
+    elif src == "raw":
+        arr = scan.spectra
+    else:
+        attr = _SPECTRA_SOURCES[src]
+        arr = getattr(scan, attr, None)
+        if arr is None:
+            raise ValueError(
+                f"spectra_source={src!r} is not available on this scan.  "
+                "Check that bg_region and/or apply_jacobian were set at "
+                "load time."
+            )
+
+    # Warn if wavelength-space data is being plotted on energy axis.
+    if src == "raw" and x_axis == "energy":
+        import warnings
+        warnings.warn(
+            "spectra_source='raw' uses the wavelength-space array which has "
+            "descending energy order and unequal pixel spacing.  "
+            "Consider 'energy' or 'best' for an energy-axis plot.",
+            UserWarning, stacklevel=3,
+        )
+
+    return np.asarray(arr, dtype=float)
+
+
+def plot_power_series(
+    scan,
+    ax               = None,
+    figsize          : tuple  = (6, 4),
+    dpi              : int    = None,
+    # --- x-axis ---
+    x_axis           : str    = "energy",
+    x_range          : tuple  = None,
+    twin_axis        : bool   = False,
+    # --- spectra source ---
+    spectra_source   : str    = "best",
+    # --- background subtraction (post-load, in addition to loader bg) ---
+    bg_region        : tuple  = None,
+    # --- colour mapping ---
+    cmap             : str    = "viridis",
+    power_scale      : str    = "linear",
+    power_range      : tuple  = None,
+    # --- line style ---
+    lw               : float  = 1.0,
+    alpha            : float  = 1.0,
+    alpha_by_power   : bool   = False,
+    alpha_min        : float  = 0.2,
+    # --- colorbar ---
+    colorbar         : bool   = True,
+    cb_label         : str    = "Power (µW)",
+    cb_labelpad      : float  = 12.0,
+    # --- peak marker ---
+    peak_marker      : bool   = False,
+    peak_marker_color: str    = "red",
+    peak_marker_lw   : float  = 1.0,
+    peak_marker_ls   : str    = "--",
+    # --- axes labels ---
+    ylabel           : str    = "PL intensity (counts)",
+) -> tuple:
+    """
+    Plot a power-series of PL spectra with each line coloured by optical power.
+
+    Each sweep in *scan* is drawn as a line whose colour is taken from *cmap*
+    mapped linearly (or logarithmically) onto the ``scan.power`` array.  A
+    colorbar indicates the optical power scale.
+
+    Parameters
+    ----------
+    scan : AttoCubePLVabScan
+        Must expose ``power`` (µW), ``energy``/``wavelength``, and the chosen
+        *spectra_source* attribute.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw into.  A new figure is created when ``None``.
+    figsize : tuple
+        Figure size in inches (used when *ax* is ``None``).
+    dpi : int, optional
+        Figure DPI (used when *ax* is ``None``).
+
+    x-axis
+    ------
+    x_axis : {"energy", "wavelength"}
+        Primary x-axis.  Default ``"energy"``.
+    x_range : tuple of (x_min, x_max), optional
+        Crop to this range before plotting (same units as *x_axis*).
+    twin_axis : bool
+        When ``True``, add a secondary x-axis on top showing the other unit
+        (energy → wavelength or wavelength → energy).  Default ``False``.
+
+    Spectra
+    -------
+    spectra_source : str
+        Which array to use.  One of:
+
+        * ``"best"``  — :attr:`best_energy_spectra` (bg-corrected if
+          configured, otherwise raw energy spectra).  **Default.**
+        * ``"raw"``   — :attr:`spectra` (wavelength space, raw counts).
+        * ``"energy"``— :attr:`energy_spectra` (Jacobian applied if
+          configured; no background subtraction).
+        * ``"energy_bg"`` — :attr:`energy_spectra_bg` (background-
+          subtracted, Jacobian applied if configured).  Requires
+          ``bg_region`` at load time.
+        * ``"energy_pre_jacobian"`` — :attr:`energy_spectra_pre_jacobian`
+          (always without Jacobian correction).
+
+    bg_region : tuple of (x_min, x_max), optional
+        Additional background region subtracted *after* loading (same units
+        as *x_axis*).  Applied on top of any background already baked into
+        *spectra_source*.  ``None`` (default) skips this step.
+
+    Colour mapping
+    --------------
+    cmap : str
+        Matplotlib colormap name.  Default ``"viridis"``.
+    power_scale : {"linear", "log"}
+        Colormap normalisation.  Default ``"linear"``.
+    power_range : tuple of (p_min, p_max), optional
+        Clip the colormap to this power range (µW).  Defaults to
+        ``(scan.power.min(), scan.power.max())``.
+
+    Line style
+    ----------
+    lw : float
+        Line width.
+    alpha : float
+        Global line opacity (0–1).  Ignored when *alpha_by_power* is ``True``.
+    alpha_by_power : bool
+        Scale each line's alpha linearly from *alpha_min* (lowest power) to
+        1.0 (highest power).  Overrides *alpha*.
+    alpha_min : float
+        Minimum alpha used when *alpha_by_power* is ``True``.
+
+    Colorbar
+    --------
+    colorbar : bool
+        Show a colorbar.  Default ``True``.
+    cb_label : str
+        Colorbar axis label.  Default ``"Power (µW)"``.
+    cb_labelpad : float
+        Padding between colorbar tick labels and the axis label.
+
+    Peak marker
+    -----------
+    peak_marker : bool
+        Overlay a vertical dashed line at the peak of each spectrum.
+        Default ``False``.
+    peak_marker_color : str
+    peak_marker_lw : float
+    peak_marker_ls : str
+
+    Axes
+    ----
+    ylabel : str
+        Y-axis label.  Default ``"PL intensity (counts)"``.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+        Primary axes.
+    cb : matplotlib.colorbar.Colorbar or None
+        Colorbar object, or ``None`` when *colorbar* is ``False``.
+    lines : list of matplotlib.lines.Line2D
+        One Line2D per sweep, in sweep order (same order as ``scan.power``).
+    """
+    from .constants import HC_EV_NM  # local import to avoid circular at module level
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.get_figure()
+
+    # --- x-axis array and label -------------------------------------------
+    x, xlabel = _resolve_x_axis(scan, x_axis)
+
+    # --- spectra array (n_pixels, n_sweeps) --------------------------------
+    data = _resolve_spectra(scan, spectra_source, x_axis)
+
+    # --- optional post-load background subtraction -------------------------
+    if bg_region is not None:
+        data = processing.subtract_background(data, bg_region=bg_region, x=x, axis=0)
+
+    # --- optional spectral crop -------------------------------------------
+    if x_range is not None:
+        mask   = (x >= x_range[0]) & (x <= x_range[1])
+        x      = x[mask]
+        data   = data[mask, :]
+
+    # --- colour norm ----------------------------------------------------------
+    power   = np.asarray(scan.power, dtype=float)
+    p_min, p_max = power_range if power_range is not None else (power.min(), power.max())
+
+    if power_scale == "log":
+        norm = LogNorm(vmin=max(p_min, 1e-12), vmax=p_max)
+    else:
+        norm = Normalize(vmin=p_min, vmax=p_max)
+
+    sm      = ScalarMappable(norm=norm, cmap=get_cmap(cmap))
+    sm.set_array([])   # required for standalone colorbars
+
+    # --- per-line alpha if requested ---------------------------------------
+    power_norm_linear = (power - p_min) / max(p_max - p_min, 1e-12)
+
+    # --- draw lines --------------------------------------------------------
+    lines = []
+    for i, p in enumerate(power):
+        colour = sm.to_rgba(p)
+        a = float(alpha_min + (1.0 - alpha_min) * power_norm_linear[i]) \
+            if alpha_by_power else float(alpha)
+        y = data[:, i]
+        (line,) = ax.plot(x, y, color=colour, lw=lw, alpha=a)
+        lines.append(line)
+
+        if peak_marker:
+            x_peak = x[np.argmax(y)]
+            ax.axvline(
+                x_peak,
+                color=peak_marker_color,
+                lw=peak_marker_lw,
+                ls=peak_marker_ls,
+                alpha=a,
+            )
+
+    # --- axes formatting --------------------------------------------------
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+
+    # --- twin axis --------------------------------------------------------
+    ax_twin = None
+    if twin_axis:
+        ax_twin = ax.twiny()
+        if x_axis == "energy":
+            # top axis in nm; tick positions derived from bottom energy ticks
+            e_ticks = ax.get_xticks()
+            # keep only ticks in range to avoid division by zero / overflow
+            e_ticks = e_ticks[(e_ticks > 0) & (e_ticks >= x.min()) & (e_ticks <= x.max())]
+            wl_ticks = HC_EV_NM / e_ticks
+            ax_twin.set_xlim(ax.get_xlim())
+            ax_twin.set_xticks(e_ticks)
+            ax_twin.set_xticklabels([f"{w:.0f}" for w in wl_ticks])
+            ax_twin.set_xlabel("Wavelength (nm)")
+        else:
+            wl_ticks = ax.get_xticks()
+            wl_ticks = wl_ticks[(wl_ticks > 0) & (wl_ticks >= x.min()) & (wl_ticks <= x.max())]
+            e_ticks  = HC_EV_NM / wl_ticks
+            ax_twin.set_xlim(ax.get_xlim())
+            ax_twin.set_xticks(wl_ticks)
+            ax_twin.set_xticklabels([f"{e:.3f}" for e in e_ticks])
+            ax_twin.set_xlabel("Energy (eV)")
+
+    # --- colorbar ---------------------------------------------------------
+    cb = None
+    if colorbar:
+        cb = fig.colorbar(sm, ax=ax, pad=0.02)
+        cb.set_label(cb_label, labelpad=cb_labelpad)
+
+    return fig, ax, cb, lines

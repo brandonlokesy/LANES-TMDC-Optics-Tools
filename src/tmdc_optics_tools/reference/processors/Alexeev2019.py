@@ -11,9 +11,13 @@ from .processor import Processor
 class Alexeev2019ProcessorMoSe2(Processor):
     """ 
     Processor for Alexeev et al., Nature 2019.
+
     Title: "Resonantly hybridized excitons in moiré superlattices in van der Waals heterostructures"
+
     DOI: 10.1038/s41586-019-0986-9
+
     Dataset: 10.1038/s41586-019-0986-9 (files on Nature)
+
     Figure 2a: PL spectra of monolayer MoSe2.
     """
     def run(self):
@@ -38,9 +42,13 @@ class Alexeev2019ProcessorMoSe2(Processor):
 class Alexeev2019ProcessorWS2(Processor):
     """
     Processor for Alexeev et al., Nature 2019.
+    
     Title: "Resonantly hybridized excitons in moiré superlattices in van der Waals heterostructures"
+    
     DOI: 10.1038/s41586-019-0986-9
+    
     Dataset: 10.1038/s41586-019-0986-9 (files on Nature)
+    
     Figure 2a: PL spectra of monolayer WS2.
     """
     def run(self):

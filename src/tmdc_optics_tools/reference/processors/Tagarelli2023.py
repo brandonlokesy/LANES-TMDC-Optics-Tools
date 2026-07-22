@@ -37,10 +37,15 @@ TARGET_POWER_UW = 40.0
 class Tagarelli2023Processor(Processor):
     """
     Processor for Tagarelli et al., Nature Photonics 2023
+    
     Title: "Electrical control of hybrid exciton transport in a van der Waals heterostructure"
+    
     DOI: 10.1038/s41566-023-01198-w
+    
     Dataset: 10.5281/zenodo.7660668
+    
     Figure 1d: PL spectra of homobilayer WSe2 at increasing excitation power.
+    
     Data contains: Nested sweep: electric field (mV/nm) × excitation power (µW)
     """
     

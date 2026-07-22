@@ -13,9 +13,13 @@ FILES = {
 class Lin2024ProcessorWSe2(Processor):
     """
     Processor for Lin et al., Nature Communications 2024.
+
     Title: "Moiré-engineered light-matter interactions in MoS2/WSe2 heterobilayers at room temperature"
+
     DOI: 10.1038/s41467-024-53083-x
+
     Dataset: 10.5281/zenodo.13629283
+
     Figure 2a: PL spectra of monolayer WSe2.
     """
     def run(self):
@@ -45,9 +49,13 @@ class Lin2024ProcessorWSe2(Processor):
 class Lin2024ProcessorMoS2(Processor):
     """
     Processor for Lin et al., Nature Communications 2024.
+    
     Title: "Moiré-engineered light-matter interactions in MoS2/WSe2 heterobilayers at room temperature"
+    
     DOI: 10.1038/s41467-024-53083-x
+    
     Dataset: 10.5281/zenodo.13629283
+    
     Figure 2a: PL spectra of monolayer MoS2.
     """
     def run(self):

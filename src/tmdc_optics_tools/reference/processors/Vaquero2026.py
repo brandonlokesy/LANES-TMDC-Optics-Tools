@@ -13,9 +13,13 @@ HEADERS = {"User-Agent": "LANES-Tools/1.0"}
 class Vaquero2026Processor(Processor):
     """
     Processor for Vaquero et al., Nano Letters 2026.
+    
     Title: "Valley-Controlled Many-Body Exciton Interactions in Monolayer WSe2 Phototransistors"
+    
     DOI: 10.1021/acs.nanolett.6c01091
+    
     Dataset: 10.48550/arXiv.2604.08382
+    
     Figure 2a: PL spectra of monolayer WSe2 with linearly polarized light sweept by exciton densities.
     """
 

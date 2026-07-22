@@ -1152,6 +1152,12 @@ def animate_panels(
     for panel, ax in zip(panels, axes):
         panel.init_artists(ax, n_frames)
 
+    # _build_suptitle and _has_suptitle must be evaluated AFTER init_artists
+    # has run on every panel.  DiffusionCloudPanel (and any other panel that
+    # defers heavy work to init_artists) calls _resolve_var() there, which is
+    # what populates self._var_array.  Calling frame_label(0) before
+    # init_artists would always return None, suppressing the suptitle entirely.
+
     def _build_suptitle(frame: int) -> str:
         parts = []
         if show_frame_count:
@@ -1162,7 +1168,6 @@ def animate_panels(
                 parts.append(lbl)
         return suptitle_sep.join(parts)
 
-    # Only create a suptitle Text object when there is something to show.
     _has_suptitle = show_frame_count or any(
         panel.frame_label(0) is not None for panel in panels
     )

@@ -9,6 +9,13 @@ from ...constants import HC_EV_NM
 from .processor import Processor
 
 class Alexeev2019ProcessorMoSe2(Processor):
+    """ 
+    Processor for Alexeev et al., Nature 2019.
+    Title: "Resonantly hybridized excitons in moiré superlattices in van der Waals heterostructures"
+    DOI: 10.1038/s41586-019-0986-9
+    Dataset: 10.1038/s41586-019-0986-9 (files on Nature)
+    Figure 2a: PL spectra of monolayer MoSe2.
+    """
     def run(self):
 
         url = "https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-019-0986-9/MediaObjects/41586_2019_986_MOESM4_ESM.xlsx"
@@ -29,6 +36,13 @@ class Alexeev2019ProcessorMoSe2(Processor):
         print(f"  → Saved to {self.out_path}")
 
 class Alexeev2019ProcessorWS2(Processor):
+    """
+    Processor for Alexeev et al., Nature 2019.
+    Title: "Resonantly hybridized excitons in moiré superlattices in van der Waals heterostructures"
+    DOI: 10.1038/s41586-019-0986-9
+    Dataset: 10.1038/s41586-019-0986-9 (files on Nature)
+    Figure 2a: PL spectra of monolayer WS2.
+    """
     def run(self):
 
         url = "https://static-content.springer.com/esm/art%3A10.1038%2Fs41586-019-0986-9/MediaObjects/41586_2019_986_MOESM2_ESM.xlsx"

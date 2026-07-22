@@ -286,7 +286,9 @@ _BASE_URL = "https://dataserv.ub.tum.de/public.php/dav/files/m1793118/dataset/Fi
 class Dijkstra2025Processor(Processor):
     """
     Processor for Dijkstra et al., Nature Communications 2025.
-
+    Title: "Ten-valley excitonic complexes in charge-tunable monolayer WSe2"
+    DOI: 10.1038/s41467-025-65731-x
+    Dataset: https://mediatum.ub.tum.de/1793118
     Figure 1a: gate-dependent reflectance contrast of monolayer WSe2.
 
     Parameters

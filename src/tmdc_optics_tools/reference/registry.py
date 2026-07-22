@@ -11,7 +11,7 @@ from .processors import *
 
 REGISTRY = [
     {
-        "material":  "WSe2_bilayer",
+        "material":  "WSe2_homobilayer",
         "source":    "Tagarelli2023",
         "dataset_doi": "10.5281/zenodo.7660668",
         "title":     "Electrical control of hybrid exciton transport in a van der Waals heterostructure",

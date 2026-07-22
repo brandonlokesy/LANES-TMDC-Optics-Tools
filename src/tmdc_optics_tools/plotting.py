@@ -1171,7 +1171,47 @@ def animate_panels(
     _has_suptitle = show_frame_count or any(
         panel.frame_label(0) is not None for panel in panels
     )
-    suptitle = fig.suptitle(_build_suptitle(0)) if _has_suptitle else None
+
+    # fig.suptitle() is a Figure-level artist.  With blit=True, matplotlib
+    # only redraws Axes-level artists, so the suptitle text updates correctly
+    # in memory but is never repainted on screen — it appears frozen on the
+    # frame-0 string for the entire animation.
+    #
+    # Fix: place the shared title as a centred text artist on the top axes
+    # (the leftmost one when there are several panels).  It is an Axes artist
+    # so blit picks it up, yet with transform=fig.transFigure it sits at the
+    # same visual position as a suptitle would.
+    if _has_suptitle:
+        title_ax = axes[len(axes) // 2]   # centre panel (or only panel)
+
+        # Check whether any panel has set a non-empty axes title.
+        # If so, we need to stack the suptitle above the axes title rather
+        # than overlapping it.  We do this by:
+        #   - moving the suptitle text higher (y=1.12 instead of 1.04), and
+        #   - nudging each panel's axes title downward (pad=-4) so there is
+        #     clear vertical separation between the two lines.
+        any_panel_title = any(
+            ax.get_title() for ax in axes
+        )
+        if any_panel_title:
+            suptitle_y = 1.12
+            for ax in axes:
+                if ax.get_title():
+                    ax.set_title(ax.get_title(), pad=-4)
+        else:
+            suptitle_y = 1.04
+
+        suptitle = title_ax.text(
+            0.5, suptitle_y,
+            _build_suptitle(0),
+            transform      = title_ax.transAxes,
+            ha             = "center",
+            va             = "bottom",
+            fontsize       = plt.rcParams.get("figure.titlesize", "large"),
+            fontweight     = plt.rcParams.get("figure.titleweight", "normal"),
+        )
+    else:
+        suptitle = None
 
     def update(frame):
         artists = []
@@ -1706,7 +1746,7 @@ class DiffusionCloudPanel(AnimationPanel):
         self,
         scan,
         seq_result        = None,
-        title             : str   = "Exciton diffusion cloud",
+        title             : str   = "",
         cmap              : str   = "inferno",
         contour_color     : str   = "cyan",
         contour_lw        : float = 0.9,

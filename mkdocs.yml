@@ -58,3 +58,7 @@ nav:
       - Fitting: api/fitting.md
       - Plotting: api/plotting.md
       - Constants: api/constants.md
+      - Diffusion: api/diffusion.md
+      - Reference Data:
+          - Reference Loader: api/reference/loader.md
+          - Processors: api/reference/processors.md

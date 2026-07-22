@@ -1329,6 +1329,64 @@ def animate_wl_pl_spectra(
     return animate_panels(panels, save=save, **engine_kwargs)
 
 # ---------------------------------------------------------------------------
+# Diffusion cloud — shared helpers
+# ---------------------------------------------------------------------------
+
+def _draw_laser_circle(
+    ax,
+    laser_ref,
+    color      : str   = "red",
+    lw         : float = 1.5,
+    ls         : str   = "-",
+    halo       : bool  = True,
+    halo_color : str   = "white",
+) -> patches.Circle:
+    """
+    Draw the 1/e² laser-spot boundary on *ax* and return the Circle artist.
+
+    Mirrors the implementation used in :class:`ImageSequencePanel` so both
+    static single-frame plots and animations get identical laser annotations.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+    laser_ref : AttoCubeLaserReferenceImage
+        Must expose ``center_x``, ``center_y``, and ``radius`` attributes.
+    color : str
+        Edge colour of the circle.
+    lw : float
+        Line width.
+    ls : str
+        Line style (e.g. ``"-"`` or ``"--"``).
+    halo : bool
+        Draw a contrasting halo stroke behind the circle so it stays
+        visible over bright pixels after GIF palette quantization.
+    halo_color : str
+        Colour of the halo stroke.
+
+    Returns
+    -------
+    patches.Circle
+    """
+    circle = patches.Circle(
+        (laser_ref.center_x, laser_ref.center_y),
+        radius    = laser_ref.radius,
+        edgecolor = color,
+        facecolor = "none",
+        linewidth = lw,
+        linestyle = ls,
+        label     = f"Laser 1/e² ({laser_ref.radius:.1f} px)",
+        zorder    = 4,
+    )
+    if halo:
+        circle.set_path_effects([
+            path_effects.withStroke(linewidth=lw + 2.0, foreground=halo_color),
+        ])
+    ax.add_patch(circle)
+    return circle
+
+
+# ---------------------------------------------------------------------------
 # Diffusion cloud — single image
 # ---------------------------------------------------------------------------
 
@@ -1349,15 +1407,23 @@ def plot_diffusion_cloud(
     colorbar_label     : str   = "Intensity (counts)",
     xlabel             : str   = "x (px)",
     ylabel             : str   = "y (px)",
-    show_roi           : bool = False,
-    show_bg_region     : bool = False,
+    show_roi           : bool  = False,
+    show_bg_region     : bool  = False,
     roi                : tuple = None,
     bg_region          : tuple = None,
     bg_stat            : str   = "median",
     roi_color          : str   = "lime",
     bg_region_color    : str   = "orange",
+    # laser spot
+    laser_ref                  = None,
+    laser_annotation   : bool  = True,
+    laser_color        : str   = "red",
+    laser_linewidth    : float = 1.5,
+    laser_linestyle    : str   = "-",
+    laser_halo         : bool  = True,
+    laser_halo_color   : str   = "white",
     # analyse_diffusion_cloud kwargs (used when result is None)
-    threshold          : float | str = "1/e",
+    threshold                  = "1/e",
     smooth_sigma       : float = 1.0,
     keep_largest       : bool  = True,
     pixel_scale        : float = None,
@@ -1389,6 +1455,25 @@ def plot_diffusion_cloud(
     colorbar : bool
     colorbar_label : str
     xlabel, ylabel : str
+    laser_ref : AttoCubeLaserReferenceImage or None
+        Laser-spot reference.  When supplied (and *laser_annotation* is
+        ``True``), the 1/e² spot boundary circle is drawn on the axes.
+        Can also be passed implicitly via ``image.laser_ref`` (i.e. from
+        :class:`~tmdc_optics_tools.loaders.AttoCubePLScanRealSpace` which
+        stores it); an explicit *laser_ref* argument takes priority.
+    laser_annotation : bool
+        Draw the laser circle when *laser_ref* is available.  Default ``True``.
+    laser_color : str
+        Edge colour of the laser circle.  Default ``"red"``.
+    laser_linewidth : float
+        Line width of the laser circle.  Default ``1.5``.
+    laser_linestyle : str
+        Line style of the laser circle.  Default ``"-"``.
+    laser_halo : bool
+        Draw a contrasting halo stroke behind the circle so it stays
+        visible over bright hot spots.  Default ``True``.
+    laser_halo_color : str
+        Colour of the halo stroke.  Default ``"white"``.
     threshold, smooth_sigma, keep_largest, pixel_scale, origin
         Forwarded to :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_cloud`
         when *result* is ``None``.
@@ -1437,7 +1522,19 @@ def plot_diffusion_cloud(
     if show_bg_region:
         processing._draw_region_box(ax, bg_region if bg_region is not None else getattr(image, "bg_region", None),
                         bg_region_color, label="bg region")
-    
+
+    # Laser circle — explicit arg takes priority, then image.laser_ref.
+    _lr = laser_ref if laser_ref is not None else getattr(image, "laser_ref", None)
+    if laser_annotation and _lr is not None:
+        _draw_laser_circle(
+            ax, _lr,
+            color    = laser_color,
+            lw       = laser_linewidth,
+            ls       = laser_linestyle,
+            halo     = laser_halo,
+            halo_color = laser_halo_color,
+        )
+
     ax.legend(fontsize=5, loc="upper right", frameon=False)
 
     ax.set_xlabel(xlabel)
@@ -1614,6 +1711,14 @@ class DiffusionCloudPanel(AnimationPanel):
         centroid_ms       : float = 30,
         xlabel            : str   = "x (px)",
         ylabel            : str   = "y (px)",
+        # laser spot annotation
+        laser_ref                 = None,
+        laser_annotation  : bool  = True,
+        laser_color       : str   = "red",
+        laser_linewidth   : float = 1.5,
+        laser_linestyle   : str   = "-",
+        laser_halo        : bool  = True,
+        laser_halo_color  : str   = "white",
         # swept-variable display — overrides seq_result fields when not None
         var_array                 = None,
         var_label         : str   = None,
@@ -1645,6 +1750,16 @@ class DiffusionCloudPanel(AnimationPanel):
         self.centroid_ms    = centroid_ms
         self.xlabel         = xlabel
         self.ylabel         = ylabel
+        # laser spot
+        # Priority: explicit laser_ref arg → scan.laser_ref → None
+        self._laser_ref_override = laser_ref
+        self.laser_annotation    = laser_annotation
+        self.laser_color         = laser_color
+        self.laser_linewidth     = laser_linewidth
+        self.laser_linestyle     = laser_linestyle
+        self.laser_halo          = laser_halo
+        self.laser_halo_color    = laser_halo_color
+        self._laser_circle       = None   # artist stored for blit
         # swept-variable display (None means "inherit from seq_result later")
         self._var_array_override = np.asarray(var_array) if var_array is not None else None
         self._var_label_override = var_label
@@ -1785,6 +1900,24 @@ class DiffusionCloudPanel(AnimationPanel):
             marker=self.centroid_marker, linewidths=0.8, zorder=5,
         )
 
+        # Laser circle — static overlay; drawn once in init, never updated.
+        # Priority: explicit arg → scan.laser_ref → None.
+        _lr = (
+            self._laser_ref_override
+            if self._laser_ref_override is not None
+            else getattr(self.scan, "laser_ref", None)
+        )
+        self._laser_circle = None
+        if self.laser_annotation and _lr is not None:
+            self._laser_circle = _draw_laser_circle(
+                ax, _lr,
+                color      = self.laser_color,
+                lw         = self.laser_linewidth,
+                ls         = self.laser_linestyle,
+                halo       = self.laser_halo,
+                halo_color = self.laser_halo_color,
+            )
+
     def update(self, frame: int) -> tuple:
         seq = self._get_seq_result()
         img = (self.scan.load_frame(frame)
@@ -1810,7 +1943,11 @@ class DiffusionCloudPanel(AnimationPanel):
         # Update centroid
         self._centroid_pt.set_offsets([[r.x_pixel, r.y_pixel]])
 
-        return (self._im, self._centroid_pt, *self._contour_lines)
+        updated = [self._im, self._centroid_pt, *self._contour_lines]
+        # Laser circle is static but must be included so blit redraws it.
+        if self._laser_circle is not None:
+            updated.append(self._laser_circle)
+        return tuple(updated)
 
 # ---------------------------------------------------------------------------
 # Power-series spectrum plot

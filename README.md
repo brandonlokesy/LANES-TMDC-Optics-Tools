@@ -35,7 +35,7 @@ cd LANES-TMDC-Optics-Tools
 pip install -e .
 ```
 
-**Dependencies:** `numpy`, `scipy`, `matplotlib`, `pandas`, `scikit-image`
+**Dependencies:** `numpy`, `scipy`, `matplotlib`, `pandas`, `scikit-image`, `ffmpeg` (recommended for saving .mp4 files)
 
 Optional (diverging colormaps used in plots):
 ```bash

@@ -6,13 +6,10 @@ class Louca2023Processor(Processor):
     """
     Processor for Louca et al., Nature Communications 2023.
     
-    Title: "Interspecies exciton interactions lead to enhanced nonlinearity of dipolar excitons and polaritons in MoS2 homobilayers"
-    
-    DOI: 10.1038/s41467-023-39358-9
-    
-    Dataset: 10.24435/materialscloud:d2-ta
-    
-    Figure 1: T=4K. Reflectance spectra for homobilayer MoS2
+    - Title: Interspecies exciton interactions lead to enhanced nonlinearity of dipolar excitons and polaritons in MoS2 homobilayers
+    - DOI: 10.1038/s41467-023-39358-9
+    - Dataset: 10.24435/materialscloud:d2-ta
+    - Figure 1: T=4K. Reflectance spectra for homobilayer MoS2
     """
     def run(self):
         url = "https://archive.materialscloud.org/records/q0deg-ag137/files/Fig1c.xlsx?download=1"

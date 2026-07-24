@@ -254,3 +254,110 @@ def _draw_region_box(ax, region, color, label=None, lw=1.2, ls="-"):
 def _apply_bg_region(img: np.ndarray, region, stat: str = "median") -> np.ndarray:
     stat_fn = np.median if stat == "median" else np.mean
     return img - stat_fn(img[region])
+
+def remove_cosmic_rays(
+        spectra : np.ndarray,
+        sigma_threshold : float = 5.0,
+        median_window : int = 7,
+        max_iter: int = 3
+
+    ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Cosmic Ray Removal from a Single Spectrum
+    
+    Standard method: Iterative sigma-clipping on the Laplacian (second derivative).
+    
+    Scientific basis:
+    - Cosmic rays produce sharp, narrow spikes (1–3 pixels wide).
+    - The discrete Laplacian  L[i] = flux[i-1] - 2·flux[i] + flux[i+1]  is near
+        zero for a smooth spectrum but strongly NEGATIVE at a CR spike centre, because
+        the centre pixel is far above its neighbours.
+    - Flagging pixels where L < -N·σ_L identifies CR centres (σ_L estimated robustly
+        via the median absolute deviation, MAD).
+    - Iteration is essential for multi-pixel CRs:
+        • Pass 1 detects the *edges* (their neighbours are normal → large |L|).
+        • Detected pixels are replaced with local medians, then the Laplacian is
+            recomputed. Now interior "flat-top" pixels show a large negative L because
+            their neighbours have been restored.
+        • Repeat until no new pixels are found.
+    - This approach is the 1-D analogue of LA Cosmic (van Dokkum 2001, PASP 113, 1420).
+
+    Parameters
+    ----------
+    spectra : np.ndarray
+        Raw 1-D spectra in counts
+    sigma_threshold : float
+        Detection threshold in MAD-based sigma units.
+        Typical values: 4–7 (lower = more aggressive).
+    median_window : int
+        Width (pixels, forced odd) of the median filter used for both noise
+        estimation and pixel replacement. If median_window is even, the value is incremented by 1 
+        to ensure an odd window.
+    max_iter : int
+        Maximum number of sigma-clipping iterations.  Convergence is usually
+        reached in 2–4 passes.
+
+    Returns
+    -------
+    cleaned : ndarray
+        Flux with cosmic ray pixels replaced by local median values.
+    cr_mask : ndarray[bool]
+        True at pixels identified as cosmic rays.
+
+    """
+    
+    if median_window % 2 == 0:
+        median_window += 1                     # enforce odd window
+
+    spectra      = spectra.astype(float)
+    n            = len(spectra)
+    cr_mask      = np.zeros(n, dtype=bool)
+ 
+    for iteration in range(max_iter):
+
+        # Never modifies the original spectra
+        working = spectra.copy()
+        if cr_mask.any():
+            # Smoothen the spectra
+            local_med = median_filter(spectra, size = median_window)
+            # Replace cosmic ray pixels with smoothened values
+            working[cr_mask] = local_med[cr_mask]
+
+        # Compute the laplacian on the good pixels
+        laplacian = np.zeros(n)
+        laplacian[1:-1]  = working[:-2] - 2.0 * working[1:-1] + working[2:]
+
+        # Robust noise estimate from unflagged pixels.
+        # MAD → σ conversion factor for a Gaussian: 1/0.6745.
+
+        # Compute non cosmic ray pixels
+        good      = ~cr_mask
+        # Returns laplacian without cosmic ray pixels
+        lap_good  = laplacian[good]
+        # Noise estimate on the laplacian without cosmic rays
+        mad       = np.median(np.abs(lap_good - np.median(lap_good)))
+        sigma_lap = mad / 0.6745 # MAD ≈ 0.6745σ
+
+    
+        if sigma_lap == 0:
+            break
+ 
+        # Flag where Laplacian is a large negative outlier.
+        # When the Laplacian is more than the threshold, we flag a cosmic ray
+        new_flags   = laplacian < -sigma_threshold * sigma_lap
+        # Newly identified cosmic ray pixels
+        newly_found = new_flags & ~cosmic_mask
+        # Combine old cosmic ray pixels with newly found cosmic ray pixels
+        cosmic_mask |= new_flags
+
+        if not newly_found.any():
+            print(f"  Converged after {iteration + 1} iteration(s).")
+            break
+ 
+    # Replace flagged pixels with the local median.
+    cleaned = spectra.copy()
+    if cosmic_mask.any():
+        local_median          = median_filter(spectra, size=median_window)
+        cleaned[cosmic_mask]  = local_median[cosmic_mask]
+ 
+    return cleaned, cosmic_mask

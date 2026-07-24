@@ -886,27 +886,40 @@ class AttoCubePLVabScan:
 
     def __repr__(self) -> str:
         ef_str = (
-            f"  E_F        : {self.ef.min():.1f} → {self.ef.max():.1f} mV/nm\n"
+            f"  {'E_F':<10}: {self.ef.min():.1f} → {self.ef.max():.1f} mV/nm\n"
             if self.ef is not None else ""
         )
+
         bg_str = (
-            f"  BG region  : {self.bg_region_nm[0]:.1f} – {self.bg_region_nm[1]:.1f} nm\n"
+            f"  {'BG region':<10}: "
+            f"{self.bg_region_nm[0]:.1f} – {self.bg_region_nm[1]:.1f} nm\n"
             if self.bg_region_nm is not None else ""
         )
-        jac_str = f"  Jacobian   : {'applied' if self.apply_jacobian else 'not applied'}\n"
+
+        jac_str = (
+            f"  {'Jacobian':<10}: "
+            f"{'applied' if self.apply_jacobian else 'not applied'}\n"
+        )
+
         return (
-            f"AttoCubePLVabScan — {self.n_sweeps} sweeps × {self.n_pixels} pixels\n"
-            f"  File       : {self.path}\n"
-            f"  λ range    : {self.wavelength.min():.1f} – {self.wavelength.max():.1f} nm"
-            f"  ({self.energy.min():.3f} – {self.energy.max():.3f} eV)\n"
-            f"  V_top      : {self.v_top.min():.1f} → {self.v_top.max():.1f} V\n"
-            f"  V_bot      : {self.v_bot.min():.1f} → {self.v_bot.max():.1f} V\n"
+            f"AttoCubePLVabScan — "
+            f"{self.n_sweeps} sweeps × {self.n_pixels} pixels\n"
+            f"  {'File':<10}: {self.path}\n"
+            f"  {'λ range':<10}: "
+            f"{self.wavelength.min():.1f} – {self.wavelength.max():.1f} nm\n"
+            f"  {'Energy range':<10}: "
+            f"{self.energy.min():.3f} – {self.energy.max():.3f} eV\n"
+            f"  {'V_top':<10}: "
+            f"{self.v_top.min():.1f} → {self.v_top.max():.1f} V\n"
+            f"  {'V_bot':<10}: "
+            f"{self.v_bot.min():.1f} → {self.v_bot.max():.1f} V\n"
+            f"  {'Power':<10}: "
+            f"{self.power.min():.1f} → {self.power.max():.1f} µW\n"
             f"{ef_str}"
             f"{bg_str}"
             f"{jac_str}"
         )
-
-
+    
 # ---------------------------------------------------------------------------
 # SingleSpectrum
 # ---------------------------------------------------------------------------

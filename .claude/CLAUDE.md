@@ -78,6 +78,42 @@ TODO — provenance not yet recorded, ask before documenting or changing:
 - `EPS_TMDC["HS"] = 7.5` — unsourced, sits among per-material values.
 - `T_MONOLAYER` = 0.65 nm for all four materials — deliberate approximation?
 
+## Design principle — corrections are opt-in
+
+**The researcher looks at the result and decides whether a further correction is
+warranted. The package never makes that decision on their behalf.** A default must
+not apply a step that distorts the data or removes a feature from it. Anything
+destructive is off until it is switched on deliberately.
+
+This governs what defaults are allowed to be:
+
+- A processing step that alters the data is a **parameter set to off/none**, not a
+  behaviour that happens unless suppressed. `apply_jacobian=False`, background
+  subtraction only when `bg_region` is supplied, and `median_kernel=1` are all this
+  rule, not separate decisions.
+- **Off means the least-assuming option, not merely the least code.** For a
+  function whose whole purpose *is* a destructive correction, the opt-in already
+  happened at the call site; its parameters then follow the same rule one level
+  down. Default to the parameterisation that assumes least about the data — the one
+  whose results do not depend on how the data happened to be batched, and that
+  presumes nothing about what the sweep axis means.
+- **Where a permitted default can still destroy a feature, it must say so.** Silent
+  damage is the thing this principle actually forbids: a researcher cannot look at
+  a feature that has been removed without trace. `remove_cosmic_rays` keeps
+  `cross_sweep_veto=False` — conservative, assumption-free, shape-invariant — and
+  warns when a pixel is flagged in most sweeps, because that is the case where the
+  conservative default is the damaging one. Prefer a warning that names what was
+  affected over a safer-looking default that hides it.
+- **Return the evidence.** Masks, flags, and fit diagnostics come back to the caller
+  so the decision can actually be made. Cf. raw arrays are never mutated after load.
+- Never move a correction into a loader's default path, however obviously right it
+  looks. Loading is not deciding.
+
+**Stated exception:** `baseline="constant"` in the `fit_*` functions. It defaults
+*on* because it is a model term rather than a modification of the data — omitting it
+does not preserve anything, it silently migrates the pedestal into amplitude and
+FWHM. Do not "fix" it to `"none"` to comply with this section.
+
 ## Code conventions
 
 - NumPy-style docstrings (rendered by mkdocstrings); aligned-colon parameter blocks.
@@ -87,6 +123,27 @@ TODO — provenance not yet recorded, ask before documenting or changing:
 - Plotting must not re-implement maths that belongs in `processing`.
 - New module → add `docs/api/<module>.md` with a `:::` directive **and** a `nav`
   entry in `mkdocs.yml`; `mkdocs build --strict` must stay green.
+
+**Vectorised NumPy is wanted, but never silent.** Broadcasting, fancy indexing,
+boolean masks, and comprehensions are preferred over explicit Python loops — write
+the fast version, don't hand-roll a loop to be kind. The condition is that a reader
+must never have to re-derive the trick from the expression. Name the shapes and say
+what the operation is doing:
+
+```python
+# (n_pixels, 1) broadcast against (n_pixels, n_sweeps): one baseline per pixel,
+# subtracted from every sweep.
+corrected = spectra - baseline[:, None]
+
+# Median along the sweep axis only — the (1, window) footprint means no
+# information is ever mixed between detector pixels.
+local_med = median_filter(spectra, size=(1, window))
+```
+
+A comprehension gets the same treatment: say what it is collecting and over what.
+The bar is that someone reading it six months later can see the intent without
+running it. Explain the same thing in prose in the reply that introduces it —
+efficient code is fine, unexplained code is not.
 
 ## Guardrails
 
@@ -128,3 +185,17 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 Changes are made **one at a time**. Report adjacent problems found along the way
 rather than fixing them unasked. For physics or analysis judgment calls, state the
 mechanism and ask — don't pick a default.
+
+**Depth of explanation follows the domain.** The same person is expert on one side
+of a file and new to the other; calibrate per topic, and ask rather than assume.
+
+- *Physics, optics, analysis maths* — full speed. This is Brandon's field.
+- *Everyday programming* — competent. Don't explain syntax, control flow, NumPy
+  indexing, or what a dataclass is.
+- *Library design and long-term maintenance* — the real gap, and what this package
+  is becoming. Designing signatures other people will depend on, deprecation and
+  versioning, packaging and dependency resolution, release process, and CI /
+  GitHub Actions especially (new; see F1 in `dev/audit-2026-07.md`). Here: slow
+  down, say what each piece does and why before adding it, go a step at a time,
+  and aim for him being able to debug it himself afterwards rather than for a
+  working config landing in one move.

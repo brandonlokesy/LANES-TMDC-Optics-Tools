@@ -8,6 +8,8 @@ particular loader class, so they can be used standalone or piped together.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 from scipy.ndimage import median_filter
 from scipy.signal import savgol_filter
@@ -255,18 +257,196 @@ def _apply_bg_region(img: np.ndarray, region, stat: str = "median") -> np.ndarra
     stat_fn = np.median if stat == "median" else np.mean
     return img - stat_fn(img[region])
 
+def _fill_flagged(working: np.ndarray, cr_mask: np.ndarray, median_window: int) -> np.ndarray:
+    """
+    One replacement pass: overwrite flagged pixels with the local median.
+
+    Operates **in place** on ``working`` (which must already be a copy) and
+    returns it.  The median is taken from ``working`` rather than the raw
+    spectrum so that a multi-pixel spike is not still sitting inside its own
+    median window on later passes.
+    """
+    if cr_mask.any():
+        local_med          = median_filter(working, size=median_window)
+        working[cr_mask]   = local_med[cr_mask]
+    return working
+
+
+def _detect_cosmic_rays_1d(
+        spectrum        : np.ndarray,
+        sigma_threshold : float,
+        median_window   : int,
+        max_iter        : int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Iterative Laplacian sigma-clip on a single spectrum.
+
+    Returns
+    -------
+    cr_mask : ndarray[bool]
+        True at pixels flagged as cosmic rays.
+    working : ndarray
+        Partially-cleaned spectrum carried across iterations.  Flags raised on
+        the final iteration are not yet filled in it; it exists so the caller
+        can take replacement medians from uncontaminated data.
+    """
+    n       = spectrum.size
+    cr_mask = np.zeros(n, dtype=bool)
+
+    # Partially-cleaned copy, carried across iterations.  Never modifies the
+    # original spectrum.
+    working = spectrum.copy()
+
+    for _ in range(max_iter):
+
+        _fill_flagged(working, cr_mask, median_window)
+
+        # Compute the laplacian on the good pixels
+        laplacian = np.zeros(n)
+        laplacian[1:-1]  = working[:-2] - 2.0 * working[1:-1] + working[2:]
+
+        # Robust noise estimate from unflagged pixels.
+        # MAD → σ conversion factor for a Gaussian: 1/0.6745.
+
+        # Returns laplacian without cosmic ray pixels
+        lap_good  = laplacian[~cr_mask]
+        if lap_good.size == 0:            # everything flagged — nothing left to estimate from
+            break
+        # Noise estimate on the laplacian without cosmic rays
+        mad       = np.median(np.abs(lap_good - np.median(lap_good)))
+        sigma_lap = mad / 0.6745 # MAD ≈ 0.6745σ
+
+        if sigma_lap == 0:
+            break
+
+        # Flag where Laplacian is a large negative outlier.
+        # When the Laplacian is more than the threshold, we flag a cosmic ray
+        new_flags   = laplacian < -sigma_threshold * sigma_lap
+        # Newly identified cosmic ray pixels
+        newly_found = new_flags & ~cr_mask
+        # Combine old cosmic ray pixels with newly found cosmic ray pixels
+        cr_mask |= new_flags
+
+        if not newly_found.any():
+            break
+
+    return cr_mask, working
+
+
+def _cross_sweep_veto(
+        spectra         : np.ndarray,
+        cr_mask         : np.ndarray,
+        sigma_threshold : float,
+        window          : int,
+    ) -> np.ndarray:
+    """
+    Drop detections that repeat at the same pixel in neighbouring sweeps.
+
+    A cosmic ray cannot recur: a second particle would have to strike the same
+    detector pixel during the next exposure.  A narrow *spectral* feature (Raman
+    line, laser leakage past the filter edge, sharp emitter line) is present in
+    every sweep, and is indistinguishable from a CR to a 3-point Laplacian.
+    Comparing each detection against its own sweep neighbourhood separates them.
+
+    The comparison is strictly along the sweep axis — the median footprint is
+    ``(1, window)``, so no information is ever mixed between detector pixels.
+
+    This can only ever *remove* flags.  Where the spectrum changes fast with the
+    sweep parameter (a charging transition), the local scatter inflates and more
+    detections are vetoed — i.e. the failure mode is a missed cosmic ray, never
+    an overwritten real feature.
+
+    Parameters
+    ----------
+    spectra : np.ndarray, shape (n_pixels, n_sweeps)
+        Raw counts, pixel-major.
+    cr_mask : np.ndarray[bool], shape (n_pixels, n_sweeps)
+        Detections from the per-spectrum Laplacian pass.
+    sigma_threshold : float
+        A detection survives only if it stands this many sigma above the local
+        sweep median, sigma taken from the same neighbourhood.
+    window : int
+        Number of neighbouring sweeps (forced odd) used for the median.
+
+    Returns
+    -------
+    np.ndarray[bool]
+        The subset of ``cr_mask`` confirmed as non-repeating.
+    """
+    if window % 2 == 0:
+        window += 1
+
+    footprint = (1, window)                        # sweeps only, never pixels
+    local_med = median_filter(spectra, size=footprint)
+    local_mad = median_filter(np.abs(spectra - local_med), size=footprint)
+    sigma_cs  = local_mad / 0.6745
+
+    # A pixel whose sweep trace happens to be unusually quiet should still need a
+    # real excess, so floor sigma at the typical value across the detector.
+    positive  = sigma_cs[sigma_cs > 0]
+    floor     = np.median(positive) if positive.size else 0.0
+    sigma_eff = np.maximum(sigma_cs, floor)
+
+    confirmed = (spectra - local_med) > sigma_threshold * sigma_eff
+    return cr_mask & confirmed
+
+
+# Fraction of sweeps above which a repeatedly-flagged pixel stops being credible
+# as a cosmic ray.  Module-level so it can be tuned without a signature change;
+# the warning itself is suppressible through the standard `warnings` filters.
+PERSISTENT_FLAG_FRACTION = 0.8
+
+
+def _warn_persistent_flags(cr_mask: np.ndarray, fraction: float = PERSISTENT_FLAG_FRACTION) -> None:
+    """
+    Warn when the per-spectrum pass keeps flagging the same pixel every sweep.
+
+    A cosmic ray cannot recur at one pixel, so a detection that repeats across
+    the sweep is a hot pixel or a real narrow spectral feature — and without the
+    veto both have just been median-replaced in every sweep, silently.  This is
+    the only signal the caller gets that data was destroyed rather than cleaned.
+    """
+    n_sweeps   = cr_mask.shape[1]
+    counts     = cr_mask.sum(axis=1)
+    persistent = np.flatnonzero(counts > fraction * n_sweeps)
+    if persistent.size == 0:
+        return
+
+    shown = ", ".join(f"{p} ({counts[p]}/{n_sweeps})" for p in persistent[:3])
+    if persistent.size > 3:
+        shown += ", ..."
+
+    # ASCII only: this is runtime output, and group terminals are cp1252.
+    warnings.warn(
+        f"{persistent.size} pixel(s) flagged in more than {fraction:.0%} of sweeps: "
+        f"{shown}. A cosmic ray cannot recur at one pixel, so these are hot pixels "
+        f"or real narrow spectral features (Raman, laser leakage, sharp emitter "
+        f"lines) - and they have been median-replaced in every sweep. Pass "
+        f"cross_sweep_veto=True to keep them.",
+        stacklevel=3,
+    )
+
+
 def remove_cosmic_rays(
         spectra : np.ndarray,
         sigma_threshold : float = 5.0,
         median_window : int = 7,
-        max_iter: int = 3
+        max_iter: int = 3,
+        cross_sweep_veto : bool = False,
+        cross_sweep_window : int = 5,
+        axis : int = 0,
 
     ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Cosmic Ray Removal from a Single Spectrum
-    
+    Cosmic Ray Removal from PL spectra
+
     Standard method: Iterative sigma-clipping on the Laplacian (second derivative).
-    
+    Detection always runs **one spectrum at a time**, independently of the sweep
+    parameter: a cosmic ray is a single-exposure event, so the dispersion axis is
+    the only axis along which it is anomalous, and the MAD noise estimate has to
+    be per-exposure because PL intensity can move by an order of magnitude across
+    a gate sweep.
+
     Scientific basis:
     - Cosmic rays produce sharp, narrow spikes (1–3 pixels wide).
     - The discrete Laplacian  L[i] = flux[i-1] - 2·flux[i] + flux[i+1]  is near
@@ -284,80 +464,120 @@ def remove_cosmic_rays(
 
     Parameters
     ----------
-    spectra : np.ndarray
-        Raw 1-D spectra in counts
+    spectra : np.ndarray, shape (n_pixels, n_sweeps) or (n_pixels,)
+        Raw spectra in counts.  A 2-D array is treated as independent spectra,
+        one per column, each detected and cleaned on its own.
     sigma_threshold : float
         Detection threshold in MAD-based sigma units.
         Typical values: 4–7 (lower = more aggressive).
     median_window : int
         Width (pixels, forced odd) of the median filter used for both noise
-        estimation and pixel replacement. If median_window is even, the value is incremented by 1 
+        estimation and pixel replacement. If median_window is even, the value is incremented by 1
         to ensure an odd window.
     max_iter : int
         Maximum number of sigma-clipping iterations.  Convergence is usually
         reached in 2–4 passes.
+    cross_sweep_veto : bool
+        If True, discard detections that recur at the same pixel in neighbouring
+        sweeps — those are spectral features or hot pixels, not cosmic rays.
+        Requires 2-D input with at least 3 sweeps, and assumes the sweep axis is
+        an ordered physical parameter along which the spectrum evolves smoothly.
+        Default False: each spectrum is cleaned in complete isolation, and any
+        pixel flagged in more than ``PERSISTENT_FLAG_FRACTION`` of the sweeps
+        raises a ``UserWarning`` instead (see Notes).
+    cross_sweep_window : int
+        Number of neighbouring sweeps (forced odd) used by the veto.  Keep it
+        small; a window that straddles a charging transition compares spectra
+        that are not physically comparable.
+    axis : int
+        Pixel axis of a 2-D input. Default 0 (pixels along rows, sweeps along
+        columns), matching the rest of this module.
 
     Returns
     -------
     cleaned : ndarray
         Flux with cosmic ray pixels replaced by local median values.
+        Same shape as the input; the input array is never modified.
     cr_mask : ndarray[bool]
-        True at pixels identified as cosmic rays.
+        True at pixels identified as cosmic rays.  Same shape as the input.
 
+    Notes
+    -----
+    The default is deliberately the conservative one: no assumption is made
+    about the sweep axis, and results do not depend on whether spectra are
+    passed one at a time or as a block.  Its risk is that a real narrow feature
+    is replaced in every sweep and the output simply looks clean, so the
+    per-spectrum path warns whenever a pixel is flagged in more than
+    ``PERSISTENT_FLAG_FRACTION`` of the sweeps (2-D input, ≥3 sweeps).  Silence
+    the warning through ``warnings.filterwarnings`` if it is expected.
+
+    The warning fires only with the veto off; with it on those detections are
+    dropped rather than replaced.  Note that the veto keeps a hot pixel in
+    ``cleaned`` — correctly, it is not a cosmic ray — but it cannot tell a hot
+    pixel from a real spectral feature, so it does not label one.  To find
+    detector defects, inspect ``cr_mask.mean(axis=1)`` on the default mask.
     """
-    
+
+    arr = np.asarray(spectra, dtype=float)
+    if arr.ndim not in (1, 2):
+        raise ValueError(
+            f"spectra must be 1-D or 2-D, got {arr.ndim}-D with shape {arr.shape}."
+        )
+    if axis not in (0, 1):
+        raise ValueError(f"axis must be 0 or 1, got {axis}.")
+
     if median_window % 2 == 0:
         median_window += 1                     # enforce odd window
 
-    spectra      = spectra.astype(float)
-    n            = len(spectra)
-    cr_mask      = np.zeros(n, dtype=bool)
- 
-    for iteration in range(max_iter):
+    # Work pixel-major, (n_pixels, n_sweeps), and undo at the end.
+    flip = arr.ndim == 2 and axis == 1
+    work = arr.T if flip else arr
 
-        # Never modifies the original spectra
-        working = spectra.copy()
+    if work.ndim == 1:
+        if cross_sweep_veto:
+            raise ValueError(
+                "cross_sweep_veto needs 2-D input (n_pixels, n_sweeps): a single "
+                "spectrum has no neighbouring sweeps to compare against."
+            )
+        cr_mask, working = _detect_cosmic_rays_1d(
+            work, sigma_threshold, median_window, max_iter
+        )
+        cleaned = work.copy()
         if cr_mask.any():
-            # Smoothen the spectra
-            local_med = median_filter(spectra, size = median_window)
-            # Replace cosmic ray pixels with smoothened values
-            working[cr_mask] = local_med[cr_mask]
+            local_median      = median_filter(working, size=median_window)
+            cleaned[cr_mask]  = local_median[cr_mask]
+        return cleaned, cr_mask
 
-        # Compute the laplacian on the good pixels
-        laplacian = np.zeros(n)
-        laplacian[1:-1]  = working[:-2] - 2.0 * working[1:-1] + working[2:]
+    n_sweeps = work.shape[1]
+    if cross_sweep_veto and n_sweeps < 3:
+        raise ValueError(
+            f"cross_sweep_veto needs at least 3 sweeps to form a median, got {n_sweeps}."
+        )
 
-        # Robust noise estimate from unflagged pixels.
-        # MAD → σ conversion factor for a Gaussian: 1/0.6745.
+    cr_mask  = np.zeros(work.shape, dtype=bool)
+    workings = np.empty_like(work)
+    for j in range(n_sweeps):
+        cr_mask[:, j], workings[:, j] = _detect_cosmic_rays_1d(
+            work[:, j], sigma_threshold, median_window, max_iter
+        )
 
-        # Compute non cosmic ray pixels
-        good      = ~cr_mask
-        # Returns laplacian without cosmic ray pixels
-        lap_good  = laplacian[good]
-        # Noise estimate on the laplacian without cosmic rays
-        mad       = np.median(np.abs(lap_good - np.median(lap_good)))
-        sigma_lap = mad / 0.6745 # MAD ≈ 0.6745σ
+    if cross_sweep_veto:
+        cr_mask = _cross_sweep_veto(work, cr_mask, sigma_threshold, cross_sweep_window)
+        # Vetoed pixels must go back to their raw values before replacement, so
+        # rebuild the fills against the surviving mask.
+        workings = work.copy()
+        for j in range(n_sweeps):
+            _fill_flagged(workings[:, j], cr_mask[:, j], median_window)
+    elif n_sweeps >= 3:
+        # Nothing here vetoes a repeating detection, so at least say it happened.
+        _warn_persistent_flags(cr_mask)
 
-    
-        if sigma_lap == 0:
-            break
- 
-        # Flag where Laplacian is a large negative outlier.
-        # When the Laplacian is more than the threshold, we flag a cosmic ray
-        new_flags   = laplacian < -sigma_threshold * sigma_lap
-        # Newly identified cosmic ray pixels
-        newly_found = new_flags & ~cosmic_mask
-        # Combine old cosmic ray pixels with newly found cosmic ray pixels
-        cosmic_mask |= new_flags
-
-        if not newly_found.any():
-            print(f"  Converged after {iteration + 1} iteration(s).")
-            break
- 
     # Replace flagged pixels with the local median.
-    cleaned = spectra.copy()
-    if cosmic_mask.any():
-        local_median          = median_filter(spectra, size=median_window)
-        cleaned[cosmic_mask]  = local_median[cosmic_mask]
- 
-    return cleaned, cosmic_mask
+    cleaned = work.copy()
+    for j in range(n_sweeps):
+        col_mask = cr_mask[:, j]
+        if col_mask.any():
+            local_median              = median_filter(workings[:, j], size=median_window)
+            cleaned[col_mask, j]      = local_median[col_mask]
+
+    return (cleaned.T, cr_mask.T) if flip else (cleaned, cr_mask)

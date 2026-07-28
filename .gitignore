@@ -13,6 +13,9 @@ site/
 # VSCode — share launch configs, ignore personal settings
 .vscode/settings.json
 
+# Claude Code — share CLAUDE.md, ignore local tool permissions
+.claude/settings.local.json
+
 # Cygwin/MSYS bash crash dumps
 *.stackdump
 

@@ -11,3 +11,6 @@
 ## Fitting
 - Multiple ROIs for diffusion E.g. 2-3 diffusion spots. Track each for area and centre of mass
 - Multiple ROIs for dipole length. E.g. in hybrid intralayer excitons in homobilayers with switchable dipole lengths based on the transitions
+
+## Documentation
+- Add mathematical formulas to functions that assume certain physics. E.g. the calculation of the electric field within the heterostructure stack.

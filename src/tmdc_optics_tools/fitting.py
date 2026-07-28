@@ -108,6 +108,162 @@ def multi_lorentzian(x, *params):
 
 
 # ---------------------------------------------------------------------------
+# Baselines
+# ---------------------------------------------------------------------------
+#
+# The peak models above all decay to zero in their wings, so a dark-count
+# pedestal has nowhere to go in the fit: it gets absorbed by inflating the
+# amplitude and width instead, and biases the centre whenever the pedestal is
+# not symmetric across the fit window.  Adding a baseline term to the model
+# removes that bias without needing a separate background region.
+#
+# Note that a Lorentzian's 1/x^2 wings are partly degenerate with a flat
+# offset over a finite window, so the fitted FWHM becomes noisier (and
+# somewhat window-dependent) once a baseline is included.  The centre is set
+# by symmetry rather than by the wings and stays robust.  This is why the
+# default is "constant" rather than "linear": on a narrow window the wings
+# already mimic a slope.
+#
+# Baseline values are reported in FitResult.params — they are a useful
+# diagnostic (an offset that drifts across a sweep usually means changing
+# dark counts, laser leakage, or a badly chosen window) but are not physics.
+
+_PEAK_PARAM_NAMES = ["amplitude", "center", "fwhm"]
+
+_BASELINES = {
+    "none":     ([],                  lambda x: 0.0),
+    "constant": (["offset"],          lambda x, c0: c0),
+    "linear":   (["offset", "slope"], lambda x, c0, c1: c0 + c1 * x),
+}
+
+
+def _resolve_baseline(baseline) -> tuple:
+    """
+    Return ``(key, param_names, baseline_fn)`` for a baseline selector.
+
+    Accepts any key of :data:`_BASELINES`, or ``None`` as an alias for
+    ``"none"``.
+    """
+    key = "none" if baseline is None else str(baseline).lower()
+    if key not in _BASELINES:
+        raise ValueError(
+            f"baseline={baseline!r} is not recognised. "
+            f"Choose from {tuple(_BASELINES)} (or None for 'none')."
+        )
+    names, fn = _BASELINES[key]
+    return key, list(names), fn
+
+
+def _model_label(model_name: str, baseline_key: str) -> str:
+    """``"lorentzian"`` + ``"linear"`` -> ``"lorentzian+linear"``."""
+    return model_name if baseline_key == "none" else f"{model_name}+{baseline_key}"
+
+
+def _with_baseline(peak_fn, n_peak_params: int, baseline_fn):
+    """
+    Compose a peak model with a baseline term into a single ``curve_fit`` model.
+
+    The first *n_peak_params* values are forwarded to *peak_fn* and the
+    remainder to *baseline_fn*.  With ``baseline="none"`` the remainder is
+    empty and the baseline contributes a constant zero.
+    """
+    def model(x, *params):
+        return (peak_fn(x, *params[:n_peak_params])
+                + baseline_fn(x, *params[n_peak_params:]))
+    return model
+
+
+def _baseline_p0(key: str, x: np.ndarray, y: np.ndarray) -> tuple:
+    """
+    Seed the baseline parameters from the edges of the fit window.
+
+    Returns ``(baseline_p0, level)``, where *level* is a representative
+    baseline height.  Callers subtract it from the amplitude guess so the
+    peak seed measures height *above the pedestal* rather than above zero —
+    getting this wrong is the main way a baseline degrades a fit instead of
+    improving it.
+    """
+    if key == "none":
+        return (), 0.0
+
+    n      = max(1, len(y) // 10)          # outer decile at each end
+    lo, hi = float(np.median(y[:n])), float(np.median(y[-n:]))
+    level  = 0.5 * (lo + hi)
+
+    if key == "constant":
+        return (level,), level
+
+    x_lo, x_hi = float(np.median(x[:n])), float(np.median(x[-n:]))
+    slope = (hi - lo) / (x_hi - x_lo) if x_hi != x_lo else 0.0
+    return (lo - slope * x_lo, slope), level
+
+
+def _peak_amplitude_p0(y: np.ndarray, level: float) -> float:
+    """Amplitude seed measured above *level*, guarded against a <= 0 result."""
+    amp = float(y.max()) - level
+    if not np.isfinite(amp) or amp <= 0:
+        amp = float(np.ptp(y)) or 1.0
+    return amp
+
+
+def _complete_p0(p0, n_peak: int, base_p0: tuple, model_name: str) -> np.ndarray:
+    """
+    Accept a peak-only *p0* and append the auto-seeded baseline values.
+
+    A full-length *p0* (peak + baseline) is passed through unchanged, so a
+    caller can override the baseline seed when they need to.  Any other
+    length is an error — silently mis-sized guesses would otherwise surface
+    as an opaque SciPy traceback.
+    """
+    p0     = np.asarray(p0, dtype=float).ravel()
+    n_base = len(base_p0)
+
+    if p0.size == n_peak:
+        return (np.concatenate([p0, np.asarray(base_p0, dtype=float)])
+                if n_base else p0)
+    if p0.size == n_peak + n_base:
+        return p0
+
+    if n_base:
+        raise ValueError(
+            f"{model_name}: p0 has {p0.size} value(s); expected {n_peak} "
+            f"(peak parameters only — the baseline is seeded automatically) "
+            f"or {n_peak + n_base} (peak + baseline)."
+        )
+    raise ValueError(
+        f"{model_name}: p0 has {p0.size} value(s); expected {n_peak}."
+    )
+
+
+def _complete_bounds(bounds, n_peak: int, n_base: int, model_name: str) -> tuple:
+    """
+    Extend sequence-form *bounds* to cover the baseline parameters.
+
+    Scalar bounds — including the default ``(-inf, inf)`` — broadcast to any
+    parameter count and are returned unchanged.  Baseline parameters are left
+    unbounded.
+    """
+    if n_base == 0:
+        return bounds
+
+    out = []
+    for side, value in zip(("lower", "upper"), bounds):
+        if np.ndim(value) == 0:
+            out.append(value)
+            continue
+        seq = list(value)
+        if len(seq) == n_peak:
+            seq = seq + [-np.inf if side == "lower" else np.inf] * n_base
+        elif len(seq) != n_peak + n_base:
+            raise ValueError(
+                f"{model_name}: {side} bounds have {len(seq)} entries; "
+                f"expected {n_peak} or {n_peak + n_base}."
+            )
+        out.append(seq)
+    return tuple(out)
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -148,27 +304,40 @@ def _make_result(
 
 
 def _fit_single_peak(
-    model_fn,
+    peak_fn,
     model_name : str,
     x          : np.ndarray,
     y          : np.ndarray,
     p0         : tuple,
     bounds     : tuple,
+    baseline   : str = "constant",
 ) -> FitResult:
     """
     Shared implementation for single-peak fits (Lorentzian / Gaussian).
-    Avoids duplicating the try/except and _make_result call in every fitter.
+
+    Composes *peak_fn* with the selected baseline, completes the initial
+    guess and bounds, and runs the fit.  Avoids duplicating the try/except
+    and _make_result call in every fitter.
     """
+    key, base_names, base_fn = _resolve_baseline(baseline)
+    label       = _model_label(model_name, key)
+    model_fn    = _with_baseline(peak_fn, len(_PEAK_PARAM_NAMES), base_fn)
+    param_names = _PEAK_PARAM_NAMES + base_names
+
+    base_p0, _ = _baseline_p0(key, x, y)
+    p0         = _complete_p0(p0, len(_PEAK_PARAM_NAMES), base_p0, label)
+    bounds     = _complete_bounds(bounds, len(_PEAK_PARAM_NAMES),
+                                  len(base_names), label)
+
     try:
         popt, pcov = curve_fit(model_fn, x, y, p0=p0, bounds=bounds, maxfev=5000)
         converged  = True
     except RuntimeError:
         popt, pcov = np.array(p0, dtype=float), None
         converged  = False
-        warnings.warn(f"{model_name} fit did not converge.")
+        warnings.warn(f"{label} fit did not converge.")
 
-    return _make_result(model_name, model_fn,
-                        ["amplitude", "center", "fwhm"],
+    return _make_result(label, model_fn, param_names,
                         popt, pcov, x, y, converged)
 
 
@@ -176,47 +345,82 @@ def _fit_single_peak(
 # Fitting functions
 # ---------------------------------------------------------------------------
 
+def _auto_peak_p0(x: np.ndarray, y: np.ndarray, baseline_key: str) -> tuple:
+    """Auto initial guess for a single peak, measured above the baseline."""
+    _, level = _baseline_p0(baseline_key, x, y)
+    return (_peak_amplitude_p0(y, level),
+            x[np.argmax(y)],
+            (x[-1] - x[0]) / 10)
+
+
 def fit_lorentzian(
-    x      : np.ndarray,
-    y      : np.ndarray,
-    p0     : tuple = None,
-    bounds : tuple = (-np.inf, np.inf),
+    x        : np.ndarray,
+    y        : np.ndarray,
+    p0       : tuple = None,
+    bounds   : tuple = (-np.inf, np.inf),
+    baseline : str   = "constant",
 ) -> FitResult:
     """
-    Fit a single Lorentzian peak.
+    Fit a single Lorentzian peak on top of a baseline.
 
     Parameters
     ----------
     x, y : array-like
         Spectral data.
     p0 : tuple of (amplitude, center, fwhm), optional
-        Initial guess. Auto-estimated if ``None``.
+        Initial guess for the peak. Auto-estimated if ``None``. The baseline
+        is seeded automatically; pass a full-length tuple (peak + baseline)
+        to set it explicitly.
     bounds : tuple
-        Passed to ``scipy.optimize.curve_fit``.
+        Passed to ``scipy.optimize.curve_fit``. Sequence-form bounds sized
+        for the peak parameters alone are extended with unbounded entries
+        for the baseline.
+    baseline : {"constant", "linear", "none"}
+        Baseline added to the peak model. ``"constant"`` (default) fits a
+        flat offset, so a dark-count pedestal no longer inflates the
+        amplitude and FWHM. ``"linear"`` additionally fits a slope — use it
+        when the background visibly tilts across the window. ``"none"``
+        reproduces the offset-free model used before this option existed.
 
     Returns
     -------
     FitResult
+        ``params`` gains an ``offset`` key (and ``slope`` for
+        ``baseline="linear"``); ``model`` records the choice, e.g.
+        ``"lorentzian+constant"``.
+
+    Notes
+    -----
+    A Lorentzian's ``1/x**2`` wings are partly degenerate with a flat offset
+    over a finite window, so the fitted ``fwhm`` (and its uncertainty) is
+    more window-sensitive with a baseline than without. The fitted ``center``
+    is set by symmetry and stays robust.
     """
     x, y = np.asarray(x, float), np.asarray(y, float)
+    key, _, _ = _resolve_baseline(baseline)
     if p0 is None:
-        p0 = (y.max(), x[np.argmax(y)], (x[-1] - x[0]) / 10)
-    return _fit_single_peak(lorentzian, "lorentzian", x, y, p0, bounds)
+        p0 = _auto_peak_p0(x, y, key)
+    return _fit_single_peak(lorentzian, "lorentzian", x, y, p0, bounds, baseline)
 
 
 def fit_gaussian(
-    x      : np.ndarray,
-    y      : np.ndarray,
-    p0     : tuple = None,
-    bounds : tuple = (-np.inf, np.inf),
+    x        : np.ndarray,
+    y        : np.ndarray,
+    p0       : tuple = None,
+    bounds   : tuple = (-np.inf, np.inf),
+    baseline : str   = "constant",
 ) -> FitResult:
     """
     Fit a single Gaussian peak. Same signature as :func:`fit_lorentzian`.
+
+    A Gaussian decays fast enough that the baseline/wing degeneracy noted in
+    :func:`fit_lorentzian` barely applies here.
     """
     x, y = np.asarray(x, float), np.asarray(y, float)
+    key, _, _ = _resolve_baseline(baseline)
     if p0 is None:
-        p0 = (y.max(), x[np.argmax(y)], (x[-1] - x[0]) / 10)
-    return _fit_single_peak(gaussian, "gaussian", x, y, p0, bounds)
+        p0 = _auto_peak_p0(x, y, key)
+    return _fit_single_peak(gaussian, "gaussian", x, y, p0, bounds, baseline)
 
 
 def fit_multi_lorentzian(
@@ -226,9 +430,10 @@ def fit_multi_lorentzian(
     p0          : list = None,
     bounds      : tuple = None,
     peak_kwargs : dict = None,
+    baseline    : str  = "constant",
 ) -> FitResult:
     """
-    Fit a sum of N Lorentzian peaks.
+    Fit a sum of N Lorentzian peaks on top of a baseline.
 
     Parameters
     ----------
@@ -237,21 +442,33 @@ def fit_multi_lorentzian(
         Number of peaks. Inferred from ``p0`` length if not given.
     p0 : list of (amp, center, fwhm) per peak, optional
         If ``None``, peaks are found automatically via
-        ``scipy.signal.find_peaks``.
+        ``scipy.signal.find_peaks``. The baseline is seeded automatically;
+        append baseline values to set them explicitly.
     bounds : tuple, optional
         ``([lower, ...], [upper, ...])`` passed to ``curve_fit``.
-        Auto-constructed if ``None``.
+        Auto-constructed if ``None``. Sequence-form bounds sized for the
+        peak parameters alone are extended with unbounded baseline entries.
     peak_kwargs : dict, optional
         Extra kwargs forwarded to ``scipy.signal.find_peaks`` during
         automatic peak detection.
+    baseline : {"constant", "linear", "none"}
+        Baseline added to the summed peaks — see :func:`fit_lorentzian`.
+        Overlapping wings make the baseline harder to separate here than in
+        the single-peak case, so prefer ``"constant"`` unless the background
+        visibly tilts.
 
     Returns
     -------
     FitResult
         ``params`` keys are ``amp_0``, ``center_0``, ``fwhm_0``, ``amp_1``, …
+        followed by ``offset`` (and ``slope`` for ``baseline="linear"``).
     """
     x, y = np.asarray(x, float), np.asarray(y, float)
     span = x[-1] - x[0]
+
+    key, base_names, base_fn = _resolve_baseline(baseline)
+    label      = _model_label("multi_lorentzian", key)
+    base_p0, level = _baseline_p0(key, x, y)
 
     if p0 is None:
         pk_kw = peak_kwargs or {}
@@ -261,41 +478,47 @@ def fit_multi_lorentzian(
             peaks = peaks[order[:n_peaks]]
         p0 = []
         for pk in peaks:
-            p0.extend([y[pk], x[pk], span / 20])
+            # Height above the pedestal, not above zero.
+            amp = float(y[pk]) - level
+            if not np.isfinite(amp) or amp <= 0:
+                amp = float(y[pk])
+            p0.extend([amp, x[pk], span / 20])
 
-    p0_flat = np.array(p0).ravel()
-    n = len(p0_flat) // 3
+    # Peak count comes from the peak parameters only — trailing baseline
+    # values (if the caller supplied them) must not be counted as a peak.
+    # A peak-only p0 is an exact multiple of 3; anything else carries the
+    # baseline as well.  _complete_p0 rejects genuinely mis-sized input.
+    n_supplied = np.asarray(p0, dtype=float).ravel().size
+    n = (n_supplied // 3 if n_supplied % 3 == 0
+         else (n_supplied - len(base_names)) // 3)
+    n_peak_params = 3 * n
+
+    p0_flat = _complete_p0(p0, n_peak_params, base_p0, label)
 
     if bounds is None:
         lo = [0,      x.min(), 0   ] * n
         hi = [np.inf, x.max(), span] * n
         bounds = (lo, hi)
+    bounds = _complete_bounds(bounds, n_peak_params, len(base_names), label)
 
     param_names = [name for i in range(n)
                    for name in (f"amp_{i}", f"center_{i}", f"fwhm_{i}")]
+    param_names += base_names
+
+    model_fn = _with_baseline(multi_lorentzian, n_peak_params, base_fn)
 
     try:
         popt, pcov = curve_fit(
-            multi_lorentzian, x, y, p0=p0_flat, bounds=bounds, maxfev=10000
+            model_fn, x, y, p0=p0_flat, bounds=bounds, maxfev=10000
         )
         converged = True
     except RuntimeError:
         popt, pcov = p0_flat, None
         converged  = False
-        warnings.warn("Multi-Lorentzian fit did not converge.")
+        warnings.warn(f"{label} fit did not converge.")
 
-    perr  = np.sqrt(np.diag(pcov)) if pcov is not None else np.full(len(popt), np.nan)
-    y_fit = multi_lorentzian(x, *popt)
-    return FitResult(
-        params    = dict(zip(param_names, popt)),
-        errors    = dict(zip(param_names, perr)),
-        x_fit     = x,
-        y_fit     = y_fit,
-        residuals = y - y_fit,
-        r_squared = _r_squared(y, y_fit),
-        model     = "multi_lorentzian",
-        converged = converged,
-    )
+    return _make_result(label, model_fn, param_names,
+                        popt, pcov, x, y, converged)
 
 
 def fit_scan_peak(
@@ -304,6 +527,7 @@ def fit_scan_peak(
     x_range    : tuple      = None,
     model      : str        = "lorentzian",
     sweep_mask : np.ndarray = None,
+    baseline   : str        = "constant",
 ) -> list[FitResult]:
     """
     Fit a single peak in every sweep of an
@@ -330,6 +554,11 @@ def fit_scan_peak(
         mask is ``True`` are fitted; the rest receive a non-converged
         placeholder so that result indices stay aligned with ``scan.ef``.
         Fits all sweeps when ``None``.
+    baseline : {"constant", "linear", "none"}
+        Baseline fitted alongside the peak in every sweep — see
+        :func:`fit_lorentzian`. ``"constant"`` (default) means an
+        un-subtracted dark-count pedestal no longer inflates the fitted
+        amplitude and width.
 
     Returns
     -------
@@ -338,6 +567,10 @@ def fit_scan_peak(
     x       = scan.energy     if x_axis == "energy" else scan.wavelength
     spectra = scan.best_energy_spectra if x_axis == "energy" else scan.spectra
     fit_fn  = fit_lorentzian if model == "lorentzian" else fit_gaussian
+
+    key, base_names, _ = _resolve_baseline(baseline)
+    label      = _model_label(model, key)
+    nan_names  = _PEAK_PARAM_NAMES + base_names
 
     if x_range is not None:
         px_mask = (x >= x_range[0]) & (x <= x_range[1])
@@ -352,17 +585,19 @@ def fit_scan_peak(
     results = []
     for i in range(scan.n_sweeps):
         if sweep_mask[i]:
-            results.append(fit_fn(x, spectra[px_mask, i].astype(float)))
+            results.append(fit_fn(x, spectra[px_mask, i].astype(float),
+                                  baseline=baseline))
         else:
-            # Placeholder so indices stay aligned with scan.ef
+            # Placeholder so indices stay aligned with scan.ef.  Fresh dicts
+            # per result — a shared one would alias across every placeholder.
             results.append(FitResult(
-                params    = {"amplitude": np.nan, "center": np.nan, "fwhm": np.nan},
-                errors    = {"amplitude": np.nan, "center": np.nan, "fwhm": np.nan},
+                params    = {k: np.nan for k in nan_names},
+                errors    = {k: np.nan for k in nan_names},
                 x_fit     = x,
                 y_fit     = np.full_like(x, np.nan),
                 residuals = np.full_like(x, np.nan),
                 r_squared = np.nan,
-                model     = model,
+                model     = label,
                 converged = False,
             ))
     return results
@@ -459,6 +694,7 @@ def _prepare_dipole_data(
     x_range      : tuple,
     model        : str,
     active_range : tuple,
+    baseline     : str = "constant",
 ) -> tuple:
     """
     Shared setup for all dipole extraction methods.
@@ -473,6 +709,8 @@ def _prepare_dipole_data(
     model : str
     active_range : tuple or None
         Combined ef_range / Efield_range already resolved by the caller.
+    baseline : str
+        Baseline model forwarded to :func:`fit_scan_peak`.
 
     Returns
     -------
@@ -495,7 +733,7 @@ def _prepare_dipole_data(
 
     fit_results   = fit_scan_peak(
         scan, x_axis="energy", x_range=x_range, model=model,
-        sweep_mask=sweep_mask,
+        sweep_mask=sweep_mask, baseline=baseline,
     )
     peak_energies = np.array([r.params["center"] for r in fit_results])
     peak_errors   = np.array([r.errors["center"]  for r in fit_results])
@@ -715,6 +953,7 @@ def extract_dipole_length(
     method       : str   = "wls",
     n_bootstrap  : int   = 2000,
     rng          : np.random.Generator = None,
+    baseline     : str   = "constant",
 ) -> DipoleResult:
     """
     Extract the excitonic dipole length from the DC Stark shift in a
@@ -781,6 +1020,18 @@ def extract_dipole_length(
     rng : np.random.Generator, optional
         Random number generator for reproducibility when using bootstrap,
         e.g. ``np.random.default_rng(42)``.
+    baseline : {"constant", "linear", "none"}
+        Baseline fitted alongside the peak at every field point — see
+        :func:`fit_lorentzian`. With ``"constant"`` (default) a dark-count
+        pedestal no longer biases the fitted centres, so the extracted
+        slope is cleaner even without a load-time background region.
+        Pass ``"none"`` to reproduce results from before this option
+        existed.
+
+        Note that the per-point ``σ`` on the centre generally grows slightly
+        with a baseline (the offset is partly degenerate with a Lorentzian's
+        wings), and those σ are the WLS weights — so slopes can shift a
+        little even where the centres barely move.
 
     Returns
     -------
@@ -823,7 +1074,7 @@ def extract_dipole_length(
 
     # --- Shared setup: lineshape fits + masking ---
     ef, peak_energies, peak_errors, converged, ef_fit, E_fit, sig_fit = (
-        _prepare_dipole_data(scan, x_range, model, active_range)
+        _prepare_dipole_data(scan, x_range, model, active_range, baseline)
     )
 
     # --- Linear fit: dispatch to chosen method ---
@@ -857,7 +1108,7 @@ def extract_dipole_length(
         dipole_length_err      = dipole_length_err,
         dipole_length_angstrom = dipole_length * 10.0,
         r_squared              = r_squared,
-        peak_model             = model,
+        peak_model             = _model_label(model, _resolve_baseline(baseline)[0]),
         converged_mask         = converged,
         method                 = method,
         n_bootstrap            = n_bootstrap if method == "bootstrap" else None,

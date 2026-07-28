@@ -163,9 +163,13 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 - `AttoCubePLVabScan` refuses to load if any `_CURATED` row is missing (including
   `Scanner X`/`Scanner Y`). A larger overhaul of this class is planned.
 
+**Fixed — don't re-report:**
+- `processing.remove_cosmic_rays` (A1, fixed 2026-07-28). Was uncallable
+  (`UnboundLocalError`), and its iteration was a no-op. Now works, takes 2-D
+  `(n_pixels, n_sweeps)` input, and has `cross_sweep_veto=` plus a persistent-flag
+  warning. Covered by `tests/test_processing_cosmic_rays.py`.
+
 **Open, not yet fixed:**
-- `processing.remove_cosmic_rays` raises `UnboundLocalError` (`cosmic_mask` vs
-  `cr_mask`) — cannot be called at all.
 - `plotting.py` (~line 681) `circle.set_path_effects([path_effects])` passes the
   module, not a path effect; fails on draw.
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object

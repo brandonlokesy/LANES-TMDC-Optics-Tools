@@ -34,9 +34,12 @@ Docs        : python -m mkdocs build --strict
 Tests       : python -m pytest -q
 ```
 
-`pytest` is **not currently installed** in `viz-sci-plot` and is not declared in
-`pyproject.toml`. Tests are local-only by deliberate choice — do not add a test job
-to CI. CI (`.github/workflows/docs.yml`) builds and deploys docs only.
+`pytest` **is installed** in `viz-sci-plot` (9.1.1, confirmed 2026-07-30 — the whole
+suite runs) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
+the dependency exists only in this one environment. Tests are local-only by
+deliberate choice — do not add a test job to CI. CI
+(`.github/workflows/docs.yml`) builds and deploys docs only. Declaring the extra is
+part of F1 in `dev/audit-2026-07.md` and is deferred, not forgotten.
 
 TODO: `pyproject` says `requires-python = ">=3.9"` but the docs CI uses 3.12.
 Ask which is authoritative before relying on version-specific syntax.

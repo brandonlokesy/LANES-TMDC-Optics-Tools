@@ -34,9 +34,12 @@ Docs        : python -m mkdocs build --strict
 Tests       : python -m pytest -q
 ```
 
-`pytest` is **not currently installed** in `viz-sci-plot` and is not declared in
-`pyproject.toml`. Tests are local-only by deliberate choice — do not add a test job
-to CI. CI (`.github/workflows/docs.yml`) builds and deploys docs only.
+`pytest` **is installed** in `viz-sci-plot` (9.1.1, confirmed 2026-07-30 — the whole
+suite runs) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
+the dependency exists only in this one environment. Tests are local-only by
+deliberate choice — do not add a test job to CI. CI
+(`.github/workflows/docs.yml`) builds and deploys docs only. Declaring the extra is
+part of F1 in `dev/audit-2026-07.md` and is deferred, not forgotten.
 
 TODO: `pyproject` says `requires-python = ">=3.9"` but the docs CI uses 3.12.
 Ask which is authoritative before relying on version-specific syntax.
@@ -323,7 +326,10 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   `AttributeError` at **draw** time, not at call time. The hand-rolled block was
   replaced by `_draw_laser_circle(ax, scan.laser_ref, ls="--")`, so two drawers now
   remain for D2 rather than three. New code annotating a laser spot should call that
-  helper, not build a `patches.Circle`.
+  helper, not build a `patches.Circle`. Covered by
+  `tests/test_plotting_laser_circle.py` — the suite's first plotting tests, which
+  force the `Agg` backend and assert on a real `fig.canvas.draw()`. Any future test
+  of an artist's styling must render too; building the figure proves nothing.
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object

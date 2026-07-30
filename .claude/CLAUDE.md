@@ -323,7 +323,10 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   `AttributeError` at **draw** time, not at call time. The hand-rolled block was
   replaced by `_draw_laser_circle(ax, scan.laser_ref, ls="--")`, so two drawers now
   remain for D2 rather than three. New code annotating a laser spot should call that
-  helper, not build a `patches.Circle`.
+  helper, not build a `patches.Circle`. Covered by
+  `tests/test_plotting_laser_circle.py` — the suite's first plotting tests, which
+  force the `Agg` backend and assert on a real `fig.canvas.draw()`. Any future test
+  of an artist's styling must render too; building the figure proves nothing.
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object

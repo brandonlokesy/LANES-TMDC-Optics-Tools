@@ -670,16 +670,7 @@ def animate_real_space_PL_map(
     )
 
     if laser_annotation and scan.laser_ref is not None:
-        lr = scan.laser_ref
-        circle = patches.Circle(
-            (lr.center_x, lr.center_y), radius=lr.radius,
-            edgecolor="red", facecolor="none",
-            linewidth=1.5, linestyle="--",
-            label=f"Laser Spot (1/e² Radius: {lr.radius:.1f} px)",
-            zorder = 10
-        )
-        circle.set_path_effects([path_effects])
-        ax.add_patch(circle)
+        _draw_laser_circle(ax, scan.laser_ref, ls="--")
 
     def update(frame):
         im.set_data(scan.load_frame(frame))

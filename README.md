@@ -88,7 +88,7 @@ geom = DeviceGeometry(
 
 `StackLayer` looks up monolayer thickness and dielectric constant from `constants.py` automatically; override with `d_monolayer` and `eps` if needed. Supported materials out of the box: `WS2`, `WSe2`, `MoSe2`, `MoS2`.
 
-The dielectric constant value for the heterostructure layer (excluding hBN) can be called with `DeviceGeometry.eps_2d`, the heterostructure thickness with `DeviceGeometry.heterostructure_thickness`, the stack with `DeviceGeometry.stack_label`.
+The dielectric constant of the TMDC layers alone (excluding hBN) can be called with `DeviceGeometry.eps_2d`, the same quantity for the whole gate stack (hBN included) with `DeviceGeometry.eps_stack`, the corresponding thicknesses in nm with `DeviceGeometry.d_2d` and `DeviceGeometry.d_stack`, and the stack description with `DeviceGeometry.stack_label`. The naming is consistent throughout: the `eps_`/`d_` prefix is the quantity, the `_2d`/`_stack` suffix is the scope — TMDC layers alone, or the whole gate stack including hBN.
 
 ---
 

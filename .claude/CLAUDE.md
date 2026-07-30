@@ -43,17 +43,39 @@ Ask which is authoritative before relying on version-specific syntax.
 
 ## Physics conventions
 
-**Displacement field** — `DeviceGeometry.electric_field` is **correct as written**;
-do not "fix" it:
+**Displacement field** — `DeviceGeometry.electric_field` is **exact as written**
+(since 2026-07-30); do not "simplify" it:
 
 ```
-E_2D ≈ (V_BG − V_TG) / d_tot · (ε_hBN / ε_2D)
+ε_2D · E_2D = ε_stack · E_stack,   E_stack = (V_BG − V_TG) / d_tot
+⇒ E_2D = (V_BG − V_TG) / d_tot · (ε_stack / ε_2D)
 d_tot = d_2D + d_hBN,top + d_hBN,bottom
 ```
 
-The full-stack thickness in the denominator (including the TMDC layers) is
-deliberate. `ε_2D` is the TMDC-only series-capacitor value (`DeviceGeometry.eps_2d`).
-Result is in mV/nm.
+Exact because **D** is continuous with no free charge between the gates, so
+`ε_i·E_i` is the same in every slab, and `ε_stack` (`DeviceGeometry.eps_stack`) is
+by construction the ε of the homogeneous slab of thickness `d_tot` with the same
+capacitance as the real stack. `ε_2D` is the TMDC-only series-capacitor value
+(`DeviceGeometry.eps_2d`). Result is in mV/nm.
+
+Two wrong forms will look tempting; both are recorded because both have already
+been shipped somewhere in the group:
+
+- **`ε_hBN` in place of `ε_stack`** (numerator) is the thin-TMDC approximation —
+  *"pretend the whole stack is hBN"*. Low by `(d_2D/d_hBN)(1 − ε_hBN/ε_2D)`, i.e.
+  0.59% for 53/46 nm hBN around a MoSe₂/WSe₂ bilayer, growing for thicker TMDC
+  stacks or thinner hBN. This is eq. 3.13 of the senior's thesis, what the group's
+  MATLAB scripts compute, and what this function did before 2026-07-30 — so current
+  fields are ~0.6% higher than older results. Not wrong, just not exact.
+- **`ε_stack` in the denominator** instead of the numerator is wrong by ~1.8×, and
+  is *not* an approximation of anything. The old MATLAB reaches the correct answer
+  only because its `eps_hs` line, `2*t*e_hbn*e_tmdc/(2*t*e_hbn)`, cancels
+  algebraically to `eps_tmdc` for any input. Repairing that cancellation alone takes
+  you from 0.6% low to 82% high.
+
+Thesis eq. 3.12 keeps the `+ d_2D` term but substitutes `d_TOT` for `d_hBN`, which
+counts the TMDC twice; it is 1.29% low, i.e. *worse* than the 3.13 that follows it.
+Keeping `d_hBN` there instead makes 3.12 exact and equal to the form above.
 
 **Jacobian** — `apply_jacobian` defaults to `False` and that is intended. The
 docstrings and README still claim "True (default)"; the *docs* are wrong, not the
@@ -75,8 +97,27 @@ TODO — provenance not yet recorded, ask before documenting or changing:
 - `power_scale = 0.303e6` ("calibrated by CdG") — when, which objective/filter set,
   does it vary per session?
 - `Scanner X` / `Scanner Y` units (code says "assumed µm, scale 1.0 until confirmed").
-- `EPS_TMDC["HS"] = 7.5` — unsourced, sits among per-material values.
+- `EPS_TMDC["HS"] = 7.5` — unsourced, sits among per-material values. Note it is
+  *not* the harmonic mean of a MoSe₂/WSe₂ bilayer (that is 7.299), and it exceeds
+  both constituents, so it is not an average of the values above it. Also note that
+  this key uses "HS" for the **TMDC-only** quantity, the opposite scope from the
+  former `DeviceGeometry.eps_hs` — which is why those properties were renamed on
+  2026-07-30. Don't reintroduce bare "hs".
 - `T_MONOLAYER` = 0.65 nm for all four materials — deliberate approximation?
+- `EPS_HBN = 3.9` is cited to Laturia et al. 2018, and the four TMDC values do match
+  that paper's bulk out-of-plane figures — but its hBN out-of-plane value is usually
+  quoted as **3.76**, and 3.9 is also the canonical SiO₂ value. Worth checking
+  against the table: it propagates into `eps_stack`, though only weakly into
+  `electric_field` now that the exact form is used.
+- **Gate polarity is per-session wiring, not a property of the code.** The
+  electrodes can be hooked up in either configuration, so which acquisition channel
+  drove which gate is *not* inferable and must be recorded per scan; the old MATLAB
+  used `dm(4,…)`/`dm(6,…)` with no note of which was which. Until a loader records
+  it, `electric_field(v_top=, v_bot=)` puts the mapping on the caller by design —
+  transposing them mirrors the field axis and flips the sign of any extracted
+  dipole. Fold the metadata into the planned `AttoCubePLVabScan` overhaul rather
+  than patching `electric_field`. The senior's thesis is itself inconsistent here
+  (eq. 3.11 carries a leading minus, 3.12/3.13 do not), so don't inherit its sign.
 
 ## Design principle — corrections are opt-in
 
@@ -261,14 +302,28 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   (`UnboundLocalError`), and its iteration was a no-op. Now works, takes 2-D
   `(n_pixels, n_sweeps)` input, and has `cross_sweep_veto=` plus a persistent-flag
   warning. Covered by `tests/test_processing_cosmic_rays.py`.
+- `DeviceGeometry.eps_hs` / `__repr__` (A2, fixed 2026-07-30). `eps_hs` iterated
+  `_slabs()`'s `(d, ε)` tuples as `StackLayer` objects, so `print(geom)` raised for
+  every geometry. Now unpacks the tuples — `_slabs()` returning tuples is the
+  convention, not something to change: hBN gate flakes are ~50 nm, not *n*
+  monolayers, and hBN's ε lives in `EPS_HBN`, not `EPS_TMDC`, so wrapping them in
+  `StackLayer` would require asserting a false `n_layers`.
+- `DeviceGeometry.optical_thickness` **deleted** (A2, 2026-07-30). It returned
+  `d_tot × ε_2D` — full-stack thickness times a TMDC-only ε — under a local
+  variable misleadingly named `d_2d`. It was neither an optical path length
+  (`Σ nᵢdᵢ`, which these static out-of-plane ε values cannot give: TMDC in-plane
+  `n ≈ 4–5` near resonance against `√7.2 ≈ 2.7`) nor any capacitive thickness
+  (capacitance goes as `ε/d`; `d/ε` is what adds in series). It was a fragment of
+  the pre-2026-07-30 `electric_field` denominator with `ε_hBN` not yet divided out,
+  had no callers, and the name would have actively misled the planned
+  reflectance/cavity work. Do not reinstate it — the future optics code needs
+  dispersive `n(λ)` data of its own, not `EPS_TMDC`.
 
 **Open, not yet fixed:**
 - `plotting.py` (~line 681) `circle.set_path_effects([path_effects])` passes the
   module, not a path effect; fails on draw.
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
   that already had `bg_region` applied at load.
-- `DeviceGeometry.eps_hs` iterates `(d, ε)` tuples as `StackLayer` objects →
-  `AttributeError`, which also breaks `__repr__`.
 - `__init__.py` quick-start and README §5/§6 reference APIs that don't exist
   (`AttoCubePLScan`, `plot_pl_map`, `bg_region=` on `fit_scan_peak`).
 

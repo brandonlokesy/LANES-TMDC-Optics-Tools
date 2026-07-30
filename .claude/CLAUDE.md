@@ -114,12 +114,105 @@ This governs what defaults are allowed to be:
 does not preserve anything, it silently migrates the pedestal into amplitude and
 FWHM. Do not "fix" it to `"none"` to comply with this section.
 
+## Design principle — parameters earn their place
+
+**A function exposes the minimum set of parameters its callers cannot readily supply
+themselves. Everything else is not a parameter.** This bites hardest in `plotting`,
+where the temptation is one argument per matplotlib property.
+
+The test is whether an argument changes **the numbers or only the pixels.** What
+changes what the data *is* — which correction ran, which array was plotted, what the
+axis means — belongs in the signature. What changes only how it looks does not,
+because there are already three better places for it:
+
+- **The returned handles — the first thing to reach for.** `plotting` returns
+  `(fig, ax, <artist>)`, and that return contract *is* the styling API:
+  `line.set_color("k")`, `ax.set_xlim(1.6, 1.8)`, `mesh.set_clim(0, 1)` are one line
+  each at the call site. Never add a parameter whose entire body is
+  `artist.set_<thing>(value)`. The corollary matters as much as the rule: **a
+  function that draws several artists must return them**, or callers have no route to
+  restyle and the parameters grow back. Enumerated style arguments are a symptom of a
+  broken return contract — fix the return first.
+- **One `**kwargs` passthrough, where a single artist dominates.**
+  `plot_spectrum(..., **line_kwargs)` forwards to `ax.plot` and so supports every
+  line property matplotlib has, in one parameter, with no docstring to maintain. Keep
+  this to the one-artist case: a bad key raises from deep inside matplotlib, so a
+  function with a passthrough per artist is both harder to introspect and worse to
+  debug than one that returns its artists.
+- **`set_style()` and rcParams.** Fonts, line widths, spine visibility, and DPI are
+  figure-wide look, set once per session. A `contour_lw=0.9` default silently
+  overrides the `lines.linewidth` the user just configured — and hardcoding is not
+  the alternative: `ax.legend(fontsize=5)` in `plot_diffusion_cloud` overrides
+  `set_style`'s `legend.fontsize` with no way to opt out at all. Style with a
+  sensible global home belongs in that home.
+
+What does earn a parameter:
+
+- **Corrections and processing** — `median_kernel`, `threshold="1/e"`, `smooth_sigma`,
+  `keep_largest`, `bg_stat`, `rescale_img`. These change the numbers, and are governed
+  by *corrections are opt-in* above.
+- **Which data is shown** — `x_axis`, `spectra_source`, `sweep_index`, `normalize`.
+- **Physical context the function cannot infer** — `pixel_scale`, `origin`,
+  `laser_ref`. The caller knows the µm/px; the array does not.
+- **Composition and structure** — `panels`, `ax`, `n_frames`, `save`.
+  `animate_panels` takes a list of panel objects rather than a flag per panel type,
+  so any subset, order, or combination works with no special-casing. That is the
+  shape to aim for: one structural parameter absorbing a combinatorial space.
+
+Why this is a library rule and not a matter of taste: **every parameter is a
+promise.** It needs a docstring entry, it constrains refactoring, its default reads
+to users as a recommendation, and it cannot be withdrawn later without breaking
+callers. Twenty independent booleans imply a million configurations you have
+implicitly claimed work and have never once run. A smaller signature is both less to
+learn and less to keep honest.
+
+The boundary case, stated honestly: a style argument that exists so a feature stays
+**legible** is not decoration. `laser_halo=True` draws a white halo so the laser
+circle survives being drawn over a dark colormap — that is correctness-of-reading,
+and it stays. Ask whether the plot could be *misread* without the argument; if so, it
+is not trivial.
+
+`plot_diffusion_cloud` is the standing counter-example — ~30 parameters, about half
+of them enumerated styling, and it returns `result` instead of its artists. It
+predates this rule. New code should not copy it; see *Decided but not yet
+implemented*.
+
+## Design principle — reuse before adding, delete before documenting
+
+This package grows by **copying and by never deleting**, not by over-building. The
+`D` section of `dev/audit-2026-07.md` is its largest category. Three habits, in
+order of how much they cost:
+
+- **Search for the concept before writing it.** The second copy is the bug, not
+  merely a maintenance burden: if a helper is wanted in two modules, the first one is
+  in the wrong place — move it and import, don't fork it. `_draw_region_box` exists
+  verbatim in both `processing.py` and `diffusion.py` (D1), and there are three
+  laser-circle drawers with different styling defaults (D2). That is how 6k lines
+  becomes 10k.
+- **Prefer composing an existing entry point over adding a near-duplicate one.**
+  `animate_wl_pl_spectra` builds its panels and returns `animate_panels(...)` — a new
+  public function, no new engine. That is the shape to copy. For contrast,
+  `plotting.py` currently has 16 public entry points and exactly one such delegation.
+- **Anything nothing reaches gets deleted, not documented.** A dead parameter with a
+  docstring entry is worse than no parameter, because it reads as supported —
+  cf. the whole `B` section, and `fitting.voigt_approx`, which is implemented and
+  reachable from no `fit_*`. Status is alpha, pre-adoption: deletion is free here in
+  a way it will not be later. Take it while it is.
+
+**This is not a licence to write the terse version.** Vectorised code with named
+shapes, returned masks and diagnostics, and error messages held to a shared-library
+standard all cost lines deliberately — see *vectorised NumPy is wanted, but never
+silent* below and *return the evidence* above. The target is less duplication, not
+less code.
+
 ## Code conventions
 
 - NumPy-style docstrings (rendered by mkdocstrings); aligned-colon parameter blocks.
 - Relative imports within the package (`from . import processing`).
 - `loaders` = I/O + geometry; `processing` = pure array functions; `fitting` returns
   dataclasses; `plotting` returns `(fig, ax, <artist>)` and never calls `plt.show()`.
+  The artist comes back so that styling can stay out of the signature — a function
+  that draws several returns all of them. See *parameters earn their place* above.
 - Plotting must not re-implement maths that belongs in `processing`.
 - New module → add `docs/api/<module>.md` with a `:::` directive **and** a `nav`
   entry in `mkdocs.yml`; `mkdocs build --strict` must stay green.
@@ -183,6 +276,10 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 - `plot_pl_map_Vab_scan`'s `median_kernel` should default to `1` (off). The current
   default of `3` runs a 2-D median filter that smooths across gate voltage, mixing
   physically independent sweeps. Keep 2-D available, just not by default.
+- `plot_diffusion_cloud` should shed its ~15 enumerated style parameters
+  (`contour_*`, `centroid_*`, `roi_color`, `bg_region_color`, `laser_*`,
+  `xlabel`/`ylabel`, `colorbar_label`) and return its artists instead of only
+  `result`. Signature change, acceptable pre-adoption. See E9.
 
 ## Working style
 

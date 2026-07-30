@@ -279,7 +279,7 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 - `plot_diffusion_cloud` should shed its ~15 enumerated style parameters
   (`contour_*`, `centroid_*`, `roi_color`, `bg_region_color`, `laser_*`,
   `xlabel`/`ylabel`, `colorbar_label`) and return its artists instead of only
-  `result`. Signature change, acceptable pre-adoption. See E9.
+  `result`. Signature change, acceptable pre-adoption. See E11.
 
 ## Working style
 

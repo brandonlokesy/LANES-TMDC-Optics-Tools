@@ -11,6 +11,8 @@
     - Select the range of frames of interest -> work on a subset
 - Position in scans (x,y).
     - for x (..) for y (...) can be flipped to for y (...) for x (..). reverse the nested loop
+- Reference class
+    - Format spectra to return array, not per value sweeps
 
 ## Fitting
 - Multiple ROIs for diffusion E.g. 2-3 diffusion spots. Track each for area and centre of mass

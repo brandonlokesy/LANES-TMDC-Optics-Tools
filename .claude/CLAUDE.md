@@ -318,10 +318,14 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   had no callers, and the name would have actively misled the planned
   reflectance/cavity work. Do not reinstate it — the future optics code needs
   dispersive `n(λ)` data of its own, not `EPS_TMDC`.
+- Laser circle in `animate_real_space_PL_map` (A3, fixed 2026-07-30). Passed the
+  `matplotlib.patheffects` *module* to `set_path_effects`, which raises
+  `AttributeError` at **draw** time, not at call time. The hand-rolled block was
+  replaced by `_draw_laser_circle(ax, scan.laser_ref, ls="--")`, so two drawers now
+  remain for D2 rather than three. New code annotating a laser spot should call that
+  helper, not build a `patches.Circle`.
 
 **Open, not yet fixed:**
-- `plotting.py` (~line 681) `circle.set_path_effects([path_effects])` passes the
-  module, not a path effect; fails on draw.
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
   that already had `bg_region` applied at load.
 - `__init__.py` quick-start and README §5/§6 reference APIs that don't exist

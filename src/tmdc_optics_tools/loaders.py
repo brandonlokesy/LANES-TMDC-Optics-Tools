@@ -122,7 +122,7 @@ class DeviceGeometry:
 
     The heterostructure is modelled as a vertical stack of dielectric slabs
     in series (series-capacitor model).  The effective dielectric constant
-    and optical thickness are computed from the general formula:
+    is computed from the general formula:
 
         d_total / ε_eff = Σ_i  d_i / ε_i
 
@@ -277,57 +277,77 @@ class DeviceGeometry:
     # --- Derived quantities ------------------------------------------------
 
     @property
-    def eps_hs(self) -> float:
-        """
-        Effective out-of-plane dielectric constant of the heterostructure (TMDCs and hBN)
-        computed with the series-capacitor (harmonic-mean) model:
+    def eps_stack(self) -> float:
+        r"""
+        Effective out-of-plane dielectric constant of the **whole gate stack**
+        (TMDC layers *and* both hBN layers), from the series-capacitor
+        (thickness-weighted harmonic-mean) model:
 
-            d_total / ε_eff = Σ_i  d_i / ε_i
+        .. math :: \frac{d_{\text{total}}}{\epsilon_{\text{stack}}} = \sum_{i}\frac{d_{i}}{\epsilon_{i}}
 
         This accounts for every slab in the stack — top hBN, each TMDC layer,
         and bottom hBN — with their individual thicknesses and dielectric
         constants.
+
+        The mean is harmonic rather than arithmetic because, with no free
+        charge between the gates, the displacement field is continuous, so
+        :math:`\epsilon_i E_i` is constant and it is the *voltage drops*
+        :math:`d_i/\epsilon_i` that add in series.
+
+        See Also
+        --------
+        eps_2d : the same harmonic mean over the TMDC layers only.
         """
-        slabs   = self._slabs()
-        d_hs = sum(layer.thickness for layer in slabs)
-        return d_hs / sum(layer.thickness / layer.eps for layer in slabs)
+        slabs = self._slabs()  # slabs is a list of (thickness_nm, epsilon)
+        d_total = sum(d for d, _ in slabs)
+        return d_total / sum(d / eps for d, eps in slabs)
     
     @property
     def eps_2d(self) -> float:
-        """
+        r"""
         Effective out-of-plane dielectric constant of the TMDC layers
         computed with the series-capacitor (harmonic-mean) model:
 
-            d_total / ε_eff = Σ_i  d_i / ε_i
+        .. math :: \frac{d_{\text{2D}}}{\epsilon_{\text{2D}}} = \sum_{i}\frac{d_{i}}{\epsilon_{i}}
 
         This accounts for only TMDC layers in the stack with their individual thicknesses and dielectric
-        constants.
+        constants.  For a stack of a single material it returns that material's
+        :data:`~tmdc_optics_tools.constants.EPS_TMDC` value unchanged; it only
+        does work for a genuine heterostructure.
+
+        See Also
+        --------
+        eps_stack : the same harmonic mean over every slab, hBN included.
         """
-        tmdc_slabs   = self.tmdc_stack
-        d_2d = sum(layer.thickness for layer in tmdc_slabs)
-        return d_2d / sum(layer.thickness / layer.eps for layer in tmdc_slabs)
-    
+        # Thickness-weighted harmonic mean over the TMDC layers only.
+        return self.d_2d / sum(
+            layer.thickness / layer.eps for layer in self.tmdc_stack
+        )
 
     @property
-    def optical_thickness(self) -> float:
+    def d_2d(self) -> float:
         """
-        Effective optical thickness of the full heterostructure in nm:
+        Total physical thickness of the TMDC layers in nm, :math:`d_{2D}`,
+        excluding hBN.
 
-            d_opt = d_total × ε_eff
+        See Also
+        --------
+        d_stack : the same total over every slab, hBN included.
         """
-        slabs   = self.slabs
-        d_2d = sum(d for d, _ in slabs)
-        return d_2d * self.eps_2d
+        return sum(layer.thickness for layer in self.tmdc_stack)
 
     @property
-    def heterostructure_thickness(self) -> float:
+    def d_stack(self) -> float:
         """
-        Returns the thickness of the heterostructure consisting of TMDC layers and the hBN layers
+        Total physical thickness of the whole gate stack in nm, :math:`d_{TOT}`
+        — every TMDC layer plus both hBN layers.
+
+        See Also
+        --------
+        d_2d : the TMDC layers alone.
         """
-        slabs = self.slabs
-        d_hs = sum(d for d, _ in slabs)
-        return d_hs
-    
+        return sum(d for d, _ in self.slabs)
+
     @property
     def stack_label(self) -> str:
         """
@@ -349,11 +369,23 @@ class DeviceGeometry:
     def electric_field(
         self, v_top: np.ndarray, v_bot: np.ndarray
     ) -> np.ndarray:
-        """
-        Displacement field at the TMDC in mV/nm from gate voltages.
+        r"""
+        Electrostatic field inside the TMDC layers, in mV/nm, from gate voltages.
 
-        Uses the parallel-plate capacitor model for the full dielectric stack.
-        Requires at least one hBN layer to be defined.
+        This is the field that enters the quantum-confined Stark shift, so its
+        accuracy sets the accuracy of any dipole length extracted from one.
+        Exact within the series-capacitor model:
+
+        .. math ::
+            \epsilon_{2D} E_{2D} = \epsilon_{\text{stack}} E_{\text{stack}},
+            \qquad E_{\text{stack}} = \frac{V_{BG} - V_{TG}}{d_{TOT}}
+
+        With no free charge between the gates the displacement field is
+        continuous, so :math:`\epsilon_i E_i` is the same in every slab.
+        :attr:`eps_stack` is by construction the dielectric constant of the
+        homogeneous slab of thickness :math:`d_{TOT}` with the same capacitance
+        as the real stack, so :math:`E_{\text{stack}}` is that slab's uniform
+        field and the identity above is D-continuity restated.
 
         Parameters
         ----------
@@ -365,12 +397,36 @@ class DeviceGeometry:
         Returns
         -------
         np.ndarray
-            Electric displacement field in mV/nm.
+            Electrostatic field in the TMDC in mV/nm.  Positive when
+            ``v_bot > v_top``.
 
         Raises
         ------
         ValueError
-            If neither hBN layer is set (optical_thickness is not meaningful).
+            If neither hBN layer is set, i.e. the device has no gate dielectric.
+
+        Notes
+        -----
+        **Do not "simplify"** :attr:`eps_stack` to ``eps_hbn`` here.  That form,
+
+        .. math :: E_{2D} \approx \frac{V_{BG}-V_{TG}}{d_{TOT}}
+                   \cdot \frac{\epsilon_{hBN}}{\epsilon_{2D}}
+
+        is the thin-TMDC approximation used by the group's earlier MATLAB
+        scripts and by this function before 2026-07-30.  It is low by
+        :math:`(d_{2D}/d_{hBN})(1 - \epsilon_{hBN}/\epsilon_{2D})` — 0.59 % for
+        53/46 nm hBN around a MoSe2/WSe2 bilayer, growing for thicker TMDC
+        stacks or thinner hBN — so fields from this function are ~0.6 % higher
+        than pre-2026-07-30 results.  Note also that repairing that form by
+        substituting :attr:`eps_stack` for ``eps_hbn`` *in the denominator*
+        rather than the numerator is wrong by a factor of ~1.8; the arrangement
+        above is the one to keep.
+
+        The sign convention depends on which physical gate each voltage came
+        from, which is per-session wiring and is not yet recorded per scan.
+        Callers are responsible for mapping their source channels to *v_top* and
+        *v_bot* correctly; transposing them mirrors the field axis and flips the
+        sign of any extracted dipole.
         """
         if self.d_hbn_top is None and self.d_hbn_bottom is None:
             raise ValueError(
@@ -378,7 +434,9 @@ class DeviceGeometry:
                 "d_hbn_bottom are None. At least one hBN layer is required."
             )
         vdiff = np.asarray(v_bot) - np.asarray(v_top)
-        return 1000.0 * (vdiff/ self.heterostructure_thickness) * (self.eps_hbn / self.eps_2d)
+        # eps_2d * E_2d = eps_stack * E_stack, with E_stack = vdiff / d_TOT the
+        # uniform field of the equivalent homogeneous slab. 1000 -> mV/nm.
+        return 1000.0 * (vdiff / self.d_stack) * (self.eps_stack / self.eps_2d)
 
     # --- Dunder methods ----------------------------------------------------
 
@@ -394,8 +452,10 @@ class DeviceGeometry:
             f"  hBN top       : {hbn_top_str}\n"
             f"  TMDC stack    : {stack_str}\n"
             f"  hBN bottom    : {hbn_bot_str}\n"
-            f"  ε_HS         : {self.eps_hs:.4f}\n"
-            f"  HS thickness  : {self.heterostructure_thickness:.2f} nm"
+            f"  ε_stack       : {self.eps_stack:.4f}\n"
+            f"  ε_2D          : {self.eps_2d:.4f}\n"
+            f"  d_stack       : {self.d_stack:.2f} nm\n"
+            f"  d_2D          : {self.d_2d:.2f} nm"
             f"{label_str}"
         )
 

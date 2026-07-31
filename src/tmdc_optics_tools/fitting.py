@@ -531,18 +531,18 @@ def fit_scan_peak(
 ) -> list[FitResult]:
     """
     Fit a single peak in every sweep of an
-    :class:`~tmdc_optics_tools.loaders.AttoCubePLVabScan`.
+    :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep`.
 
     Background subtraction and Jacobian correction are configured at load
     time on the scan object (via ``bg_region_nm`` / ``bg_region_eV`` and
     ``apply_jacobian``).  This function always uses
-    :attr:`~tmdc_optics_tools.loaders.AttoCubePLVabScan.best_energy_spectra`
+    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`
     for the energy axis, which automatically returns the background-corrected
     array when one is available.
 
     Parameters
     ----------
-    scan : AttoCubePLVabScan
+    scan : AttoCubeSpectralSweep
     x_axis : {"energy", "wavelength"}
     x_range : tuple of (x_min, x_max), optional
         Restrict the fit to this spectral window. Units match *x_axis*.
@@ -704,7 +704,7 @@ def _prepare_dipole_data(
 
     Parameters
     ----------
-    scan : AttoCubePLVabScan
+    scan : AttoCubeSpectralSweep
     x_range : tuple or None
     model : str
     active_range : tuple or None
@@ -974,12 +974,12 @@ def extract_dipole_length(
         Background subtraction is configured at load time on the scan
         object via ``bg_region_nm`` or ``bg_region_eV``.
         :func:`fit_scan_peak` automatically uses
-        :attr:`~tmdc_optics_tools.loaders.AttoCubePLVabScan.best_energy_spectra`,
+        :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`,
         which returns the background-corrected array when available.
 
     Parameters
     ----------
-    scan : AttoCubePLVabScan
+    scan : AttoCubeSpectralSweep
         Must have ``ef`` set (requires a
         :class:`~tmdc_optics_tools.loaders.DeviceGeometry`).
     x_range : tuple of (E_min, E_max) in eV, optional

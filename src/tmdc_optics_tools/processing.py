@@ -101,6 +101,196 @@ def subtract_background(
     return spectra - bg
 
 
+def subtract_spectrum(
+    spectra    : np.ndarray,
+    background : np.ndarray,
+    axis       : int = 0,
+) -> np.ndarray:
+    """
+    Subtract a separately measured background *spectrum*.
+
+    The counterpart of :func:`subtract_background`, which removes a scalar
+    estimated from a window of the same spectrum.  Here the background is a
+    measured spectrum of its own — a dark frame, a stray-light or substrate
+    reference — so it removes wavelength-dependent structure that a flat offset
+    cannot.  Applies equally to PL and reflectance.
+
+    Parameters
+    ----------
+    spectra : np.ndarray, shape (n_pixels, n_sweeps) or (n_pixels,)
+        Sample spectra.
+    background : np.ndarray, shape (n_pixels,) or matching *spectra*
+        Measured background, on the **same** x-axis as *spectra*.  Alignment is
+        the caller's responsibility: nothing here can check it, since only the
+        arrays are passed.
+    axis : int
+        Pixel axis of *spectra*.  Default 0.
+
+    Returns
+    -------
+    np.ndarray
+        ``spectra - background``, of the same shape as *spectra*.
+
+    Raises
+    ------
+    ValueError
+        If *background* is 1-D and its length does not match *spectra* along
+        *axis*, or if it is neither 1-D nor the same shape as *spectra*.
+    """
+    spectra    = np.asarray(spectra, float)
+    background = np.asarray(background, float)
+
+    if background.shape == spectra.shape:
+        return spectra - background
+    if background.ndim != 1:
+        raise ValueError(
+            f"background must be 1-D or the same shape as spectra "
+            f"{spectra.shape}, got {background.shape}."
+        )
+    if background.size != spectra.shape[axis]:
+        raise ValueError(
+            f"background has {background.size} points but spectra has "
+            f"{spectra.shape[axis]} along axis {axis}. The two must share an "
+            f"x-axis."
+        )
+    # Reshape (n_pixels,) so it broadcasts along the pixel axis only: one measured
+    # background, subtracted from every sweep.
+    shape = [1] * spectra.ndim
+    shape[axis] = background.size
+    return spectra - background.reshape(shape)
+
+
+# ---------------------------------------------------------------------------
+# Contrast against a reference spectrum
+# ---------------------------------------------------------------------------
+
+_CONTRAST_MODES = {
+    "contrast": "(S - R) / R",
+    "ratio":    "S / R",
+}
+
+
+def spectral_contrast(
+    spectra       : np.ndarray,
+    reference     : np.ndarray,
+    mode          : str = "contrast",
+    min_reference : float = None,
+    axis          : int = 0,
+) -> tuple:
+    """
+    Divide spectra by a reference spectrum, as reflectance contrast or a ratio.
+
+    For reflectance the sample and a bare-substrate reference give
+
+    .. math :: \\frac{\\Delta R}{R_0} = \\frac{S - R}{R}
+               \\qquad\\text{or}\\qquad \\frac{R}{R_0} = \\frac{S}{R}
+
+    Both are standard read-outs, which is why both modes exist and no others: an
+    absorbance mode would be an untested promise until absorption data has a
+    loader.
+
+    Parameters
+    ----------
+    spectra : np.ndarray, shape (n_pixels, n_sweeps) or (n_pixels,)
+        Sample spectra, background-subtracted if that is wanted — do it first,
+        because a pedestal in either array biases a ratio non-linearly.
+    reference : np.ndarray, shape (n_pixels,) or matching *spectra*
+        Reference spectrum on the **same** x-axis, likewise background-subtracted.
+    mode : {"contrast", "ratio"}
+        ``"contrast"`` gives ``(S - R) / R``; ``"ratio"`` gives ``S / R``.
+    min_reference : float, optional
+        Reference pixels at or below this value are treated as unusable and come
+        back as ``NaN``.  ``None`` (default) guards only non-positive pixels: a
+        zero-count reference pixel would otherwise divide to ``inf`` and a
+        negative one would silently flip the sign of the contrast.
+    axis : int
+        Pixel axis of *spectra*.  Default 0.
+
+    Returns
+    -------
+    result : np.ndarray
+        Contrast or ratio, same shape as *spectra*, ``NaN`` at guarded pixels.
+    guarded : np.ndarray of bool, shape (n_pixels,)
+        Which reference pixels were guarded.  Returned rather than only warned
+        about so the caller can mask, crop or interpolate over them knowingly.
+
+    Warns
+    -----
+    UserWarning
+        When any pixel is guarded, naming how many.
+
+    Notes
+    -----
+    **The Jacobian cancels in a ratio.** ``(S·λ²/hc) / (R·λ²/hc) = S / R``, so a
+    contrast spectrum must not be Jacobian-corrected — the factor divides out
+    exactly, and applying it to the numerator alone would be an error.
+
+    **Sample and reference must share an exposure.** For a reference scaled by
+    *k*, ``(S − kR)/(kR)`` is not a rescaling of the contrast but a biased
+    version of it, so a reference taken at a different integration time or
+    excitation power gives a wrong answer that no later normalisation repairs.
+
+    Examples
+    --------
+    >>> rc, guarded = spectral_contrast(sample, substrate)
+    >>> guarded.sum()
+    0
+    """
+    if mode not in _CONTRAST_MODES:
+        raise ValueError(
+            f"mode={mode!r} is not recognised. Choose from "
+            + ", ".join(f"{k!r} ({v})" for k, v in _CONTRAST_MODES.items())
+            + "."
+        )
+
+    spectra   = np.asarray(spectra, float)
+    reference = np.asarray(reference, float)
+
+    if reference.ndim == 1:
+        if reference.size != spectra.shape[axis]:
+            raise ValueError(
+                f"reference has {reference.size} points but spectra has "
+                f"{spectra.shape[axis]} along axis {axis}. The two must share an "
+                f"x-axis."
+            )
+        shape = [1] * spectra.ndim
+        shape[axis] = reference.size
+        ref = reference.reshape(shape)
+        guarded_1d = reference
+    elif reference.shape == spectra.shape:
+        ref = reference
+        guarded_1d = None
+    else:
+        raise ValueError(
+            f"reference must be 1-D or the same shape as spectra "
+            f"{spectra.shape}, got {reference.shape}."
+        )
+
+    floor   = 0.0 if min_reference is None else float(min_reference)
+    unusable = ref <= floor
+    if unusable.any():
+        n = int(np.count_nonzero(unusable if guarded_1d is None
+                                 else np.asarray(guarded_1d) <= floor))
+        warnings.warn(
+            f"{n} reference pixel(s) at or below {floor:g} were excluded from the "
+            f"{mode}; the result is NaN there. A reference cannot be divided by "
+            f"zero, and a negative one would invert the contrast. The returned "
+            f"mask says which pixels.",
+            UserWarning, stacklevel=2,
+        )
+
+    # Divide only where the reference is usable; NaN elsewhere rather than inf, so
+    # the gap propagates visibly instead of dominating a colour scale or a fit.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result = np.where(unusable, np.nan,
+                          (spectra - ref) / ref if mode == "contrast"
+                          else spectra / ref)
+
+    guarded = (np.asarray(guarded_1d) <= floor if guarded_1d is not None
+               else np.any(unusable, axis=1 - axis if spectra.ndim > 1 else 0))
+    return result, guarded
+
+
 # ---------------------------------------------------------------------------
 # Smoothing
 # ---------------------------------------------------------------------------

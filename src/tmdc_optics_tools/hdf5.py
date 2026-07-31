@@ -1,0 +1,472 @@
+# tmdc_optics_tools/hdf5.py
+"""
+Self-describing HDF5 storage for AttoCube sweeps.
+
+A raw AttoCube CSV export is a wide text grid that records the numbers but not
+what they mean: nothing in it says whether the spectra are PL or reflectance,
+which parameter was scanned, which acquisition channel drove which gate, or what
+stack the device was.  That context currently lives in whoever ran the
+measurement.  This module writes it *next to the data*, so a scan can be re-read
+months later — or by someone else in the group — and come back as the same
+object.
+
+One format serves both measured axes.  A TRPL sweep additionally arrives as a
+*directory* of per-point CSVs plus a metadata companion, so writing it collapses
+four files into one archive: the committed 11.57 MB example becomes 0.069 MB.
+
+Layout
+------
+::
+
+    /                              attrs: format, format_version, created,
+                                          toolkit_version
+    ├── metadata/                  attrs: spectra_type, axis_kind, sweep_type,
+    │   │                                 sweep_label, sweep_unit, source_file,
+    │   │                                 curated_labels, curated_scales,
+    │   │                                 + provenance (see below)
+    │   ├── geometry/              attrs: d_hbn_top, d_hbn_bottom, eps_hbn, label
+    │   │   └── tmdc_stack         structured dataset, one row per layer
+    │   ├── bg_spectrum            (n_points,)  optional
+    │   └── reference              (n_points,)  optional
+    ├── axes/
+    │   └── wavelength | time      (n_points,)          float64, attrs: units
+    ├── parameters/                one dataset per instrument row,
+    │                              (n_sweeps,) float64, raw file units
+    └── spectra/  or  decays/
+        ├── roi1                   (n_points, n_sweeps) compressed   [spectral]
+        ├── roi2                   (n_points, n_sweeps) compressed   [spectral]
+        └── counts                 (n_points, n_sweeps) compressed   [temporal]
+
+The axis dataset is **named for the physical quantity it holds**, so ``h5ls``
+alone says what kind of measurement a file contains; ``metadata/axis_kind``
+records it authoritatively as well.  Which loader may read a file follows from
+it, exactly as the header decides for a CSV — :class:`AttoCubeSpectralSweep` and
+:class:`AttoCubeTRPLSweep` each reject the other's archives by name.  There is no
+factory: the caller names the class they expect, and is told when they are wrong.
+
+Scalars live in group **attributes** rather than as 0-d datasets: that is the
+idiomatic HDF5 home for them, and it keeps ``h5ls -v`` output readable.
+
+What is deliberately *not* stored
+---------------------------------
+Everything derivable from what is:
+
+* **The energy axis** — it is ``hc/λ``, and storing it invites the two copies to
+  disagree.
+* **The energy-space spectra**, with or without Jacobian and background.  These
+  depend on ``apply_jacobian`` and ``bg_region_nm``, which are *loading choices*
+  rather than properties of the measurement.  Writing them would freeze one
+  session's choices into the archive, and a later reader could not tell the
+  stored array from a raw one.
+* **The sweep axis** — a field axis is ``eps_stack``-weighted arithmetic on
+  ``V_A``/``V_B`` and the geometry, all of which are stored.
+
+So ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``, and the ``bg_spectrum``
+/ ``reference`` spectra *are* recorded, but as provenance of the session that
+wrote the file, exposed on read as
+:attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.source_metadata`.  They
+are **not** replayed: re-applying a correction because a file mentions one would
+make loading a decision, which is the one thing loading must not be.  Raw arrays
+in, corrections opt-in — the same rule as everywhere else in the package.
+
+The auxiliary spectra are stored as **arrays rather than paths**, so the archive
+stands alone once the substrate CSV has moved: a contrast can be rebuilt from the
+``.h5`` by passing ``reference=scan.source_metadata["reference"]`` back in, which
+keeps the not-replayed rule while losing nothing.
+
+Functions
+---------
+write_sweep
+    An :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` or
+    :class:`~tmdc_optics_tools.loaders.AttoCubeTRPLSweep` -> ``.h5``.
+read_sweep
+    ``.h5`` -> the payload dict the loader builds from.  Called for you when a
+    path with an HDF5 suffix is passed to the loader; use it directly only to
+    inspect a file without constructing a scan.
+"""
+
+from __future__ import annotations
+
+import datetime as _dt
+import json
+from pathlib import Path
+
+import h5py
+import numpy as np
+
+from . import __version__
+
+# Bump the minor when a field is added (readers stay compatible); bump the major
+# only for a change that an older reader would mis-read.  1.1 added the temporal
+# axis kind alongside the spectral one, which is purely additive.
+FORMAT_NAME    = "tmdc_optics_tools.attocube_sweep"
+FORMAT_VERSION = "1.1"
+
+# Files written before the module served both axis kinds carry the old name.
+_LEGACY_FORMAT_NAMES = ("tmdc_optics_tools.spectral_sweep",)
+
+# How each loader's layout is stored: the axis dataset's name carries the physical
+# quantity, so `h5ls` alone says what kind of measurement a file holds.
+_AXIS_KIND_FOR_LAYOUT = {
+    "spectral": {"name": "wavelength", "units": "nm",
+                 "label": "Wavelength (nm)", "group": "spectra"},
+    "temporal": {"name": "time",       "units": "ns",
+                 "label": "Time (ns)",  "group": "decays"},
+}
+
+# Which loader reads a stored axis kind back, for the error when they disagree.
+_CLASS_FOR_AXIS_KIND = {
+    "wavelength": "AttoCubeSpectralSweep",
+    "time":       "AttoCubeTRPLSweep",
+}
+
+# Keys stored as JSON strings because HDF5 attributes have no mapping type.
+_JSON_ATTRS = ("curated_labels", "curated_scales")
+
+# Structured dtype for the TMDC stack: one row per layer, so layer *order* — the
+# physical stacking sequence — is carried by the dataset rather than by dataset
+# names that would need sorting to recover it.
+_STACK_DTYPE = np.dtype([
+    ("material",    h5py.string_dtype()),
+    ("n_layers",    "i4"),
+    ("d_monolayer", "f8"),
+    ("eps",         "f8"),
+])
+
+
+# ---------------------------------------------------------------------------
+# Label <-> HDF5 name
+# ---------------------------------------------------------------------------
+
+def _hdf5_key(label: str) -> str:
+    """
+    Sanitise an instrument row label into an HDF5-safe dataset name.
+
+    ``/`` is the HDF5 path separator, so a label containing one would silently
+    create a subgroup.  The original label is kept as a ``label`` attribute on
+    the dataset, and that — not the sanitised name — is what is read back.
+    """
+    return label.replace("/", "_").strip()
+
+
+# ---------------------------------------------------------------------------
+# Geometry <-> HDF5
+# ---------------------------------------------------------------------------
+
+def _write_geometry(parent: h5py.Group, geometry) -> None:
+    """Store a :class:`~tmdc_optics_tools.loaders.DeviceGeometry` under *parent*."""
+    grp = parent.create_group("geometry")
+    for name in ("d_hbn_top", "d_hbn_bottom"):
+        value = getattr(geometry, name)
+        # None (no hBN on that side) has no HDF5 attribute type; NaN round-trips
+        # through float attributes and is unambiguous for a thickness.
+        grp.attrs[name] = float("nan") if value is None else float(value)
+    grp.attrs["eps_hbn"] = float(geometry.eps_hbn)
+    grp.attrs["label"]   = geometry.label or ""
+
+    stack = np.empty(len(geometry.tmdc_stack), dtype=_STACK_DTYPE)
+    for i, layer in enumerate(geometry.tmdc_stack):
+        stack[i] = (layer.material, layer.n_layers,
+                    layer.d_monolayer, layer.eps)
+    grp.create_dataset("tmdc_stack", data=stack)
+
+
+def _read_geometry(grp: h5py.Group):
+    """Rebuild a :class:`~tmdc_optics_tools.loaders.DeviceGeometry` from *grp*."""
+    from .loaders import DeviceGeometry, StackLayer
+
+    def _thickness(name):
+        value = float(grp.attrs[name])
+        return None if np.isnan(value) else value
+
+    stack = [
+        StackLayer(
+            material    = row["material"].decode() if isinstance(row["material"], bytes)
+                          else str(row["material"]),
+            n_layers    = int(row["n_layers"]),
+            d_monolayer = float(row["d_monolayer"]),
+            eps         = float(row["eps"]),
+        )
+        for row in grp["tmdc_stack"][()]
+    ]
+    return DeviceGeometry(
+        tmdc_stack   = stack,
+        d_hbn_top    = _thickness("d_hbn_top"),
+        d_hbn_bottom = _thickness("d_hbn_bottom"),
+        eps_hbn      = float(grp.attrs["eps_hbn"]),
+        label        = grp.attrs["label"] or None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Write
+# ---------------------------------------------------------------------------
+
+def write_sweep(
+    scan,
+    path,
+    compression : str  = "gzip",
+    overwrite   : bool = False,
+):
+    """
+    Write an AttoCube sweep to HDF5.
+
+    Every signal array and instrument parameter row is stored verbatim in file
+    units, so the result is a lossless replacement for the source CSV — not a
+    processed derivative of it.  For a spectral sweep that means **both** ROIs,
+    since ``ExpROI2`` carries the remote spot of a two-spot galvo scan.  See the
+    module docstring for the layout and for what is intentionally left out.
+
+    Parameters
+    ----------
+    scan : AttoCubeSpectralSweep or AttoCubeTRPLSweep
+        The sweep to store.  Its axis kind decides the layout written.
+    path : str or Path
+        Destination file.  A missing parent directory is created.
+    compression : str or None
+        Dataset compression passed to h5py, applied to the two spectra arrays
+        (the largest datasets by far).  Default ``"gzip"``; ``None`` disables it.
+    overwrite : bool
+        Replace *path* if it already exists.  Default ``False``, which raises
+        ``FileExistsError`` — writing over an existing archive is destructive and
+        so is opt-in.
+
+    Returns
+    -------
+    pathlib.Path
+        The file written.
+
+    Raises
+    ------
+    FileExistsError
+        If *path* exists and *overwrite* is ``False``.
+    """
+    path = Path(path)
+    if path.exists() and not overwrite:
+        raise FileExistsError(
+            f"'{path}' already exists. Pass overwrite=True to replace it."
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with h5py.File(path, "w") as hf:
+        hf.attrs["format"]          = FORMAT_NAME
+        hf.attrs["format_version"]  = FORMAT_VERSION
+        hf.attrs["created"]         = _dt.datetime.now().astimezone().isoformat()
+        hf.attrs["toolkit_version"] = __version__
+
+        kind = _AXIS_KIND_FOR_LAYOUT[scan._LAYOUT_KIND]
+
+        meta = hf.create_group("metadata")
+        meta.attrs["spectra_type"]   = scan.spectra_type
+        meta.attrs["axis_kind"]      = kind["name"]
+        meta.attrs["sweep_type"]     = scan.sweep_type
+        meta.attrs["sweep_label"]    = scan.sweep_label
+        meta.attrs["sweep_unit"]     = scan.sweep_unit
+        meta.attrs["source_file"]    = scan.path
+
+        # The resolved curated map, so an unusual gate wiring or power scale is
+        # restored rather than silently reverting to the class defaults.
+        curated = scan.curated_parameters
+        meta.attrs["curated_labels"] = json.dumps(
+            {name: cfg[0] for name, cfg in curated.items()})
+        meta.attrs["curated_scales"] = json.dumps(
+            {name: cfg[1] for name, cfg in curated.items()})
+
+        # Provenance of the writing session's loading choices — recorded, and
+        # deliberately not replayed on read.  See the module docstring.
+        if scan._LAYOUT_KIND == "spectral":
+            meta.attrs["roi"]            = int(scan.roi)
+            meta.attrs["apply_jacobian"] = bool(scan.apply_jacobian)
+            if scan.bg_region_nm is not None:
+                meta.attrs["bg_region_nm"] = np.asarray(scan.bg_region_nm,
+                                                        dtype=float)
+        else:
+            if scan.bg_region_ns is not None:
+                meta.attrs["bg_region_ns"] = np.asarray(scan.bg_region_ns,
+                                                        dtype=float)
+            # An assembled sweep came from many files; record which, in order, so
+            # the archive says what it replaced.
+            meta.attrs["source_files"] = [f.name for f in scan.files]
+
+        if scan.geometry is not None:
+            _write_geometry(meta, scan.geometry)
+
+        # Auxiliary spectra are stored as arrays, not paths: a path goes stale and
+        # the archive should stand alone.  Like the other corrections they are
+        # recorded, not replayed — but keeping the values means a contrast can be
+        # rebuilt from the .h5 alone.
+        for name in ("bg_spectrum", "reference"):
+            values = getattr(scan, name, None)
+            if values is not None:
+                dset = meta.create_dataset(name, data=np.asarray(values, float))
+                dset.attrs["units"] = "counts"
+        if getattr(scan, "reference", None) is not None:
+            meta.attrs["contrast_mode"] = scan.contrast_mode
+            if scan.reference_scale is not None:
+                meta.attrs["reference_scale"] = float(scan.reference_scale)
+
+        # Axis dataset named for the physical quantity it holds, so `h5ls` says
+        # what the file is; metadata/axis_kind records it authoritatively too.
+        axes = hf.create_group("axes")
+        axis = axes.create_dataset(
+            kind["name"], data=np.asarray(getattr(scan, scan._AXIS_ATTR), float))
+        axis.attrs["units"] = kind["units"]
+        axis.attrs["label"] = kind["label"]
+
+        params = hf.create_group("parameters")
+        for label, values in scan.parameters.items():
+            dset = params.create_dataset(_hdf5_key(label),
+                                         data=np.asarray(values, dtype=float))
+            dset.attrs["label"] = label      # authoritative; the name is sanitised
+            dset.attrs["units"] = "raw"
+
+        signals = hf.create_group(kind["group"])
+        for name, arr in _signal_arrays(scan):
+            dset = signals.create_dataset(
+                name, data=np.asarray(arr, dtype=float),
+                compression=compression,
+            )
+            dset.attrs["units"] = "counts"
+            dset.attrs["axes"]  = f"{kind['name']}, sweep"
+
+    return path
+
+
+def _signal_arrays(scan) -> list:
+    """The signal datasets to store, as ``(name, array)`` pairs."""
+    if scan._LAYOUT_KIND == "spectral":
+        # Both ROIs: ExpROI2 is where a two-spot galvo scan's remote spot lives,
+        # so discarding it would make the archive lossy.
+        return [("roi1", scan.spectra_roi1), ("roi2", scan.spectra_roi2)]
+    return [("counts", scan.decays)]
+
+
+# ---------------------------------------------------------------------------
+# Read
+# ---------------------------------------------------------------------------
+
+def read_sweep(path) -> dict:
+    """
+    Read an HDF5 file written by :func:`write_sweep`.
+
+    Returns the same payload contract the CSV decoder produces, which is what
+    lets one loader class serve both formats.
+
+    Parameters
+    ----------
+    path : str or Path
+
+    Returns
+    -------
+    dict
+        ``axis_kind`` : ``"wavelength"`` or ``"time"`` — which loader may read it.
+        ``wavelength`` + ``roi1``, ``roi2`` for a spectral sweep, or
+        ``time`` + ``counts`` for a temporal one, all float64.
+        ``parameters`` : dict[str, (n_sweeps,) float64], keyed by the *original*
+            instrument labels, in raw file units.
+        ``metadata`` : dict of the recorded measurement metadata —
+            ``spectra_type``, ``sweep``, ``sweep_label``, ``sweep_unit``, ``roi``,
+            ``geometry`` (a rebuilt :class:`DeviceGeometry` or absent),
+            ``curated_labels``, ``curated_scales``, plus the writing session's
+            ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``,
+            ``bg_spectrum``, ``reference`` and ``source_files`` as provenance.
+
+    Raises
+    ------
+    ValueError
+        If the file is not in this format, or a required group is missing.
+    """
+    path = Path(path)
+    with h5py.File(path, "r") as hf:
+        fmt = _as_str(hf.attrs.get("format"))
+        if fmt != FORMAT_NAME and fmt not in _LEGACY_FORMAT_NAMES:
+            raise ValueError(
+                f"'{path}' is not a {FORMAT_NAME} file (format={fmt!r}). "
+                f"Reference datasets in reference/data/ use a different layout "
+                f"and are read by tmdc_optics_tools.reference instead."
+            )
+        for group in ("metadata", "axes", "parameters"):
+            if group not in hf:
+                raise ValueError(
+                    f"'{path}' is missing the required '{group}' group; the file "
+                    f"may be truncated or written by an incompatible version "
+                    f"(format_version={hf.attrs.get('format_version')!r})."
+                )
+
+        m = hf["metadata"].attrs
+        metadata = {
+            "spectra_type"   : _as_str(m.get("spectra_type")),
+            # Named "sweep" here to match the loader's constructor argument.
+            "sweep"          : _as_str(m.get("sweep_type")),
+            "sweep_label"    : _as_str(m.get("sweep_label")),
+            "sweep_unit"     : _as_str(m.get("sweep_unit")),
+            "roi"            : int(m["roi"]) if "roi" in m else None,
+            "source_file"    : _as_str(m.get("source_file")),
+            "contrast_mode"  : _as_str(m.get("contrast_mode")),
+            "reference_scale": (float(m["reference_scale"])
+                                if "reference_scale" in m else None),
+            "apply_jacobian" : bool(m["apply_jacobian"]) if "apply_jacobian" in m
+                               else None,
+            "bg_region_nm"   : tuple(np.asarray(m["bg_region_nm"], dtype=float))
+                               if "bg_region_nm" in m else None,
+            "bg_region_ns"   : tuple(np.asarray(m["bg_region_ns"], dtype=float))
+                               if "bg_region_ns" in m else None,
+            "source_files"   : ([_as_str(v) for v in m["source_files"]]
+                                if "source_files" in m else None),
+        }
+        for key in _JSON_ATTRS:
+            metadata[key] = json.loads(_as_str(m[key])) if key in m else None
+
+        # The auxiliary spectra come back as arrays so a contrast can be rebuilt
+        # from the archive alone.  Like every other correction they are provenance
+        # here: the loader does not re-apply them.
+        for name in ("bg_spectrum", "reference"):
+            if name in hf["metadata"]:
+                metadata[name] = hf[f"metadata/{name}"][()]
+
+        # Drop keys the file did not record so the loader's "argument > file >
+        # default" resolution sees an absence, not an explicit None.
+        metadata = {k: v for k, v in metadata.items() if v is not None}
+
+        if "geometry" in hf["metadata"]:
+            metadata["geometry"] = _read_geometry(hf["metadata/geometry"])
+
+        parameters = {
+            _as_str(dset.attrs.get("label", name)): dset[()]
+            for name, dset in hf["parameters"].items()
+        }
+
+        payload = {"parameters": parameters, "metadata": metadata}
+
+        # Which axis the file holds decides which loader can read it, exactly as
+        # the header does for a CSV.  Named datasets, so the check is a lookup.
+        stored = [name for name in _CLASS_FOR_AXIS_KIND if name in hf["axes"]]
+        if len(stored) != 1:
+            raise ValueError(
+                f"'{path}' has {len(stored)} recognised axis dataset(s) under "
+                f"/axes ({stored}); expected exactly one of "
+                f"{list(_CLASS_FOR_AXIS_KIND)}."
+            )
+        axis_kind = stored[0]
+
+        if axis_kind == "wavelength":
+            if "spectra" not in hf:
+                raise ValueError(f"'{path}' has a wavelength axis but no /spectra.")
+            payload["wavelength"] = hf["axes/wavelength"][()]
+            payload["roi1"]       = hf["spectra/roi1"][()]
+            payload["roi2"]       = hf["spectra/roi2"][()]
+        else:
+            if "decays" not in hf:
+                raise ValueError(f"'{path}' has a time axis but no /decays.")
+            payload["time"]   = hf["axes/time"][()]
+            payload["counts"] = hf["decays/counts"][()]
+
+        payload["axis_kind"] = axis_kind
+        return payload
+
+
+def _as_str(value):
+    """Decode an HDF5 string attribute, which may come back as bytes."""
+    if value is None:
+        return None
+    return value.decode() if isinstance(value, bytes) else str(value)

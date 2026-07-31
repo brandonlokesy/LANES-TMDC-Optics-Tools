@@ -5,6 +5,34 @@ from scipy.constants import h,c,e,hbar
 # ----- Physical constants ----- #
 HC_EV_NM = (h * c / e) * 1e9   # eV·nm
 
+# ----- Spectroscopy types ----- #
+# Controlled vocabulary for what a spectrum *is*.  Shared by the AttoCube
+# loaders (where it is recorded per scan and written into exported HDF5) and by
+# the reference-data subpackage, which re-exports it — one vocabulary, so a tag
+# means the same thing in a lab file and in a digitised literature dataset.
+SPECTROSCOPY_TYPES = {
+    "PL":    "Photoluminescence",
+    "R":     "Reflectance",
+    "RC":    "Reflectance contrast",
+    "T":     "Transmission",
+    "A":     "Absorption",
+    "Raman": "Raman scattering",
+    "TRPL":  "Time-resolved photoluminescence",
+}
+
+# Axis label for the measured signal, per spectroscopy type: (name, unit).
+# The unit is a separate field, and empty for the dimensionless ratios, which is
+# why this is not simply "<name> (counts)" everywhere.
+SIGNAL_LABELS = {
+    "PL":    ("PL intensity",    "counts"),
+    "R":     ("Reflectance",     "counts"),
+    "RC":    (r"$\Delta R/R_0$", ""),
+    "T":     ("Transmission",    "counts"),
+    "A":     ("Absorbance",      ""),
+    "Raman": ("Raman intensity", "counts"),
+    "TRPL":  ("PL intensity",    "counts"),
+}
+
 # ----- Material dielectric constants ----- #
 # Sources cited as comments where known
 EPS_HBN   = 3.9    # hBN out-of-plane, Laturia et al. 2018

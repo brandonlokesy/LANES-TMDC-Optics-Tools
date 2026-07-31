@@ -54,6 +54,7 @@ nav:
   - Home: index.md
   - API Reference:
       - Loaders: api/loaders.md
+      - HDF5: api/hdf5.md
       - Processing: api/processing.md
       - Fitting: api/fitting.md
       - Plotting: api/plotting.md

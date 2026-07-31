@@ -14,12 +14,70 @@ one.
 differential reflectance, absorption, real-space PL imaging (exciton diffusion
 clouds), back-focal-plane measurements (k-space dispersion) as real images on CCDs.
 
-**Measurements this package currently supports:** PL and real-space imaging only.
-Reflectance, absorption, cavity, and BFP/k-space data are measured in the lab but
-have no loader here (`reference/` is the only place `"R"` appears, as a
-spectroscopy-type tag). Treat the PL-shaped design as deliberate-for-now. Don't
-propose speculative multi-modality abstractions unasked — but do flag where a PL
-assumption will resist a future loader.
+**Measurements this package currently supports (as of 2026-07-30):** PL,
+reflectance / reflectance contrast, time-resolved PL, and real-space imaging.
+Absorption, cavity, and BFP/k-space data are measured in the lab but have no
+loader. Don't propose speculative multi-modality abstractions unasked — but do
+flag where a PL assumption will resist a future loader (the hardcoded "PL
+intensity" strings in `plotting.py` are the live example; `scan.signal_label` and
+`scan.contrast_label` exist for them — see E12).
+
+## The AttoCube export format
+
+Established from real files on 2026-07-30, which closed most of E9. **This is the
+record — don't re-derive it by inference.**
+
+One column *block* per sweep point, after a `"Parameters Labels"` label column.
+Two block layouts, told apart by the header's field names (`_read_block_layout`):
+
+| Layout | Block | Used by |
+|---|---|---|
+| spectral | `[Par_i, Wavelength{i}, ExpROI1_{i}, ExpROI2_{i}]` | PL, R, RC |
+| temporal | `[Par_i, Wavelength{i}, Exp_{i}]` | TRPL |
+
+- **In the temporal layout, the column named "Wavelength" holds TIME** (ns, 4 ps
+  bins, ~12.8 ns range). An acquisition-software misnomer. Read it as time; do
+  not "fix" the name in the file.
+- **`ExpROI1`/`ExpROI2` are two spatial ROIs on the CCD** — the excitation spot
+  and a remote, spatially-filtered spot, for two-spot galvo scans. `ExpROI2` is
+  identically zero in every other measurement, which is why the loader warns when
+  the *selected* ROI is all zeros. Both are always loaded; `roi=` only chooses
+  which one `spectra` points at.
+- **The 57 labelled parameter rows are format-fixed.** Verified identical across
+  PL, R, TRPL and the TRPL companion. A missing row therefore means a different
+  acquisition version, not routine variation — so the permissive load (E1) makes
+  its error *diagnostic*, not merely tolerant.
+- **The exporter over-allocates and zero-fills.** A 2091-point reflectance raster
+  is exported with 4182 declared blocks, the surplus half filled with literal
+  `0.0` in every field — numeric, not empty, so no NaN strip removes them.
+  `_drop_unwritten_blocks` drops them using *the axis column being identically
+  zero* as the sentinel, and reports the count via `n_declared_sweeps`. This is
+  decoding, not a correction: keeping them fabricates measurements never taken.
+- **It over-allocates the row width too, and that padding is empty, not zero.**
+  Two separate over-allocations, easy to conflate. Beyond the 4182 *named* blocks
+  (the last named field is `ExpROI2_4181`, so the named width is
+  `1 + 4182×4 = 16729` fields), every row carries a further `4182×4 = 16728`
+  unnamed, **empty** fields — 33457 in total, exactly twice the named width minus
+  the label column. So the surplus *blocks* hold `0.0`, while the trailing
+  *padding* holds nothing at all. Nothing needs to strip it: `_read_block_layout`
+  counts columns matching `^Par_?\d+$`, and an empty field cannot match, so the
+  block count comes out at 4182 regardless of how wide the row is.
+- **`R`/`RC` need no parser work** — reflectance uses the identical spectral
+  layout as PL. What it needs is a reference spectrum, which is a 2-row
+  `SingleSpectrum` CSV of the bare substrate.
+- **A TRPL sweep is a directory**, one file per point, each carrying its own full
+  57-row parameter snapshot, plus a **metadata companion**: a *spectral*-layout
+  file whose `Par_i` columns hold one snapshot per point and whose
+  Wavelength/ROI columns are identically zero. The companion collides on
+  `iter_0` with the first data file and is written last, so classify by
+  **content, not filename**. Order data files by the integer in `_iter_N`;
+  lexicographic order puts `iter_10` before `iter_2`.
+- **A 2-D spatial raster is one flattened file** (41 X inside 51 Y for the
+  reflectance example). `sweep_grid()` detects and reports the shape; it does
+  **not** reshape — that is still open work.
+
+Still unknown, and no file can answer it: which acquisition software and version
+emits this, and whether the layout is version-stable.
 
 **Status:** alpha, pre-adoption. Renaming and signature changes are acceptable;
 prefer fixing a name now over carrying a compatibility shim. (`DeviceGeometry.from_single`
@@ -86,6 +144,35 @@ code. When the Jacobian is applied, background must be subtracted in wavelength
 space **first**, because a flat pedestal `B` becomes `B·λ²/hc` — curved, not flat —
 in energy space. The loader already does this in the right order.
 
+**Reflectance contrast** — `ΔR/R₀ = (S − R)/R` against a bare-substrate
+reference (`processing.spectral_contrast`, wired as `reference=` on the loader).
+Two things about it are easy to get wrong, both recorded because both change the
+numbers:
+
+- **The Jacobian cancels in a ratio.** `(S·λ²/hc)/(R·λ²/hc) = S/R` exactly, so
+  `energy_contrast` is built with the Jacobian **off** regardless of
+  `apply_jacobian`, and applying it to the numerator alone would be an error.
+  Verified numerically against the committed reflectance pair.
+- **Sample and reference must share an exposure.** For a reference scaled by `k`,
+  `(S − kR)/(kR)` is a *biased* contrast, not a rescaled one — so a reference
+  taken at a different integration time or excitation power gives a wrong answer
+  that no later normalisation repairs. A 2-row reference CSV carries **no
+  parameter rows**, so the package cannot check this and cannot correct it:
+  matching the acquisition, or supplying the ratio via `reference_scale=`, is the
+  caller's responsibility. Same shape of problem as gate polarity. (Precedent:
+  `reference/processors/Dijkstra2025.py:162` divides by integration time first.)
+
+Background comes off both arrays *before* the ratio — a pedestal in either biases
+a contrast non-linearly. Grid mismatch **raises**; interpolating would change the
+numbers and smooth the data, so it is a correction and cannot be a default. Pass
+a pre-aligned bare array if you have resampled it yourself.
+
+**TRPL time axis** — ns, 4 ps bins. Consistent with the Picoharp rows and a
+~78 MHz rep rate, but **not independently confirmed**; `_TRPL_TIME_UNIT` is the
+single place to change it. Any fitted lifetime inherits this assumption. The
+per-file time axes are *not* bit-identical (bin width varies in its seventh
+figure), so assembly compares with a tolerance, never equality.
+
 **Fit baselines** — peak models decay to zero in their wings, so an un-subtracted
 dark-count pedestal is otherwise absorbed by inflating amplitude and FWHM. All
 `fit_*` functions therefore take `baseline={"constant"|"linear"|"none"}`, default
@@ -115,12 +202,19 @@ TODO — provenance not yet recorded, ask before documenting or changing:
 - **Gate polarity is per-session wiring, not a property of the code.** The
   electrodes can be hooked up in either configuration, so which acquisition channel
   drove which gate is *not* inferable and must be recorded per scan; the old MATLAB
-  used `dm(4,…)`/`dm(6,…)` with no note of which was which. Until a loader records
-  it, `electric_field(v_top=, v_bot=)` puts the mapping on the caller by design —
+  used `dm(4,…)`/`dm(6,…)` with no note of which was which.
+  `electric_field(v_top=, v_bot=)` puts the mapping on the caller by design —
   transposing them mirrors the field axis and flips the sign of any extracted
-  dipole. Fold the metadata into the planned `AttoCubePLVabScan` overhaul rather
-  than patching `electric_field`. The senior's thesis is itself inconsistent here
-  (eq. 3.11 carries a leading minus, 3.12/3.13 do not), so don't inherit its sign.
+  dipole. The senior's thesis is itself inconsistent here (eq. 3.11 carries a
+  leading minus, 3.12/3.13 do not), so don't inherit its sign.
+  *Partly addressed 2026-07-30:* `AttoCubeSpectralSweep` now **records** the
+  mapping — `curated_labels={"v_top": …, "v_bot": …}`, printed in `__repr__` as
+  `(top ← 'V_A', bottom ← 'V_B')` and written into exported HDF5 — and
+  `gate_mode` reports whether the two gates were driven anti-correlated
+  (field-like) or correlated (doping-like). What is recorded is still the
+  *channel-to-argument* mapping, not the physical wiring: the default remains
+  `V_A`→top, `V_B`→bottom, which is a convention no file confirms. Ask per
+  session; don't add a sign to the physics.
 
 ## Design principle — corrections are opt-in
 
@@ -297,8 +391,8 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 - `diffusion._binary_area` has a wrong MATLAB `bwarea` weight table (diagonal pairs
   0.5, should be 0.75; 3-pixel patterns 0.75, should be 0.875), biasing cloud areas
   low. Parked pending a decision on whether bwarea semantics are wanted at all.
-- `AttoCubePLVabScan` refuses to load if any `_CURATED` row is missing (including
-  `Scanner X`/`Scanner Y`). A larger overhaul of this class is planned.
+  *(The `AttoCubePLVabScan` `_CURATED` fail-fast that used to sit here was fixed
+  by the 2026-07-30 rewrite — see below.)*
 
 **Fixed — don't re-report:**
 - `processing.remove_cosmic_rays` (A1, fixed 2026-07-28). Was uncallable
@@ -331,11 +425,74 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   force the `Agg` backend and assert on a real `fig.canvas.draw()`. Any future test
   of an artist's styling must render too; building the figure proves nothing.
 
+- **`AttoCubePLVabScan` → `AttoCubeSpectralSweep`** (2026-07-30). Renamed and
+  rewritten; the old name survives as a deprecated subclass that emits
+  `FutureWarning` (**not** `DeprecationWarning` — Python filters that out by
+  default outside `__main__`, so a library raising one warns nobody). What
+  changed, and what to not re-litigate:
+  - `spectra_type=` is **required, keyword-only, no default**. It is written into
+    exported metadata and trusted thereafter, so a default would let a guess
+    outlive the session. Use `scan.signal_label` instead of hardcoding "PL".
+  - One `sweep=` argument takes a `_SWEEP_TYPES` key *or* any raw CSV row label.
+    Undeclared → the sweep axis is the sweep **index**, never an auto-detected
+    parameter: mislabelling an axis is worse than not labelling one, and
+    `V_A`+`V_B` both varying is ambiguous between a field sweep and independent
+    gating. `varying_parameters()` and `gate_mode` return the evidence instead.
+  - `gate_axis` / `gate_axis_label` are kept as aliases of `sweep_axis` /
+    `sweep_axis_label` so existing plotting keeps working. Don't delete them
+    without updating `plot_pl_map_Vab_scan`.
+  - E1 fixed: **no curated row is mandatory.** A file missing `Scanner X` loads;
+    the property raises only if accessed. The one remaining fail-fast is the row
+    the *declared* `sweep` needs — the requirement follows the declaration.
+  - The eight `*_label` / `power_scale` arguments collapsed into two dicts,
+    `curated_labels=` / `curated_scales=`.
+  - Both ROIs are always loaded (`spectra_roi1`/`spectra_roi2`); `roi=` only
+    chooses what `spectra` points at.
+  - `SPECTROSCOPY_TYPES` **moved** from `reference/loader.py` to `constants.py`
+    (with `"RC"` added) and is re-exported there. One vocabulary — don't fork it.
+  - Covered by `tests/test_loaders.py` (now against the new class, plus shim
+    tests) and `tests/test_hdf5_roundtrip.py`.
+- **HDF5 storage** (`hdf5.py`, 2026-07-30). `scan.to_hdf5(path)`; the loader
+  accepts `.h5`/`.hdf5` and dispatches on suffix, so **one class serves both
+  formats** — do not add a second loader class for HDF5. The file stores raw
+  signal arrays (both ROIs for a spectral sweep), every parameter row verbatim,
+  and the measurement metadata. It deliberately does **not** store the energy
+  axis, the energy-space spectra, or the sweep axis: all are derivable, and
+  freezing them would put one session's corrections into the archive. Corrections
+  — `apply_jacobian`, `bg_region_nm`/`_ns`, and the `bg_spectrum` / `reference`
+  arrays — are recorded as provenance in `scan.source_metadata` and are **never
+  replayed on read**; loading is not deciding. The auxiliary spectra are stored as
+  *arrays not paths* so a contrast can still be rebuilt from the archive alone.
+  `FORMAT_VERSION` 1.1 added the temporal axis kind (additive). A 4.59 MB PL CSV
+  writes as 0.14 MB; the 4-file 11.57 MB TRPL sweep as 0.069 MB.
+- **`AttoCubeTRPLSweep`** (2026-07-30). Sibling of `AttoCubeSpectralSweep` over a
+  shared private base `_AttoCubeSweep`. Accepts one file *or* a directory. Do not
+  merge it back into one class with a mode flag: a single decay is just
+  `n_sweeps == 1`, but `energy = hc/t` is meaningless and divides by zero at
+  `t = 0`, so a mode flag would leave a third of the public API conditionally
+  meaningful. It has no `spectra` attribute **on purpose**, so a TRPL sweep handed
+  to a spectral plot raises instead of drawing time as wavelength.
+- **The TRPL metadata companion is evidence, not the source.** Parameters come
+  from each data file's own snapshot, contemporaneous with its decay, so a sweep
+  loads without the companion at all. The companion supplies `n_declared_sweeps`
+  (an aborted sweep is then visible) and its table is exposed as
+  `declared_parameters`. Its values are **deliberately not** cross-checked row by
+  row: it is written seconds after the last decay, so drifting channels genuinely
+  disagree — the leakage currents and `Fianium_Select_A6` do, while the swept
+  gates agree to seven figures. Nothing in the file says which channels are
+  stable, so a value check would fire on every real sweep, which is how warnings
+  get ignored. Don't add one back.
+
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
   that already had `bg_region` applied at load.
-- `__init__.py` quick-start and README §5/§6 reference APIs that don't exist
-  (`AttoCubePLScan`, `plot_pl_map`, `bg_region=` on `fit_scan_peak`).
+- README §5/§6 reference APIs that don't exist (`AttoCubePLScan`, `plot_pl_map`,
+  `bg_region=` on `fit_scan_peak`). The `__init__.py` quick-start was corrected on
+  2026-07-30 as part of the rename.
+- `plotting.py` hardcodes "PL intensity" in ~6 places and
+  `plot_pl_map_Vab_scan` / `plot_current(ef_axis=)` are named for the gate-sweep
+  era. Nothing breaks — `scan.signal_label` and `scan.sweep_axis` exist for them —
+  but a plotting pass is owed. See E12.
 
 **Decided but not yet implemented:**
 - `plot_pl_map_Vab_scan`'s `median_kernel` should default to `1` (off). The current

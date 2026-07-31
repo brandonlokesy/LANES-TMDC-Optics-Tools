@@ -21,3 +21,6 @@ site/
 
 # Do not import .h5 files
 *.h5
+
+# Exclude files. Reflectance file too big.
+examples/data/reflectance-contrast/sample_26_07_24_17_55_47_iter_0.csv

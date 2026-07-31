@@ -12,14 +12,9 @@ DATA_DIR = Path(__file__).parent / "data"
 # Controlled vocabulary for spectroscopy types
 # ---------------------------------------------------------------------------
 
-SPECTROSCOPY_TYPES = {
-    "PL":    "Photoluminescence",
-    "R":     "Reflectance",
-    "T":     "Transmission",
-    "A":     "Absorption",
-    "Raman": "Raman scattering",
-    "TRPL":  "Time-resolved photoluminescence",
-}
+# Defined in constants.py and re-exported here: the AttoCube loaders record the
+# same tags per scan, and a vocabulary that exists in two places drifts.
+from ..constants import SPECTROSCOPY_TYPES
 
 # ---------------------------------------------------------------------------
 # Dataclasses

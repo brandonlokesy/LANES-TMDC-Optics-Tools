@@ -130,18 +130,18 @@ def plot_pl_map_Vab_scan(
 ) -> tuple:
     """
     Plot a gate-dependent PL map from an
-    :class:`~tmdc_optics_tools.loaders.AttoCubePLVabScan`.
+    :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep`.
 
     Background subtraction and Jacobian correction are configured at
     load time on the scan object (via ``bg_region_nm``, ``bg_region_eV``,
     and ``apply_jacobian``).  This function always uses
-    :attr:`~tmdc_optics_tools.loaders.AttoCubePLVabScan.best_energy_spectra`,
+    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`,
     which automatically returns the background-corrected array when one
     is available, and falls back to the uncorrected array otherwise.
 
     Parameters
     ----------
-    scan : AttoCubePLVabScan
+    scan : AttoCubeSpectralSweep
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
     x_axis : {"energy", "wavelength"}
@@ -219,7 +219,7 @@ def plot_spectrum(
 
     Parameters
     ----------
-    scan : AttoCubePLScan
+    scan : AttoCubeSpectralSweep
     sweep_index : int
         Index of the sweep point to plot.
     ax : matplotlib.axes.Axes, optional
@@ -337,7 +337,7 @@ def plot_current(
 
     Parameters
     ----------
-    scan : AttoCubePLScan
+    scan : AttoCubeSpectralSweep
     ax : matplotlib.axes.Axes, optional
         Must be a standard (non-twin) axes.
     ef_axis : bool
@@ -921,7 +921,7 @@ class SpectrumLinePanel(AnimationPanel):
     """
     A panel that animates one PL spectrum per frame.
 
-    Wraps an :class:`~tmdc_optics_tools.loaders.AttoCubePLVabScan` (or any object
+    Wraps an :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` (or any object
     exposing ``energy``/``wavelength`` plus ``best_energy_spectra``/``spectra``
     of shape ``(n_pixels, n_sweeps)``).  The x-axis is fixed; each frame swaps
     the y-values and updates a per-panel subtitle showing the swept value.
@@ -931,7 +931,7 @@ class SpectrumLinePanel(AnimationPanel):
 
     Parameters
     ----------
-    scan : AttoCubePLVabScan
+    scan : AttoCubeSpectralSweep
     x_axis : {"energy", "wavelength"}
     sweep_attr : str
         Name of the per-sweep array used for the subtitle value
@@ -1259,9 +1259,11 @@ def animate_wl_pl_spectra(
         tuple is loaded into an
         :class:`~tmdc_optics_tools.loaders.AttoCubePLScanRealSpace`; an existing
         scan object is used as-is.
-    spectra : str or AttoCubePLVabScan or None
+    spectra : str or AttoCubeSpectralSweep or None
         Spectrum line-scan.  A path is loaded into an
-        :class:`~tmdc_optics_tools.loaders.AttoCubePLVabScan`.
+        :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` with
+        ``spectra_type="PL"``; pass a pre-built sweep for any other measurement
+        type or to declare a ``sweep=``.
     laser_ref : str or AttoCubeLaserReferenceImage or None
         Shared laser-spot reference for the image panels.  A path is loaded
         into an :class:`~tmdc_optics_tools.loaders.AttoCubeLaserReferenceImage`
@@ -1312,7 +1314,7 @@ def animate_wl_pl_spectra(
     """
     from .loaders import (
         AttoCubePLScanRealSpace,
-        AttoCubePLVabScan,
+        AttoCubeSpectralSweep,
         AttoCubeLaserReferenceImage,
     )
 
@@ -1333,9 +1335,13 @@ def animate_wl_pl_spectra(
         )
 
     def _spectrum_scan(spec):
-        if spec is None or isinstance(spec, AttoCubePLVabScan):
+        # isinstance on the base class also accepts the deprecated
+        # AttoCubePLVabScan, which is a subclass of it.
+        if spec is None or isinstance(spec, AttoCubeSpectralSweep):
             return spec
-        return AttoCubePLVabScan(path=str(spec))
+        # A bare path: this function animates PL, so declare it rather than
+        # letting the loader guess.  Pass a pre-built sweep for anything else.
+        return AttoCubeSpectralSweep(path=str(spec), spectra_type="PL")
 
     laser_style = laser_style or {}
 
@@ -1995,7 +2001,7 @@ from matplotlib.colors import Normalize, LogNorm, BoundaryNorm
 from matplotlib.cm import ScalarMappable
 
 
-# Mapping of string names → spectra array attribute on AttoCubePLVabScan.
+# Mapping of string names → spectra array attribute on AttoCubeSpectralSweep.
 # The sentinel value None means "wavelength-space spectra" — these are
 # served on the wavelength axis regardless of x_axis.
 _SPECTRA_SOURCES = {
@@ -2004,6 +2010,11 @@ _SPECTRA_SOURCES = {
     "energy"                    : "energy_spectra",
     "energy_bg"                 : "energy_spectra_bg",
     "energy_pre_jacobian"       : "energy_spectra_pre_jacobian",
+    # Contrast is opt-in by name: "best" never returns it, because ΔR/R₀ is a
+    # different physical quantity from the counts, not a better-corrected version
+    # of them.  See AttoCubeSpectralSweep.best_energy_spectra.
+    "contrast"                  : "energy_contrast",
+    "contrast_wavelength"       : "contrast",
 }
 
 _SPECTRA_SOURCE_LABELS = {
@@ -2012,6 +2023,8 @@ _SPECTRA_SOURCE_LABELS = {
     "energy"                    : "energy axis (Jacobian if configured)",
     "energy_bg"                 : "energy axis, bg-subtracted",
     "energy_pre_jacobian"       : "energy axis, no Jacobian",
+    "contrast"                  : "contrast vs reference, energy axis",
+    "contrast_wavelength"       : "contrast vs reference, wavelength space",
 }
 
 
@@ -2038,10 +2051,11 @@ def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
         attr = _SPECTRA_SOURCES[src]
         arr = getattr(scan, attr, None)
         if arr is None:
+            needs = ("a reference= spectrum" if src.startswith("contrast")
+                     else "bg_region and/or apply_jacobian")
             raise ValueError(
                 f"spectra_source={src!r} is not available on this scan.  "
-                "Check that bg_region and/or apply_jacobian were set at "
-                "load time."
+                f"Check that {needs} was set at load time."
             )
 
     # Warn if wavelength-space data is being plotted on energy axis.
@@ -2100,7 +2114,7 @@ def plot_power_series(
 
     Parameters
     ----------
-    scan : AttoCubePLVabScan
+    scan : AttoCubeSpectralSweep
         Must expose ``power`` (µW), ``energy``/``wavelength``, and the chosen
         *spectra_source* attribute.
     ax : matplotlib.axes.Axes, optional

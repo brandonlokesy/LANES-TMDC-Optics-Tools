@@ -343,9 +343,110 @@ standard all cost lines deliberately — see *vectorised NumPy is wanted, but ne
 silent* below and *return the evidence* above. The target is less duplication, not
 less code.
 
+## Design principle — a docstring is a contract, not a changelog
+
+**A docstring describes the thing as it is, to someone who has never seen the source
+and does not know the project has a history.** mkdocstrings renders these onto the
+docs site, so the reader has no access to the audit, no memory of what a function
+used to be called, and no interest in which design was rejected. They are deciding
+whether to call it and how.
+
+One test, applied sentence by sentence:
+
+> Would this still be true, and still worth reading, if the code had always been
+> this way?
+
+If not, it belongs elsewhere. Three homes — the split is about **audience**, not
+importance, and nothing is being thrown away:
+
+| Text | Home | Read by |
+|---|---|---|
+| What it does, takes, returns, refuses; units; limits | **docstring** | someone about to call it |
+| Why this line is odd — the mechanism, the trap, the measurement | **comment** | someone editing it |
+| What changed and when, why, what was rejected | **`dev/audit-2026-07.md`**, or this file for standing conventions | someone deciding what to do next |
+
+Note the third row: most displaced text is *not* comment material either. This
+project already keeps decision records properly, and the audit's
+**[FIXED — date, commit]** discipline is where "what changed" lives. Moving history
+from a docstring into a comment two lines below has not fixed anything.
+
+**What earns a place**
+
+- The purpose, in a line that names the thing rather than the change.
+- Parameters with units and accepted types; what is returned; what it raises and
+  warns, and on what.
+- **Limitations and non-goals** — what it does *not* handle, and where to go
+  instead. State them flat: *"does not resample; pass a pre-aligned array"* beats a
+  paragraph on why resampling would be wrong.
+- Constraints on *use* a caller could otherwise get wrong — that a contrast needs a
+  matched exposure, that the Jacobian cancels in a ratio. These are the reader's
+  problem, so they stay.
+- Conventions the array cannot state: axis order, ascending-ness, view vs copy,
+  which arrays are never mutated, what unit a bare float is in.
+- Examples, where the call shape is not obvious from the signature.
+
+**What does not belong, however true**
+
+- Dates, commit hashes, audit IDs (`E9`, `A6`), and pointers into `dev/` or this
+  file. A caller cannot follow them and is not the audience.
+- `was` / `now` / `used to be` / `previously` / `since <date>` / `pre-rename`, and
+  more generally any sentence that only parses against what preceded it.
+- **Arguing with the design that was not chosen.** *"Why this is a separate class
+  rather than a mode of it"* is a decision record. Its **consequence** — which
+  attributes therefore do not exist — is documentation. Keep the consequence,
+  move the argument.
+- **"Deliberately", "on purpose", "don't add this back".** These answer a
+  maintainer who suspects an oversight, so their presence is a reliable signal the
+  sentence is in the wrong file. Describe the behaviour and drop the defence.
+- Evidence for the implementation — *"verified against the committed pair"*,
+  *"measured at 13.8 s against 10.7 s"*. Comment or audit.
+
+**Cross-references: does it help the reader act?**
+
+`See Also`, *"the maths lives in `processing.spectral_contrast`"*, *"pass this to
+`animate_panels`"* are ordinary good documentation: they route someone to the next
+thing they need. A reference used to *justify* the code (*"as `_order_by_iter` now
+does"*) does not. And **never cite a private helper from a public docstring** — the
+reader cannot call it, so it reads as API and dead-ends. Inline the fact instead.
+
+**Worked example.** `best_energy_spectra`, before — ten lines, half of them
+defending a decision:
+
+```
+Return the best available energy-axis spectra.
+...
+**A contrast array is deliberately not returned here**, even when a *reference*
+was given.  "Best" means the same physical quantity, better corrected — not a
+different quantity.  Contrast is negative-going, so feeding it to
+:func:`fit_scan_peak`, whose peak models decay to zero in their wings, would give
+quietly meaningless fits; and a PL map's colour bar would silently start meaning
+ΔR/R₀.  Ask for :attr:`energy_contrast` explicitly, or ...
+```
+
+After — same information a caller needs, none of the argument:
+
+```
+Background-corrected energy-axis spectra when available, else uncorrected.
+
+Returns :attr:`energy_spectra_bg` if a background was supplied at load time and
+:attr:`energy_spectra` otherwise, so downstream code need not know which.
+
+Never returns the contrast, even when a *reference* was supplied: that is a
+different quantity rather than a better-corrected one, and it is negative-going,
+which peak fits and intensity colour bars both misread. Use
+:attr:`energy_contrast`.
+```
+
+The non-goal survives, and so does the one clause a caller needs to understand why
+they must ask explicitly. What goes is the word *deliberately*, the mechanism of the
+fit failure, and the defence of the choice — which is now in *Known issues* where a
+maintainer will look for it.
+
 ## Code conventions
 
 - NumPy-style docstrings (rendered by mkdocstrings); aligned-colon parameter blocks.
+  What goes in one, and what belongs in a comment or the audit instead, is *a
+  docstring is a contract, not a changelog* above.
 - Relative imports within the package (`from . import processing`).
 - `loaders` = I/O + geometry; `processing` = pure array functions; `fitting` returns
   dataclasses; `plotting` returns `(fig, ax, <artist>)` and never calls `plt.show()`.
@@ -493,6 +594,17 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   `plot_pl_map_Vab_scan` / `plot_current(ef_axis=)` are named for the gate-sweep
   era. Nothing breaks — `scan.signal_label` and `scan.sweep_axis` exist for them —
   but a plotting pass is owed. See E12.
+- **A declared 1-D sweep on a raster gives a sawtooth axis, silently** (A8).
+  `sweep="position_x"` on the reflectance raster succeeds and returns `Scanner X`
+  repeated 51 times, non-monotonic; `__repr__` prints only min and max so it looks
+  fine, and any plot against it overplots 51 times. `sweep_grid()` already detects
+  the raster, so the fix is to compare the two and warn. Don't make it an error —
+  one axis of a raster is legitimate when slicing a single row.
+- **`_is_image_csv` accepts a two-row spectrum as an image** (A9), because it only
+  tests whether the first line parses as floats — and a `SingleSpectrum`'s first row
+  is its wavelength axis. A directory of single spectra therefore loads as 2×N
+  "images". `_read_block_layout` already draws this distinction correctly (two rows →
+  `SingleSpectrum`, more → image sequence); copy that rule. Same pass as A7.
 
 **Decided but not yet implemented:**
 - `plot_pl_map_Vab_scan`'s `median_kernel` should default to `1` (off). The current
@@ -502,6 +614,19 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   (`contour_*`, `centroid_*`, `roi_color`, `bg_region_color`, `laser_*`,
   `xlabel`/`ylabel`, `colorbar_label`) and return its artists instead of only
   `result`. Signature change, acceptable pre-adoption. See E11.
+- **An x/y raster gets a grid API, not a `_SWEEP_TYPES` entry.** Asked and settled
+  2026-07-31, so don't re-propose `"position_xy"`: that registry answers *"which 1-D
+  array of length `n_sweeps` is the sweep axis"*, and `sweep_axis` returns exactly one
+  array that plotting calls `.min()`/`.max()` on. A raster has two axes, so there is
+  nothing single to return — a tuple breaks the contract, a flat index is already
+  `sweep=None`, and one-of-the-two is already `position_x`/`position_y`. What is
+  missing is the **reshape** to `(n_points, n_y, n_x)` plus map plotting, on top of
+  the shape `sweep_grid()` already reports. Give it an explicit
+  `grid=("Scanner X", "Scanner Y")` declaration, **inner axis first**: detection needs
+  `n_inner × n_outer == n_sweeps` exactly and so fails on an aborted scan with a
+  partial final row, and declaring it settles the x/y loop-order flip by statement
+  rather than inference — the same "put it on the caller" pattern as `sweep=` and gate
+  polarity.
 
 ## Working style
 

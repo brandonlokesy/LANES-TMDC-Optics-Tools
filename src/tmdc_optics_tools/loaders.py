@@ -577,16 +577,35 @@ def _read_block_layout(path) -> dict:
     """
     with open(path, "r") as fh:
         header = fh.readline()
+        # Only whether a third row exists matters, and bounding the read keeps this
+        # cheap on a 300 MB export.  The count is therefore not the file's row
+        # count and must not be reported as one.
+        two_rows_only = sum(1 for _, line in zip(range(2), fh) if line.strip()) < 2
     names = [name.strip() for name in header.split(",")]
 
     # Every block starts with a Par column, so the Par positions give both the
     # block count and the stride — no arithmetic on the total column count.
     par_at = [i for i, name in enumerate(names) if _BLOCK_START.match(name)]
     if not par_at:
+        # No header at all: the first line is already data.  Both other CSV kinds
+        # look like this, and only the row count separates them, so name the class
+        # that fits rather than guessing at one.
+        if two_rows_only:
+            shape, better = (
+                "two rows",
+                "SingleSpectrum, which reads exactly this shape "
+                "(row 0 wavelength in nm, row 1 counts)",
+            )
+        else:
+            shape, better = (
+                "more than two rows",
+                "AttoCubePLScanRealSpace, which reads a directory of these as an "
+                "image sequence, or SingleImage for one frame",
+            )
         raise ValueError(
             f"'{path}' has no 'Par' columns in its header, so it is not an "
-            f"AttoCube spectral export. Real-space image CSVs are bare numeric "
-            f"grids with no header — load those with AttoCubePLScanRealSpace."
+            f"AttoCube spectral export — it is a bare numeric grid of {shape}. "
+            f"Load it with {better}."
         )
 
     block_width = (par_at[1] - par_at[0]) if len(par_at) > 1 else (

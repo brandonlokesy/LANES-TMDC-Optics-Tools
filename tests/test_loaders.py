@@ -17,6 +17,7 @@ import pytest
 from tmdc_optics_tools.loaders import (
     AttoCubePLVabScan,
     AttoCubeSpectralSweep,
+    AttoCubeTRPLSweep,
     DeviceGeometry,
     _read_block_layout,
 )
@@ -450,6 +451,38 @@ def test_all_blocks_unwritten_names_the_metadata_companion(tmp_path):
 
     with pytest.raises(ValueError, match="metadata companion"):
         AttoCubeSpectralSweep(str(csv), spectra_type="PL")
+
+
+def test_headerless_csv_named_by_row_count(tmp_path):
+    # A 2-row spectrum and a real-space image are both bare numeric grids with no
+    # header, so only the row count separates them.  Each must be pointed at the
+    # class that reads it, rather than both at whichever was guessed.
+    spectrum = tmp_path / "one_spectrum.csv"
+    spectrum.write_text("800.0,801.0,802.0\n10.0,11.0,12.0\n")
+    with pytest.raises(ValueError, match="SingleSpectrum"):
+        AttoCubeSpectralSweep(str(spectrum), spectra_type="PL")
+
+    image = tmp_path / "frame.csv"
+    image.write_text("1,2,3\n4,5,6\n7,8,9\n")
+    with pytest.raises(ValueError, match="AttoCubePLScanRealSpace"):
+        AttoCubeSpectralSweep(str(image), spectra_type="PL")
+
+
+def test_row_count_in_that_message_is_not_a_capped_read(tmp_path):
+    # The check stops after three lines, so it must describe the shape as
+    # "more than two rows" and never report the bounded count as the real one.
+    image = tmp_path / "tall.csv"
+    image.write_text("\n".join(",".join("1" for _ in range(4)) for _ in range(50)) + "\n")
+    with pytest.raises(ValueError, match="more than two rows"):
+        AttoCubeSpectralSweep(str(image), spectra_type="PL")
+
+
+def test_single_spectrum_rejection_reaches_the_trpl_class_too(tmp_path):
+    # Both sweep classes share the layout reader, so both give the same guidance.
+    spectrum = tmp_path / "one_spectrum.csv"
+    spectrum.write_text("800.0,801.0\n10.0,11.0\n")
+    with pytest.raises(ValueError, match="SingleSpectrum"):
+        AttoCubeTRPLSweep(str(spectrum))
 
 
 def test_selected_roi_all_zero_warns(tmp_path):

@@ -406,6 +406,33 @@ from a docstring into a comment two lines below has not fixed anything.
 - Evidence for the implementation — *"verified against the committed pair"*,
   *"measured at 13.8 s against 10.7 s"*. Comment or audit.
 
+**One file is not the format.** Every figure in the AttoCube record above came from
+one particular export, and the next one will differ — different raster dimensions,
+different sweep length, different file size, possibly a different acquisition
+version. So docstrings *and* comments describe the **shape of the thing** — that
+the exporter declares twice as many blocks as it writes, that a raster arrives
+flattened, that exports are large enough to make a one-line read worth it — and
+never present one file's numbers as what a caller should expect.
+
+- **Generalise the mechanism, not the measurement.** *"declares twice as many
+  blocks as it writes"* is behaviour, holds across every export seen, and is what
+  the code keys on; *"a 2091-point raster exported with 4182 blocks"* is one file's
+  arithmetic. State the first, drop the second. Where the prose is more specific
+  than the logic, the prose is wrong.
+- **Where an illustration genuinely helps, make the numbers obvious stand-ins.**
+  Symbolic is best (*"an `n_x` × `n_y` raster gives `n_x·n_y` points"*); round and
+  small is fine (*"e.g. 10 × 10 exported as 100 points"*). A figure that matches
+  the committed data reads as a specification, not an example — and a doctest whose
+  expected output is one file's value (`(12.817, 3)`) is a specification with a
+  test attached.
+- **Exact figures from real files belong in the record** — the AttoCube section of
+  this file, or `dev/audit-2026-07.md`. There they are dated, attached to the file
+  they came from, and correctable when the next acquisition version disagrees. Same
+  split as *evidence for the implementation* above.
+- **They rot, and silently.** `_read_block_layout` already says a raster is 314 MB
+  while the comment four lines below it says 300 MB. Nothing failed, no test caught
+  it, and the reader now has two facts about a file they do not have.
+
 **Cross-references: does it help the reader act?**
 
 `See Also`, *"the maths lives in `processing.spectral_contrast`"*, *"pass this to

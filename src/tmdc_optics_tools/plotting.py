@@ -2,12 +2,15 @@
 """
 Plotting helpers for TMD spectroscopy.
 
-Provides a consistent Matplotlib style and convenience functions for
-the most common plot types encountered in gate-dependent PL experiments.
+Provides a consistent Matplotlib style and convenience functions for the most
+common plot types encountered when spectra are swept over a parameter — gate
+voltage, displacement field, excitation power, or piezo position — together with
+real-space image and diffusion-cloud plots.
 """
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -115,7 +118,7 @@ def _resolve_x_axis(scan, x_axis: str) -> tuple:
 # 2-D map plots
 # ---------------------------------------------------------------------------
 
-def plot_pl_map_Vab_scan(
+def plot_spectral_map(
     scan,
     ax             = None,
     figsize        : tuple = (6, 4),
@@ -125,12 +128,19 @@ def plot_pl_map_Vab_scan(
     median_kernel  : int   = 3,
     clim           : tuple = None,
     colorbar       : bool  = True,
-    colorbar_label : str   = "PL intensity (norm.)",
+    colorbar_label : str   = "PL intensity",
     rescale_img    : bool  = True,
 ) -> tuple:
     """
-    Plot a gate-dependent PL map from an
-    :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep`.
+    Plot every spectrum of a sweep as a 2-D map: spectral axis against sweep axis.
+
+    Works for any sweep an
+    :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` can hold — gate
+    voltage, displacement field, excitation power, piezo position, or the bare
+    sweep index.  The y-axis and its label come from
+    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.sweep_axis` and
+    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.sweep_axis_label`,
+    so whatever was declared as ``sweep=`` at load time is what is plotted.
 
     Background subtraction and Jacobian correction are configured at
     load time on the scan object (via ``bg_region_nm``, ``bg_region_eV``,
@@ -153,6 +163,9 @@ def plot_pl_map_Vab_scan(
         Colour axis limits. Auto-scaled if ``None``.
     colorbar : bool
     colorbar_label : str
+        Name of the plotted quantity, **without a unit**: ``" (norm.)"`` or
+        ``" (counts)"`` is appended according to *rescale_img*.  The default
+        assumes PL, so a reflectance or contrast map needs one passed.
     rescale_img : bool
         Rescale intensity to [0, 1] before plotting.
 
@@ -166,7 +179,7 @@ def plot_pl_map_Vab_scan(
         fig = ax.get_figure()
 
     x, xlabel = _resolve_x_axis(scan, x_axis)
-    y, ylabel  = scan.gate_axis, scan.gate_axis_label
+    y, ylabel  = scan.sweep_axis, scan.sweep_axis_label
 
     x_m = np.tile(x[:, np.newaxis], (1, scan.n_sweeps))
     y_m = np.tile(y[np.newaxis, :], (scan.n_pixels, 1))
@@ -193,10 +206,33 @@ def plot_pl_map_Vab_scan(
 
     if colorbar:
         cb = fig.colorbar(mesh, ax=ax, pad=0.02)
-        # cb.set_label(colorbar_label)
-        cb.set_label("PL intensity (norm.)" if rescale_img else "PL intensity (counts)")
+        # colorbar_label names the quantity only; the unit follows from whether
+        # the data was rescaled, so pass it without one.
+        cb.set_label(colorbar_label + (" (norm.)" if rescale_img else " (counts)"))
 
     return fig, ax, mesh
+
+
+def plot_pl_map_Vab_scan(*args, **kwargs) -> tuple:
+    """
+    Deprecated alias for :func:`plot_spectral_map`.
+
+    Accepts and returns exactly what :func:`plot_spectral_map` does, and emits a
+    ``FutureWarning``.  Use :func:`plot_spectral_map`: the map is not specific to
+    a two-gate voltage sweep, nor to PL.
+
+    .. deprecated::
+       Call :func:`plot_spectral_map` instead.
+    """
+    # No explicit signature: the arguments are unchanged by the rename, so
+    # forwarding cannot drift out of step with the function it delegates to.
+    warnings.warn(
+        "plot_pl_map_Vab_scan is deprecated; use plot_spectral_map, which takes "
+        "the same arguments. The map is not specific to a V_a/V_b gate sweep — "
+        "the y-axis is whatever was declared as sweep= at load time.",
+        FutureWarning, stacklevel=2,
+    )
+    return plot_spectral_map(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------

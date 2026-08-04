@@ -24,7 +24,7 @@ Quick start
 ...     "myscan.csv", spectra_type="PL", sweep="electric_field", geometry=geom,
 ... )
 >>> print(scan)
->>> fig, ax, mesh = plotting.plot_pl_map_Vab_scan(scan, x_axis="energy")
+>>> fig, ax, mesh = plotting.plot_spectral_map(scan, x_axis="energy")
 >>> scan.to_hdf5("myscan.h5")          # metadata travels with the data
 """
 

@@ -15,7 +15,7 @@ A Python toolkit for gate-dependent photoluminescence spectroscopy on TMDC monol
 - [Key workflows](#key-workflows)
   - [1. Define device geometry](#1-define-device-geometry)
   - [2. Load a gate-dependent PL scan](#2-load-a-gate-dependent-pl-scan)
-  - [3. Plot a PL map](#3-plot-a-pl-map)
+  - [3. Plot a spectral map](#3-plot-a-spectral-map)
   - [4. Inspect a single spectrum](#4-inspect-a-single-spectrum)
   - [5. Fit a peak across a sweep](#5-fit-a-peak-across-a-sweep)
   - [6. Extract the excitonic dipole length](#6-extract-the-excitonic-dipole-length)
@@ -125,14 +125,14 @@ Key attributes after loading:
 
 ---
 
-### 3. Plot a PL map
+### 3. Plot a spectral map
 
 ```python
 from tmdc_optics_tools import plotting
 
 plotting.set_style("paper")   # or "talk", "poster". Optional
 
-fig, ax, mesh = plotting.plot_pl_map_Vab_scan(
+fig, ax, mesh = plotting.plot_spectral_map(
     scan,
     x_axis        = "energy",      # or "wavelength"
     cmap          = "vik",
@@ -140,7 +140,7 @@ fig, ax, mesh = plotting.plot_pl_map_Vab_scan(
 )
 ```
 
-The y-axis is automatically the displacement field if a geometry was supplied, otherwise the top gate voltage.
+The y-axis is whatever was declared as `sweep=` at load time — displacement field, gate voltage, excitation power, piezo position, or the sweep index if nothing was declared.
 
 
 ---
@@ -317,7 +317,7 @@ Literature values for hBN, WS2, WSe2, MoSe2, MoS2: out-of-plane dielectric const
 | Function | Purpose |
 |---|---|
 | `set_style` | Apply publication-ready Matplotlib rcParams |
-| `plot_pl_map_Vab_scan` | 2D PL intensity map (energy/wavelength vs gate/field) |
+| `plot_spectral_map` | 2D map of a sweep's spectra (energy/wavelength vs sweep axis) |
 | `plot_spectrum` | Single spectrum from a scan |
 | `plot_current` | Leakage current and power monitor |
 | `plot_real_space_PL_map` | Single real-space PL image |

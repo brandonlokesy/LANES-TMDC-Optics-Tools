@@ -85,15 +85,39 @@ is labelled "backward compatibility" but predates any real user base.)
 
 ## Environment
 
+Conda env `viz-sci-plot`. **Activate it before running anything that imports numpy:**
+
 ```
-Interpreter : C:\Users\Brandon\anaconda3\envs\viz-sci-plot\python.exe
+conda activate viz-sci-plot
+
 Install     : pip install -e ".[docs]"
 Docs        : python -m mkdocs build --strict
 Tests       : python -m pytest -q
 ```
 
-`pytest` **is installed** in `viz-sci-plot` (9.1.1, confirmed 2026-07-30 — the whole
-suite runs) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
+Non-interactively (scripts, agents), one-shot instead of activating — there is no
+persistent shell session to activate into:
+
+```
+conda run --no-capture-output -n viz-sci-plot python -m pytest -q
+```
+
+`--no-capture-output` matters: without it `conda run` buffers everything until the
+process exits, so a crashing or hanging suite reports nothing.
+
+**Do not invoke `C:\Users\Brandon\anaconda3\envs\viz-sci-plot\python.exe` directly.**
+It is the right interpreter, but activation is what puts the env's `Library\bin` on
+`PATH`, and conda's numpy keeps its BLAS there (`mkl_rt.3.dll`) rather than vendoring
+it next to the extension module the way a pip wheel does. Unactivated, numpy imports
+fine and then dies at the **first BLAS call** — matmul, `np.corrcoef` (so
+`gate_mode`), skimage `regionprops` (so `_fit_laser_spot`) — with `Windows fatal
+exception: code 0xc06d007f`. That is a delay-load failure: a native crash, not a test
+failure, so there is no traceback, and it lands on whichever test reaches BLAS first,
+i.e. a different one each run. Nothing is wrong with the environment when this
+happens.
+
+`pytest` **is installed** in `viz-sci-plot` (9.1.1; the whole suite runs — 154 tests
+passing as of 2026-08-04) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
 the dependency exists only in this one environment. Tests are local-only by
 deliberate choice — do not add a test job to CI. CI
 (`.github/workflows/docs.yml`) builds and deploys docs only. Declaring the extra is
@@ -137,12 +161,6 @@ been shipped somewhere in the group:
 Thesis eq. 3.12 keeps the `+ d_2D` term but substitutes `d_TOT` for `d_hBN`, which
 counts the TMDC twice; it is 1.29% low, i.e. *worse* than the 3.13 that follows it.
 Keeping `d_hBN` there instead makes 3.12 exact and equal to the form above.
-
-**Jacobian** — `apply_jacobian` defaults to `False` and that is intended. The
-docstrings and README still claim "True (default)"; the *docs* are wrong, not the
-code. When the Jacobian is applied, background must be subtracted in wavelength
-space **first**, because a flat pedestal `B` becomes `B·λ²/hc` — curved, not flat —
-in energy space. The loader already does this in the right order.
 
 **Reflectance contrast** — `ΔR/R₀ = (S − R)/R` against a bare-substrate
 reference (`processing.spectral_contrast`, wired as `reference=` on the loader).
@@ -524,97 +542,34 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 - `diffusion._binary_area` has a wrong MATLAB `bwarea` weight table (diagonal pairs
   0.5, should be 0.75; 3-pixel patterns 0.75, should be 0.875), biasing cloud areas
   low. Parked pending a decision on whether bwarea semantics are wanted at all.
-  *(The `AttoCubePLVabScan` `_CURATED` fail-fast that used to sit here was fixed
-  by the 2026-07-30 rewrite — see below.)*
 
-**Fixed — don't re-report:**
-- `processing.remove_cosmic_rays` (A1, fixed 2026-07-28). Was uncallable
-  (`UnboundLocalError`), and its iteration was a no-op. Now works, takes 2-D
-  `(n_pixels, n_sweeps)` input, and has `cross_sweep_veto=` plus a persistent-flag
-  warning. Covered by `tests/test_processing_cosmic_rays.py`.
-- `DeviceGeometry.eps_hs` / `__repr__` (A2, fixed 2026-07-30). `eps_hs` iterated
-  `_slabs()`'s `(d, ε)` tuples as `StackLayer` objects, so `print(geom)` raised for
-  every geometry. Now unpacks the tuples — `_slabs()` returning tuples is the
-  convention, not something to change: hBN gate flakes are ~50 nm, not *n*
-  monolayers, and hBN's ε lives in `EPS_HBN`, not `EPS_TMDC`, so wrapping them in
-  `StackLayer` would require asserting a false `n_layers`.
-- `DeviceGeometry.optical_thickness` **deleted** (A2, 2026-07-30). It returned
-  `d_tot × ε_2D` — full-stack thickness times a TMDC-only ε — under a local
-  variable misleadingly named `d_2d`. It was neither an optical path length
-  (`Σ nᵢdᵢ`, which these static out-of-plane ε values cannot give: TMDC in-plane
-  `n ≈ 4–5` near resonance against `√7.2 ≈ 2.7`) nor any capacitive thickness
-  (capacitance goes as `ε/d`; `d/ε` is what adds in series). It was a fragment of
-  the pre-2026-07-30 `electric_field` denominator with `ε_hBN` not yet divided out,
-  had no callers, and the name would have actively misled the planned
-  reflectance/cavity work. Do not reinstate it — the future optics code needs
-  dispersive `n(λ)` data of its own, not `EPS_TMDC`.
-- Laser circle in `animate_real_space_PL_map` (A3, fixed 2026-07-30). Passed the
-  `matplotlib.patheffects` *module* to `set_path_effects`, which raises
-  `AttributeError` at **draw** time, not at call time. The hand-rolled block was
-  replaced by `_draw_laser_circle(ax, scan.laser_ref, ls="--")`, so two drawers now
-  remain for D2 rather than three. New code annotating a laser spot should call that
-  helper, not build a `patches.Circle`. Covered by
-  `tests/test_plotting_laser_circle.py` — the suite's first plotting tests, which
-  force the `Agg` backend and assert on a real `fig.canvas.draw()`. Any future test
-  of an artist's styling must render too; building the figure proves nothing.
+**Fixed — don't re-report.** `remove_cosmic_rays` (A1), `DeviceGeometry.eps_hs` /
+`__repr__` and `optical_thickness` (A2), the `animate_real_space_PL_map` laser
+circle (A3), zero-filled blocks loaded as sweep points (A6), the `_CURATED`
+fail-fast (E1), and the 2026-07-30 rewrite — `AttoCubeSpectralSweep`, `hdf5.py`,
+`AttoCubeTRPLSweep` (G1–G4). Diagnosis, fix and tests for each are in the audit.
 
-- **`AttoCubePLVabScan` → `AttoCubeSpectralSweep`** (2026-07-30). Renamed and
-  rewritten; the old name survives as a deprecated subclass that emits
-  `FutureWarning` (**not** `DeprecationWarning` — Python filters that out by
-  default outside `__main__`, so a library raising one warns nobody). What
-  changed, and what to not re-litigate:
-  - `spectra_type=` is **required, keyword-only, no default**. It is written into
-    exported metadata and trusted thereafter, so a default would let a guess
-    outlive the session. Use `scan.signal_label` instead of hardcoding "PL".
-  - One `sweep=` argument takes a `_SWEEP_TYPES` key *or* any raw CSV row label.
-    Undeclared → the sweep axis is the sweep **index**, never an auto-detected
-    parameter: mislabelling an axis is worse than not labelling one, and
-    `V_A`+`V_B` both varying is ambiguous between a field sweep and independent
-    gating. `varying_parameters()` and `gate_mode` return the evidence instead.
-  - `gate_axis` / `gate_axis_label` are kept as aliases of `sweep_axis` /
-    `sweep_axis_label` so existing plotting keeps working. Don't delete them
-    without updating `plot_pl_map_Vab_scan`.
-  - E1 fixed: **no curated row is mandatory.** A file missing `Scanner X` loads;
-    the property raises only if accessed. The one remaining fail-fast is the row
-    the *declared* `sweep` needs — the requirement follows the declaration.
-  - The eight `*_label` / `power_scale` arguments collapsed into two dicts,
-    `curated_labels=` / `curated_scales=`.
-  - Both ROIs are always loaded (`spectra_roi1`/`spectra_roi2`); `roi=` only
-    chooses what `spectra` points at.
-  - `SPECTROSCOPY_TYPES` **moved** from `reference/loader.py` to `constants.py`
-    (with `"RC"` added) and is re-exported there. One vocabulary — don't fork it.
-  - Covered by `tests/test_loaders.py` (now against the new class, plus shim
-    tests) and `tests/test_hdf5_roundtrip.py`.
-- **HDF5 storage** (`hdf5.py`, 2026-07-30). `scan.to_hdf5(path)`; the loader
-  accepts `.h5`/`.hdf5` and dispatches on suffix, so **one class serves both
-  formats** — do not add a second loader class for HDF5. The file stores raw
-  signal arrays (both ROIs for a spectral sweep), every parameter row verbatim,
-  and the measurement metadata. It deliberately does **not** store the energy
-  axis, the energy-space spectra, or the sweep axis: all are derivable, and
-  freezing them would put one session's corrections into the archive. Corrections
-  — `apply_jacobian`, `bg_region_nm`/`_ns`, and the `bg_spectrum` / `reference`
-  arrays — are recorded as provenance in `scan.source_metadata` and are **never
-  replayed on read**; loading is not deciding. The auxiliary spectra are stored as
-  *arrays not paths* so a contrast can still be rebuilt from the archive alone.
-  `FORMAT_VERSION` 1.1 added the temporal axis kind (additive). A 4.59 MB PL CSV
-  writes as 0.14 MB; the 4-file 11.57 MB TRPL sweep as 0.069 MB.
-- **`AttoCubeTRPLSweep`** (2026-07-30). Sibling of `AttoCubeSpectralSweep` over a
-  shared private base `_AttoCubeSweep`. Accepts one file *or* a directory. Do not
-  merge it back into one class with a mode flag: a single decay is just
-  `n_sweeps == 1`, but `energy = hc/t` is meaningless and divides by zero at
-  `t = 0`, so a mode flag would leave a third of the public API conditionally
-  meaningful. It has no `spectra` attribute **on purpose**, so a TRPL sweep handed
-  to a spectral plot raises instead of drawing time as wavelength.
-- **The TRPL metadata companion is evidence, not the source.** Parameters come
-  from each data file's own snapshot, contemporaneous with its decay, so a sweep
-  loads without the companion at all. The companion supplies `n_declared_sweeps`
-  (an aborted sweep is then visible) and its table is exposed as
-  `declared_parameters`. Its values are **deliberately not** cross-checked row by
-  row: it is written seconds after the last decay, so drifting channels genuinely
-  disagree — the leakage currents and `Fianium_Select_A6` do, while the swept
-  gates agree to seven figures. Nothing in the file says which channels are
-  stable, so a value check would fire on every real sweep, which is how warnings
-  get ignored. Don't add one back.
+**Settled — don't re-litigate, and don't "helpfully" restore.** Each line is a
+decision; the argument for it is in the audit under the ID given.
+
+- `DeviceGeometry.optical_thickness` is **deleted**; do not reinstate it. Optics
+  code needs dispersive `n(λ)`, not `EPS_TMDC`. (A2)
+- `_slabs()` returns `(d, ε)` **tuples**, not `StackLayer` — wrapping an hBN flake
+  would assert a false `n_layers`. (A2)
+- Annotate a laser spot with `_draw_laser_circle`, never a hand-built
+  `patches.Circle`. Two drawers remain to unify. (A3, D2)
+- `spectra_type=` is **required, keyword-only, no default**. (G1)
+- An undeclared `sweep=` means the sweep **index** — never an auto-detected
+  parameter. (G1)
+- `gate_axis` / `gate_axis_label` stay as aliases until `plot_pl_map_Vab_scan` is
+  updated. (G1, E12)
+- `SPECTROSCOPY_TYPES` lives in `constants.py`. One vocabulary — don't fork it. (G1)
+- One loader class reads both CSV and HDF5; don't add a second for HDF5. (G2)
+- HDF5 stores no derived arrays, and never replays corrections on read. (G2)
+- `AttoCubeTRPLSweep` stays a separate class and has no `spectra` attribute. (G3)
+- No row-by-row value check against the TRPL metadata companion. (G4)
+- The `AttoCubePLVabScan` shim raises `FutureWarning`, not `DeprecationWarning`. (G1)
+- Background is subtracted in wavelength space **before** the Jacobian. (G5)
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object

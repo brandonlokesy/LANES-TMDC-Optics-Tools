@@ -1322,24 +1322,31 @@ class _AttoCubeSweep:
             normal case for a gate or power sweep.
         """
         n = self.n_sweeps
-        if n < 4:
+        if n < 4: # Checks if less than 4 points -- not a grid sweep
             return None
 
         counts = {}
         for label in self.varying_parameters(rtol=rtol):
             arr = self.parameters[label]
+            # Find finite values, then find unique values, then count the unique values
             n_unique = np.unique(arr[np.isfinite(arr)]).size
             if 1 < n_unique < n:
+                # If n_unique is more than 1 but less than n, it could be a sweep grid
                 counts[label] = n_unique
 
         for inner, n_inner in counts.items():
             for outer, n_outer in counts.items():
                 if inner == outer or n_inner * n_outer != n:
+                    # If inner loop = outer loop, or the n_inner * n_outer does not give the total sweep length, skip
                     continue
                 values = self.parameters[inner]
                 # The fast axis runs through all its values, then starts over.
+                # Check if the candidate inner axis has a repeat every n_inner points as expected from a flattened raster
                 if (np.unique(values[:n_inner]).size == n_inner
                         and np.isclose(values[0], values[n_inner])):
+                        # Take the first n_inner values, find unique values and count them.
+                        # If it equals n_inner, the first block contains all distinct values of the inner axis with no repeats yet
+                        # Then check if number at value[0] is close to values[n_inner] to see if the inner axis repeats after n_inner points
                     return SweepGrid(inner, n_inner, outer, n_outer)
         return None
 
@@ -1371,7 +1378,9 @@ class _AttoCubeSweep:
     # --- Dunder methods ----------------------------------------------------
 
     def __getitem__(self, label: str) -> np.ndarray:
-        """Sugar for :meth:`get_parameter` — ``scan["Galvo_X"]``."""
+        """Sugar for :meth:`get_parameter`.
+        Makes scan.get_parameter('V_A') equivalent to scan['V_A'].
+        """
         return self.get_parameter(label)
 
     def _repr_axis_lines(self, w: int) -> list:
@@ -1449,7 +1458,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     """
     A sweep of spectra from the AttoCube cryogenic confocal.
 
-    One spectrum per sweep point, over *any* scanned parameter — displacement
+    One spectrum per sweep point, over any scanned parameter — displacement
     field, a single gate, excitation power, sample position, or a raw
     instrument channel.  What was measured (:attr:`spectra_type`) and what was
     swept (:attr:`sweep_type`) are recorded metadata rather than assumptions
@@ -1459,7 +1468,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     Two input formats, dispatched on the file suffix:
 
     * ``.csv`` — the raw AttoCube export.  The **first column** is a row label
-      (e.g. ``"V_A"``), every **sweep point** occupies four consecutive columns
+      (e.g. ``"V_A"``, ``V_B``), every **sweep point** occupies four consecutive columns
       ``[Par, Wavelength, ExpROI1, ExpROI2]``, and the file is padded with
       empty columns beyond the last sweep point.
     * ``.h5`` / ``.hdf5`` — written by :meth:`to_hdf5`.  Carries the parameter
@@ -1481,7 +1490,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     spectra_type : str
         What the spectra *are*, one of
         :data:`~tmdc_optics_tools.constants.SPECTROSCOPY_TYPES`
-        (``"PL"``, ``"R"``, ``"RC"``, ``"T"``, ``"A"``, ``"Raman"``, ``"TRPL"``).
+        (``"PL"``, ``"R"``, ``"RC"``, ``"T"``, ``"A"``, ``"TRPL"``).
         Required for CSV input; optional when reading HDF5, where it is taken
         from the file unless given (a mismatch warns and the argument wins).
         Keyword-only and deliberately without a default: the value is written
@@ -1493,7 +1502,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         ``"power"``, ``"piezo_x"``, ``"piezo_y"``) or any raw CSV row
         label (``"Galvo_Y"``, ``"T"``, …), which is then used in its file
         units.  ``None`` (default) means **no axis is assumed**: the sweep axis
-        becomes the sweep index.  Use :meth:`varying_parameters` to see which
+        becomes the sweep index (for sweep of length N, [1,2,3,…,N]).  Use :meth:`varying_parameters` to see which
         rows actually changed before committing to one.
     sweep_label, sweep_unit : str, optional
         Override the axis label / unit for the resolved sweep.  Needed mainly
@@ -1543,6 +1552,10 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         ``False``: it redistributes spectral weight, so it is opt-in, and peak
         *positions* do not need it.  It is **never** applied to
         :attr:`energy_contrast`: the factor cancels identically in a ratio.
+        Warns when ``True`` and no background was supplied — neither
+        *bg_region_nm* / *bg_region_eV* nor *bg_spectrum* — because the λ²
+        factor scales a dark pedestal into a curved baseline instead of
+        leaving it a flat offset.
     curated_labels : dict, optional
         Override which CSV row backs a curated attribute, e.g.
         ``{"v_top": "V_B", "v_bot": "V_A"}`` for the opposite gate wiring.
@@ -1569,7 +1582,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Spectra remapped to the energy axis with **no** Jacobian correction,
         regardless of *apply_jacobian*.  Useful for comparing raw counts
         on the energy axis or for peak-position fitting where the density
-        correction is undesirable.  No background subtraction.
+        correction is undesirable. No background subtraction.
     energy_spectra_bg : np.ndarray or None, shape (n_pixels, n_sweeps)
         Background-subtracted version of *energy_spectra*.  Background is
         removed in wavelength space *before* the Jacobian is applied, so
@@ -1811,6 +1824,23 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         else:
             self.bg_region_nm = bg_region_nm      # may be None
 
+        # The Jacobian multiplies by λ², so it turns a constant dark pedestal
+        # into a curve rather than leaving it as an offset a fit can absorb.
+        # Both background mechanisms run in wavelength space below, so either
+        # one satisfies this; neither means the pedestal is already curved by
+        # the time any caller sees energy_spectra.
+        if apply_jacobian and self.bg_region_nm is None and self.bg_spectrum is None:
+            warnings.warn(
+                "apply_jacobian=True with no background subtraction: pass "
+                "bg_region_nm / bg_region_eV or bg_spectrum. The Jacobian "
+                "multiplies by λ²/hc, so an un-subtracted dark pedestal B "
+                "becomes B·λ²/hc — a baseline curving up towards the red "
+                "rather than a flat offset, which inflates fitted amplitude "
+                "and FWHM. energy_spectra_pre_jacobian holds the uncorrected "
+                "array.",
+                UserWarning, stacklevel=3,
+            )
+
         # --- Build energy axis and energy-space spectra ---
         self.energy       = HC_EV_NM / self.wavelength              # eV, descending at this point
         _sort_idx         = np.argsort(self.energy)                 # ascending energy sort index
@@ -1832,8 +1862,9 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
             self.energy_spectra_pre_jacobian = self.energy_spectra
 
         # --- Wavelength-space corrections, in the order the physics requires ---
-        # 1. the bg_region window mean, 2. a measured background spectrum. Both
-        # must precede any ratio: a pedestal in either array biases a contrast
+        # 1. the bg_region window mean
+        # 2. a measured background spectrum. 
+        # Both must precede any ratio: a pedestal in either array biases a contrast
         # non-linearly, and both must precede the Jacobian (a flat pedestal B
         # becomes B·λ²/hc — curved, not flat — in energy space).
         corrected = self.spectra
@@ -1912,7 +1943,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     @classmethod
     def _decode_csv(cls, path) -> dict:
         """
-        Decode a raw AttoCube spectral export.
+        Decode a raw AttoCube spectral sweep export.
 
         Each sweep point occupies a ``[Par, Wavelength, ExpROI1, ExpROI2]``
         block, so every field is read as a stride-``block_width`` column slice.
@@ -1932,12 +1963,13 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         raw = pd.read_csv(path, header=0, index_col=0, low_memory=False)
         row_labels = list(raw.index)
 
-        # Keep only the declared block columns; the exporter appends as many
-        # unnamed empty columns again after them.  Slicing here rather than via
-        # read_csv(usecols=...) is deliberate and measured: on the 314 MB raster
-        # usecols costs 13.8 s against 10.7 s for reading everything and slicing,
-        # because filtering 16 728 of 33 457 columns during the parse is dearer
-        # than parsing them and throwing them away.
+        # The code reads the whole CSV first and then keeps only the columns that
+        # belong to the declared sweep blocks. That choice is faster than asking 
+        # pandas.read_csv(..., usecols=...) to pre-filter a very large number of columns, 
+        # because dropping thousands of unused columns during parsing is more expensive 
+        # than parsing them and discarding them afterward.
+
+        # Remove trailing pad
         d = raw.to_numpy(dtype=float)[:, :n_declared * width]
 
         # One column index per sweep point, for each field of the block.
@@ -2025,6 +2057,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
     def _validate_payload(self) -> None:
         """Check the decoded arrays are self-consistent before anything uses them."""
+        # Check that the spectra is 2D and has at least one sweep point
         if self.spectra_roi1.ndim == 2 and self.spectra_roi1.shape[1] == 0:
             # Every block was zero-filled: the file carries a parameter table and
             # no measurement.  That is the metadata companion written alongside a
@@ -2665,6 +2698,9 @@ class SingleSpectrum:
         If ``True``, apply the ``dλ/dE = λ²/hc`` density correction when
         building :attr:`energy_spectra`, conserving integrated intensity
         under the wavelength → energy change of variables. Default ``False``.
+        Warns when ``True`` and no background region was supplied, because the
+        λ² factor scales a dark pedestal into a curved baseline instead of
+        leaving it a flat offset.
     bg_region_nm : tuple of (wl_min, wl_max), optional
         Wavelength range in **nm** used to estimate the background level.
         The mean counts in this window are subtracted in wavelength space
@@ -2734,6 +2770,18 @@ class SingleSpectrum:
                                  HC_EV_NM / bg_region_eV[0])   # E_min → λ_max
         else:
             self.bg_region_nm = bg_region_nm                   # may be None
+
+        # λ² scaling turns a constant dark pedestal into a curve, so the
+        # subtraction below has to happen for energy_spectra to mean anything.
+        if apply_jacobian and self.bg_region_nm is None:
+            warnings.warn(
+                "apply_jacobian=True with no background subtraction: pass "
+                "bg_region_nm or bg_region_eV. The Jacobian multiplies by "
+                "λ²/hc, so an un-subtracted dark pedestal B becomes B·λ²/hc — "
+                "a baseline curving up towards the red rather than a flat "
+                "offset, which inflates fitted amplitude and FWHM.",
+                UserWarning, stacklevel=2,
+            )
 
         self.wavelength = arr[0]                      # nm, ascending
         self.spectra    = arr[1].astype(float)        # raw counts, wavelength space

@@ -223,7 +223,10 @@ def test_bg_spectrum_alone_populates_energy_spectra_bg(csv_and_ref):
     assert np.allclose(s.spectra[:, 0], [_roi1(r, 0) for r in range(N_PIXELS)])
 
 
+@pytest.mark.filterwarnings("ignore:apply_jacobian=True with no background")
 def test_jacobian_never_applied_to_contrast(csv_and_ref):
+    # No background here on purpose: this checks the ratio, and the missing-
+    # background warning is asserted on in test_jacobian_background.
     csv, ref = csv_and_ref
     off = AttoCubeSpectralSweep(str(csv), spectra_type="R", reference=str(ref),
                                 apply_jacobian=False)

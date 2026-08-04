@@ -233,8 +233,9 @@ def test_curated_parameters_registry(scan):
     assert reg["v_top"] == ("V_A", 1.0, "V")
     assert reg["power"] == ("Excitation Power", 0.303e6, "µW")
     assert reg["Ich1"] == ("I_A", 1e9, "nA")
-    assert reg["scanner_x"] == ("Scanner X", 1.0, "µm")
-    assert reg["scanner_y"] == ("Scanner Y", 1.0, "µm")
+    # The scanners are piezos; the rows carry drive voltage, not a distance.
+    assert reg["scanner_x"] == ("Scanner X", 1.0, "V")
+    assert reg["scanner_y"] == ("Scanner Y", 1.0, "V")
 
 
 def test_scanner_position_properties(scan):
@@ -346,11 +347,20 @@ def test_unknown_sweep_lists_both_registries(csv_path):
     assert "Galvo_X" in str(exc.value)          # rows in this file
 
 
-def test_position_sweep_uses_scanner_row(csv_path):
+def test_piezo_sweep_uses_scanner_row(csv_path):
     s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
-                              sweep="position_y")
+                              sweep="piezo_y")
     assert np.allclose(s.sweep_axis, PARAMS["Scanner Y"])
-    assert s.sweep_axis_label == r"$y$ (µm)"
+    assert s.sweep_axis_label == r"Piezo $y$ (V)"
+
+
+def test_old_position_sweep_key_is_refused_with_the_new_name(csv_path):
+    # No shim for the rename: the unknown-key path lists the valid types, so the
+    # error hands back the name that replaced it.
+    with pytest.raises(ValueError) as exc:
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              sweep="position_y")
+    assert "piezo_y" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------

@@ -485,8 +485,11 @@ _SWEEP_TYPES = {
     "top_voltage"    : ("v_top",     r"$V_\mathrm{top}$",  "V"),
     "bottom_voltage" : ("v_bot",     r"$V_\mathrm{bot}$",  "V"),
     "power"          : ("power",     "Power",              "µW"),
-    "position_x"     : ("scanner_x", r"$x$",               "µm"),
-    "position_y"     : ("scanner_y", r"$y$",               "µm"),
+    # The scanners are piezos and the rows carry their drive voltage, so these
+    # two axes are in V.  Converting to a distance needs a per-stage µm/V
+    # calibration the file does not contain; pass one via ``curated_scales``.
+    "piezo_x"        : ("scanner_x", r"Piezo $x$",         "V"),
+    "piezo_y"        : ("scanner_y", r"Piezo $y$",         "V"),
 }
 
 # Which curated rows each sweep type depends on.  Checked at load time so a
@@ -497,8 +500,8 @@ _SWEEP_REQUIRES = {
     "top_voltage"    : ("v_top",),
     "bottom_voltage" : ("v_bot",),
     "power"          : ("power",),
-    "position_x"     : ("scanner_x",),
-    "position_y"     : ("scanner_y",),
+    "piezo_x"        : ("scanner_x",),
+    "piezo_y"        : ("scanner_y",),
 }
 
 # Recognised input formats, dispatched on the file suffix.
@@ -576,12 +579,12 @@ def _read_block_layout(path) -> dict:
         names match no known layout.
     """
     with open(path, "r") as fh:
-        header = fh.readline()
+        header = fh.readline() # Reads the header
         # Only whether a third row exists matters, and bounding the read keeps this
         # cheap on a 300 MB export.  The count is therefore not the file's row
         # count and must not be reported as one.
-        two_rows_only = sum(1 for _, line in zip(range(2), fh) if line.strip()) < 2
-    names = [name.strip() for name in header.split(",")]
+        two_rows_only = sum(1 for _, line in zip(range(2), fh) if line.strip()) < 2 # Reads the next two rows -> returns number of non-empty rows
+    names = [name.strip() for name in header.split(",")] # Splits into the column names
 
     # Every block starts with a Par column, so the Par positions give both the
     # block count and the stride — no arithmetic on the total column count.
@@ -609,12 +612,14 @@ def _read_block_layout(path) -> dict:
         )
 
     block_width = (par_at[1] - par_at[0]) if len(par_at) > 1 else (
-        # A single-block file: the block runs to the last non-empty field.
+        # A single-block file: the block runs to the last non-empty field -> gets number of columns after the first block start match
         sum(1 for name in names[par_at[0]:] if name) )
 
+    # Get the column header format for matching with known types
     roles = tuple(
-        _BLOCK_FIELD_INDEX.sub("", name)
-        for name in names[par_at[0]:par_at[0] + block_width]
+        # Iterates over the entries in one block. .sub() removes the underscore (if any) + numeric suffix from the column name.
+        _BLOCK_FIELD_INDEX.sub("", name) 
+        for name in names[par_at[0]:par_at[0] + block_width] 
     )
     if roles not in _BLOCK_LAYOUTS:
         raise ValueError(
@@ -631,7 +636,7 @@ def _read_block_layout(path) -> dict:
     }
 
 
-def _drop_unwritten_blocks(axis_col: np.ndarray, blocks: dict, path) -> tuple:
+def _drop_unwritten_blocks(axis_col: np.ndarray, path) -> tuple:
     """
     Strip blocks the exporter declared and zero-filled but never wrote.
 
@@ -650,15 +655,14 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, blocks: dict, path) -> tuple:
     ----------
     axis_col : np.ndarray, shape (n_axis, n_blocks)
         The Wavelength column of every block.
-    blocks : dict
-        Mapping of field role -> ``(n_axis, n_blocks)`` array, sliced in place.
     path : str or Path
         Used in messages only.
 
     Returns
     -------
     keep : np.ndarray of bool, shape (n_blocks,)
-        Blocks to retain.
+        Blocks to retain. Nothing is modified here; the caller applies this
+        mask to its own arrays.
     n_declared : int
     axis_block : int
         Index of the first block holding a real axis.  Returned separately from
@@ -678,15 +682,16 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, blocks: dict, path) -> tuple:
     # A block counts as written if its axis column holds any real non-zero value.
     # The finiteness test is not decoration: exports carry a trailing NaN row, and
     # `NaN != 0` is True, so a bare `!= 0` marks every block as written.
-    written = np.any(np.isfinite(axis_col) & (axis_col != 0), axis=0)  # (n_blocks,)
+    written = np.any(np.isfinite(axis_col) & (axis_col != 0), axis=0)  # (n_blocks,). Finds truly written blocks by checking if any value in the axis column is finite and non-zero.
     axis_block = int(np.flatnonzero(written)[0]) if written.any() else 0
 
-    if written.all():
+    if written.all(): # Simple case: all written columns are real columns. Keep all.
         return written, n_declared, axis_block
 
     # Strictly trailing means: once written stops, it never resumes.
     n_written = int(written.sum())
-    if not written[:n_written].all():
+    if not written[:n_written].all(): # Finds the first n_written blocks, checks if all of them are true.
+        # If condition not true: something is strange about how the file is written
         warnings.warn(
             f"'{path}' has {n_declared - n_written} zero-filled block(s) "
             f"*interleaved* with real ones (first unwritten at index "
@@ -699,6 +704,7 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, blocks: dict, path) -> tuple:
         )
         return np.ones(n_declared, dtype=bool), n_declared, axis_block
 
+    # If yes, then the real blocks are all at the front and the unwritten ones are strictly trailing.
     return written, n_declared, axis_block
 
 
@@ -761,10 +767,8 @@ class _AttoCubeSweep:
         "power":     ("Excitation Power", 0.303e6,  "µW"),
         "Ich1":      ("I_A",              1e9,      "nA"),
         "Ich2":      ("I_B",              1e9,      "nA"),
-        # Sample-stage position.  Unit assumed µm with scale 1.0 until the raw
-        # AttoCube units are confirmed (adjust the scale here if not microns).
-        "scanner_x": ("Scanner X",        1.0,      "µm"),
-        "scanner_y": ("Scanner Y",        1.0,      "µm"),
+        "scanner_x": ("Scanner X",        1.0,      "V"),
+        "scanner_y": ("Scanner Y",        1.0,      "V"),
     }
 
     # --- Construction helpers ----------------------------------------------
@@ -801,10 +805,11 @@ class _AttoCubeSweep:
         self.spectra_type = self._resolve_spectra_type(spectra_type, meta)
         self.geometry     = geometry if geometry is not None else meta.get("geometry")
 
-        # Curated registry: class defaults, then the file's recorded map, then
-        # explicit constructor overrides.  Curated quantities are scaled @property
-        # views into self.parameters (single source of truth).
+        # First creates a curated registry using defaults
+        # Then updates the registry with values from the file's metadata and any explicit overrides provided during construction.
+        # Raises an error if an unknown curated parameter name is encountered.
         self._curated = {name: list(cfg) for name, cfg in self._CURATED.items()}
+        # Curated config has format (label, scale, unit).  Only label (index 0) and scale (index 1) can be overwritten
         for store, idx in ((meta.get("curated_labels"), 0),
                            (curated_labels,             0),
                            (meta.get("curated_scales"), 1),
@@ -815,7 +820,10 @@ class _AttoCubeSweep:
                         f"'{name}' is not a curated parameter. "
                         f"Valid names: {sorted(self._CURATED)}."
                     )
+                # If a curated parameter is not present in the file's metadata or the provided overrides, it retains its default value from _CURATED.
+                # If idx == 0, we are updating the label; if idx == 1, we are updating the scale. The value is converted to float for scales.
                 self._curated[name][idx] = value if idx == 0 else float(value)
+        # Conver to tuple - not mutable, so that the curated parameters cannot be changed after initialization.
         self._curated = {name: tuple(cfg) for name, cfg in self._curated.items()}
 
         return payload
@@ -842,25 +850,35 @@ class _AttoCubeSweep:
         *signals* maps a display name (as it appears in the export header) to its
         ``(n_points, n_sweeps)`` array, so the error message can name the field
         the caller would recognise.
+
+        - Checks that the measured axis is a non-empty 1-D array.
+        - Checks that every signal array has the same number (the right number) of rows as the axis.
+        - Checks that every signal array has the same number of columns (same array shape).
+        - Checks that every parameter row has exactly one value per sweep point.
         """
+
+        # Checks that the measured axis is a non-empty 1-D array.
         if axis.ndim != 1 or axis.size == 0:
             raise ValueError(
                 f"'{self.path}' yielded an axis of shape {axis.shape}; "
                 f"expected a non-empty 1-D array."
             )
+        # Checks that every signal array has the same number (the right number) of rows as the axis.
         n_points = axis.size
         for name, arr in signals.items():
             if arr.ndim != 2 or arr.shape[0] != n_points:
                 raise ValueError(
                     f"'{self.path}': {name} has shape {arr.shape}, which does "
                     f"not match the {n_points}-point axis. Expected "
-                    f"(n_points, n_sweeps)."
+                    f"({n_points}, {n_sweeps})."
                 )
+        # Checks that every signal array has the same number of columns (same array shape).
         shapes = {name: arr.shape for name, arr in signals.items()}
         if len(set(shapes.values())) > 1:
             raise ValueError(f"'{self.path}': mismatched signal shapes {shapes}.")
 
         n_sweeps = next(iter(signals.values())).shape[1]
+        # Checks that every parameter row has exactly one value per sweep point.
         bad = {lbl: arr.shape for lbl, arr in self.parameters.items()
                if arr.shape != (n_sweeps,)}
         if bad:
@@ -1072,12 +1090,12 @@ class _AttoCubeSweep:
 
     @property
     def scanner_x(self) -> np.ndarray:
-        """Sample-stage X position in µm (per sweep). Unit assumed; see _CURATED."""
+        """Piezo scanner X drive voltage in V (per sweep), not a distance."""
         return self._curated_value("scanner_x")
 
     @property
     def scanner_y(self) -> np.ndarray:
-        """Sample-stage Y position in µm (per sweep). Unit assumed; see _CURATED."""
+        """Piezo scanner Y drive voltage in V (per sweep), not a distance."""
         return self._curated_value("scanner_y")
 
     @property
@@ -1234,7 +1252,9 @@ class _AttoCubeSweep:
             span  = float(np.ptp(finite))
             # Relative to the row's own magnitude: a 1 mV wobble on a 10 V gate
             # is noise, the same wobble on a 2 mV channel is a sweep.
+            # np.finfo(float).tiny is the smallest positive normal float, ~2.2e-308, so that a zero-mean channel does not divide by zero.
             scale = max(abs(float(np.mean(finite))), np.finfo(float).tiny)
+            # Checks if span of the data is bigger than the defined jitter threshold
             if span > rtol * scale:
                 found.append((span / scale, label,
                               (float(finite.min()), float(finite.max()), span)))
@@ -1268,6 +1288,11 @@ class _AttoCubeSweep:
 
         if self.n_sweeps < 3:
             return "dual-gate"
+        # Calculate the Pearson coefficient of the top- and bottom-gate voltages
+        # [0, 0] = correlation of v_top with itself
+        # [0, 1] = correlation of v_top with v_bot
+        # [1, 0] = correlation of v_bot with v_top
+        # [1, 1] = correlation of v_bot with itself
         r = float(np.corrcoef(self.v_top, self.v_bot)[0, 1])
         if r < -0.95:
             return "dual-gate, anti-correlated (field-like)"
@@ -1465,7 +1490,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     sweep : str, optional
         What was scanned.  Either a key of :data:`_SWEEP_TYPES`
         (``"electric_field"``, ``"top_voltage"``, ``"bottom_voltage"``,
-        ``"power"``, ``"position_x"``, ``"position_y"``) or any raw CSV row
+        ``"power"``, ``"piezo_x"``, ``"piezo_y"``) or any raw CSV row
         label (``"Galvo_Y"``, ``"T"``, …), which is then used in its file
         units.  ``None`` (default) means **no axis is assumed**: the sweep axis
         becomes the sweep index.  Use :meth:`varying_parameters` to see which
@@ -1592,8 +1617,9 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     Ich1, Ich2 : np.ndarray, shape (n_sweeps,)
         Gate-channel currents in nA.  Read-only properties (scaled views).
     scanner_x, scanner_y : np.ndarray, shape (n_sweeps,)
-        Sample-stage X / Y position, assumed µm (scale 1.0 until the raw
-        AttoCube unit is confirmed).  Read-only properties (views).
+        Piezo scanner X / Y drive voltage in V — a drive level, not a distance.
+        Converting to µm needs a per-stage µm/V calibration that is not in the
+        file; supply one through *curated_scales*.  Read-only properties (views).
     ef : np.ndarray or None, shape (n_sweeps,)
         Displacement field in mV/nm, or ``None`` if no geometry supplied.
         Read-only property computed from :attr:`v_top` / :attr:`v_bot`.
@@ -1649,10 +1675,10 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     >>> scan.sweep_axis_label
     '$E_F$ (mV/nm)'
 
-    **A power series and a position line-scan — same class, same file layout:**
+    **A power series and a piezo line-scan — same class, same file layout:**
 
-    >>> pwr = AttoCubeSpectralSweep("power.csv", spectra_type="PL", sweep="power")
-    >>> pos = AttoCubeSpectralSweep("line.csv",  spectra_type="PL", sweep="position_y")
+    >>> pwr  = AttoCubeSpectralSweep("power.csv", spectra_type="PL", sweep="power")
+    >>> line = AttoCubeSpectralSweep("line.csv",  spectra_type="PL", sweep="piezo_y")
 
     **Don't know what was swept?  Load it and ask:**
 
@@ -1922,7 +1948,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         # empty, so they survive any NaN-based strip and must go before the
         # arrays are shaped.
         keep, n_declared, axis_block = _drop_unwritten_blocks(
-            d[:, cols["Wavelength"]], cols, path)
+            d[:, cols["Wavelength"]], path)
 
         # Labeled scalar rows are overlaid on the leading pixel rows: row i's
         # value for sweep j sits in that block's Par column.
@@ -2364,7 +2390,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         cols = {role: np.arange(offset, d.shape[1], width)
                 for offset, role in enumerate(blocks["roles"])}
         keep, n_declared, axis_block = _drop_unwritten_blocks(
-            d[:, cols["Wavelength"]], cols, path)
+            d[:, cols["Wavelength"]], path)
 
         parameters = {
             str(label): d[i, cols["Par"]][keep]

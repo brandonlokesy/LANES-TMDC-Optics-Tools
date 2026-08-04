@@ -336,6 +336,63 @@ def test_reference_stored_as_an_array_not_a_path(tmp_path, geom):
     assert np.allclose(again.contrast, scan.contrast)
 
 
+def test_auxiliary_spectra_live_beside_the_signal(tmp_path):
+    # They are measured arrays on the file's own axis, not descriptions of the
+    # measurement, so /auxiliary is their home rather than /metadata.
+    h5py = pytest.importorskip("h5py")
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    ref  = np.linspace(50.0, 60.0, 10)
+    scan = AttoCubeSpectralSweep(str(csv), spectra_type="RC", reference=ref,
+                                 reference_scale=2.0,
+                                 bg_spectrum=np.full(10, 2.0))
+
+    with h5py.File(scan.to_hdf5(tmp_path / "rc.h5"), "r") as hf:
+        assert set(hf["auxiliary"]) == {"bg_spectrum", "reference"}
+        assert "bg_spectrum" not in hf["metadata"]
+        assert "reference"   not in hf["metadata"]
+
+        # The two scalars a contrast depends on hang off the array they qualify,
+        # and the stored values already carry the scaling the name reports.
+        stored = hf["auxiliary/reference"]
+        assert stored.attrs["contrast_mode"] == "contrast"
+        assert stored.attrs["scale_applied"] == 2.0
+        assert np.allclose(stored[()], ref * 2.0)
+        assert "reference_scale" not in hf["metadata"].attrs
+
+
+def test_no_auxiliary_group_when_no_auxiliary_spectra(scan, tmp_path):
+    h5py = pytest.importorskip("h5py")
+    with h5py.File(scan.to_hdf5(tmp_path / "plain.h5"), "r") as hf:
+        assert "auxiliary" not in hf
+
+
+def test_reference_attrs_come_back_as_provenance(tmp_path):
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    ref  = np.linspace(50.0, 60.0, 10)
+    scan = AttoCubeSpectralSweep(str(csv), spectra_type="RC", reference=ref,
+                                 reference_scale=2.0)
+    meta = hdf5.read_sweep(scan.to_hdf5(tmp_path / "rc.h5"))["metadata"]
+    assert meta["contrast_mode"]   == "contrast"
+    assert meta["reference_scale"] == 2.0
+    assert np.allclose(meta["reference"], ref * 2.0)
+
+
+def test_older_major_format_version_is_refused(scan, tmp_path):
+    # A 1.x file kept the auxiliary spectra somewhere this reader does not look,
+    # so a tolerant read would drop a recorded reference without saying so.
+    h5py = pytest.importorskip("h5py")
+    out = scan.to_hdf5(tmp_path / "scan.h5")
+    with h5py.File(out, "r+") as hf:
+        hf.attrs["format_version"] = "1.1"
+
+    with pytest.raises(ValueError, match="format_version"):
+        hdf5.read_sweep(out)
+    with pytest.raises(ValueError, match="format_version"):
+        AttoCubeSpectralSweep(out)
+
+
 def test_read_sweep_returns_the_payload_contract(scan, tmp_path):
     scan.to_hdf5(tmp_path / "scan.h5")
     payload = hdf5.read_sweep(tmp_path / "scan.h5")

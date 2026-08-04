@@ -186,7 +186,12 @@ contents; corrections produce new arrays (`energy_spectra`, `energy_spectra_bg`,
 TODO — provenance not yet recorded, ask before documenting or changing:
 - `power_scale = 0.303e6` ("calibrated by CdG") — when, which objective/filter set,
   does it vary per session?
-- `Scanner X` / `Scanner Y` units (code says "assumed µm, scale 1.0 until confirmed").
+- ~~`Scanner X` / `Scanner Y` units~~ **Answered 2026-08-04: volts.** The scanners
+  are piezos and the rows carry their *drive voltage*, so `scanner_x`/`scanner_y`
+  and the `piezo_x`/`piezo_y` sweep axes are in V, scale 1.0. A distance needs a
+  per-stage µm/V calibration that no file contains — supply it via
+  `curated_scales` rather than assuming one. The sweep keys were `position_*`
+  until this was settled; they are `piezo_*` because the axis is a drive level.
 - `EPS_TMDC["HS"] = 7.5` — unsourced, sits among per-material values. Note it is
   *not* the harmonic mean of a MoSe₂/WSe₂ bilayer (that is 7.299), and it exceeds
   both constituents, so it is not an average of the values above it. Also note that
@@ -595,7 +600,7 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   era. Nothing breaks — `scan.signal_label` and `scan.sweep_axis` exist for them —
   but a plotting pass is owed. See E12.
 - **A declared 1-D sweep on a raster gives a sawtooth axis, silently** (A8).
-  `sweep="position_x"` on the reflectance raster succeeds and returns `Scanner X`
+  `sweep="piezo_x"` on the reflectance raster succeeds and returns `Scanner X`
   repeated 51 times, non-monotonic; `__repr__` prints only min and max so it looks
   fine, and any plot against it overplots 51 times. `sweep_grid()` already detects
   the raster, so the fix is to compare the two and warn. Don't make it an error —
@@ -615,11 +620,11 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   `xlabel`/`ylabel`, `colorbar_label`) and return its artists instead of only
   `result`. Signature change, acceptable pre-adoption. See E11.
 - **An x/y raster gets a grid API, not a `_SWEEP_TYPES` entry.** Asked and settled
-  2026-07-31, so don't re-propose `"position_xy"`: that registry answers *"which 1-D
+  2026-07-31, so don't re-propose a `"piezo_xy"`: that registry answers *"which 1-D
   array of length `n_sweeps` is the sweep axis"*, and `sweep_axis` returns exactly one
   array that plotting calls `.min()`/`.max()` on. A raster has two axes, so there is
   nothing single to return — a tuple breaks the contract, a flat index is already
-  `sweep=None`, and one-of-the-two is already `position_x`/`position_y`. What is
+  `sweep=None`, and one-of-the-two is already `piezo_x`/`piezo_y`. What is
   missing is the **reshape** to `(n_points, n_y, n_x)` plus map plotting, on top of
   the shape `sweep_grid()` already reports. Give it an explicit
   `grid=("Scanner X", "Scanner Y")` declaration, **inner axis first**: detection needs

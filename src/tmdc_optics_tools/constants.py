@@ -1,9 +1,13 @@
 # tmdc_optics_tools/constants.py
 
-from scipy.constants import h,c,e,hbar
+from scipy.constants import h,c,e,hbar,epsilon_0
 
 # ----- Physical constants ----- #
 HC_EV_NM = (h * c / e) * 1e9   # eV·nm
+
+# Re-exported under project names so every module takes them from one place.
+EPS_0    = epsilon_0           # F/m
+E_CHARGE = e                   # C
 
 # ----- Spectroscopy types ----- #
 # Controlled vocabulary for what a spectrum *is*.  Shared by the AttoCube
@@ -24,13 +28,14 @@ SPECTROSCOPY_TYPES = {
 # Axis label for the measured signal, per spectroscopy type: (name, unit).
 # The unit is a separate field, and empty for the dimensionless ratios, which is
 # why this is not simply "<name> (counts)" everywhere.
+
 SIGNAL_LABELS = {
-    "PL":   ("PL intensity",    "counts"),
-    "R":    ("Reflectance",     "counts"),
-    "RC":   (r"$\Delta R/R_0$", ""),
-    "T":    ("Transmission",    "counts"),
-    "A":    ("Absorbance",      ""),
-    "TRPL": ("PL intensity",    "counts"),
+    "PL":   ("PL intensity",          "counts"),
+    "R":    ("Reflected intensity",   "counts"), 
+    "RC":   (r"$\Delta R/R_0$",       ""),
+    "T":    ("Transmitted intensity", "counts"),
+    "A":    ("Absorbance",            ""),
+    "TRPL": ("PL intensity",          "counts"),
 }
 
 # ----- Material dielectric constants ----- #

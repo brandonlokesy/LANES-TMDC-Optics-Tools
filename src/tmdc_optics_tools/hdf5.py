@@ -23,6 +23,7 @@ Layout
     ├── metadata/                  attrs: spectra_type, axis_kind, sweep_type,
     │   │                                 sweep_label, sweep_unit, source_file,
     │   │                                 curated_labels, curated_scales,
+    │   │                                 gates (only if declared),
     │   │                                 + provenance (see below)
     │   └── geometry/              attrs: d_hbn_top, d_hbn_bottom, eps_hbn, label
     │       └── tmdc_stack         structured dataset, one row per layer
@@ -137,7 +138,7 @@ _CLASS_FOR_AXIS_KIND = {
 }
 
 # Keys stored as JSON strings because HDF5 attributes have no mapping type.
-_JSON_ATTRS = ("curated_labels", "curated_scales")
+_JSON_ATTRS = ("curated_labels", "curated_scales", "gates")
 
 # Structured dtype for the TMDC stack: one row per layer, so layer *order* — the
 # physical stacking sequence — is carried by the dataset rather than by dataset
@@ -280,13 +281,21 @@ def write_sweep(
         meta.attrs["sweep_unit"]     = scan.sweep_unit
         meta.attrs["source_file"]    = scan.path
 
-        # The resolved curated map, so an unusual gate wiring or power scale is
-        # restored rather than silently reverting to the class defaults.
+        # The resolved curated map, so an unusual power scale is restored rather
+        # than silently reverting to the class defaults.
         curated = scan.curated_parameters
         meta.attrs["curated_labels"] = json.dumps(
             {name: cfg[0] for name, cfg in curated.items()})
         meta.attrs["curated_scales"] = json.dumps(
             {name: cfg[1] for name, cfg in curated.items()})
+
+        # The channel-to-gate mapping, written *only* when the writing session
+        # declared it.  The curated dump above always carries a resolved label for
+        # both gate rows and so cannot distinguish a declared mapping from a
+        # defaulted one; keeping this separate is what stops a round trip turning
+        # an unstated wiring into a stated one.
+        if scan.gates is not None:
+            meta.attrs["gates"] = json.dumps(scan.gates)
 
         # Provenance of the writing session's loading choices — recorded, and
         # deliberately not replayed on read.  See the module docstring.
@@ -395,7 +404,9 @@ def read_sweep(path) -> dict:
         ``metadata`` : dict of the recorded measurement metadata —
             ``spectra_type``, ``sweep``, ``sweep_label``, ``sweep_unit``, ``roi``,
             ``geometry`` (a rebuilt :class:`DeviceGeometry` or absent),
-            ``curated_labels``, ``curated_scales``, plus the writing session's
+            ``curated_labels``, ``curated_scales``, ``gates`` (the declared
+            channel-to-gate mapping, or ``None`` if the writer never declared
+            one), plus the writing session's
             ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``,
             ``bg_spectrum``, ``reference`` and ``source_files`` as provenance.
 

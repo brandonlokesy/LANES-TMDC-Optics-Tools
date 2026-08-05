@@ -44,6 +44,8 @@ from scipy.optimize import curve_fit
 import matplotlib.patches as patches
 
 from .constants import (
+    E_CHARGE,
+    EPS_0,
     EPS_HBN,
     EPS_TMDC,
     HC_EV_NM,
@@ -433,10 +435,11 @@ class DeviceGeometry:
         above is the one to keep.
 
         The sign convention depends on which physical gate each voltage came
-        from, which is per-session wiring and is not yet recorded per scan.
-        Callers are responsible for mapping their source channels to *v_top* and
-        *v_bot* correctly; transposing them mirrors the field axis and flips the
-        sign of any extracted dipole.
+        from, which is per-session wiring that no instrument file records.
+        Mapping the source channels onto *v_top* and *v_bot* is the caller's
+        responsibility; transposing them mirrors the field axis and flips the
+        sign of any extracted dipole.  The loaders take that mapping as their
+        ``gates`` argument and refuse to guess one.
         """
         if self.d_hbn_top is None and self.d_hbn_bottom is None:
             raise ValueError(
@@ -447,6 +450,112 @@ class DeviceGeometry:
         # eps_2d * E_2d = eps_stack * E_stack, with E_stack = vdiff / d_TOT the
         # uniform field of the equivalent homogeneous slab. 1000 -> mV/nm.
         return 1000.0 * (vdiff / self.d_stack) * (self.eps_stack / self.eps_2d)
+
+    def gate_capacitance(self, gate: str = "bottom") -> float:
+        r"""
+        Geometric capacitance per unit area between a gate and the TMDC, in F/m².
+
+        .. math :: C = \epsilon_0 \epsilon_{hBN} / d_{hBN}
+
+        The TMDC is the counter-electrode of this capacitor, not a slab inside it,
+        so only that gate's hBN enters — neither the TMDC thickness nor
+        :attr:`eps_stack` appears.  Purely geometric: the quantum capacitance of
+        the TMDC and any interface-trap capacitance are in series with this and
+        make the effective value smaller, so a density derived from it is an upper
+        bound.
+
+        Parameters
+        ----------
+        gate : {"bottom", "top"}
+            Which gate. Default ``"bottom"``.
+
+        Returns
+        -------
+        float
+            Capacitance per unit area in F/m².
+
+        Raises
+        ------
+        ValueError
+            If *gate* is not a recognised gate, or if that gate's hBN thickness is
+            ``None`` — there is then no dielectric to define a capacitance.
+
+        See Also
+        --------
+        carrier_density : the same capacitance turned into a sheet density.
+        """
+        thickness = {"top": self.d_hbn_top, "bottom": self.d_hbn_bottom}
+        if gate not in thickness:
+            raise ValueError(
+                f"gate must be one of {sorted(thickness)}, got {gate!r}."
+            )
+        d_nm = thickness[gate]
+        if d_nm is None:
+            raise ValueError(
+                f"Cannot compute the {gate} gate capacitance: d_hbn_{gate} is "
+                f"None, so that gate has no dielectric. Supply its thickness."
+            )
+        return EPS_0 * self.eps_hbn / (d_nm * 1e-9)
+
+    def carrier_density(
+        self, v_top: np.ndarray = None, v_bot: np.ndarray = None,
+        v_ref: float = 0.0,
+    ) -> np.ndarray:
+        r"""
+        Sheet carrier density induced by the gates, in cm⁻².
+
+        .. math :: \Delta n = \frac{1}{e}\sum_i C_i (V_i - V_{ref})
+
+        summed over whichever gates are supplied, since each gate injects charge
+        through its own capacitance.  Signed: positive is electron accumulation
+        for a positive gate voltage.
+
+        **This is a density difference, not an absolute density.** *v_ref* is a
+        gate voltage, not a threshold, so the result is the density induced
+        relative to that gate voltage.  Absolute density needs the threshold at
+        which the channel starts to populate, which comes from a transfer curve or
+        the PL charging step and is in no instrument file — pass it as *v_ref* if
+        you have measured it, and read the result as absolute.
+
+        Parameters
+        ----------
+        v_top, v_bot : array-like, optional
+            Gate voltages in V.  Supply the gates the device has; omitting one
+            leaves it out of the sum rather than treating it as zero.
+        v_ref : float
+            Reference gate voltage in V, subtracted from every supplied gate.
+            Default ``0.0``.
+
+        Returns
+        -------
+        np.ndarray
+            Sheet density in cm⁻², broadcast over the supplied voltages.
+
+        Raises
+        ------
+        ValueError
+            If no gate voltage is supplied, or if a supplied gate has no hBN
+            thickness (see :meth:`gate_capacitance`).
+
+        Notes
+        -----
+        Density and field are independent quantities only in a dual-gated device,
+        where an anti-symmetric sweep tunes the field at fixed density and a
+        symmetric one the reverse.  A single gate is one degree of freedom and
+        moves both together.
+        """
+        supplied = {"top": v_top, "bottom": v_bot}
+        supplied = {gate: v for gate, v in supplied.items() if v is not None}
+        if not supplied:
+            raise ValueError(
+                "carrier_density needs at least one gate voltage — pass v_top, "
+                "v_bot, or both."
+            )
+        # Each gate contributes C_i·(V_i − V_ref) of charge per unit area; summed
+        # and divided by e this is a sheet number density in m^-2, then 1e-4 -> cm^-2.
+        sigma = sum(self.gate_capacitance(gate) * (np.asarray(v, float) - v_ref)
+                    for gate, v in supplied.items())
+        return sigma / E_CHARGE * 1e-4
 
     # --- Dunder methods ----------------------------------------------------
 
@@ -482,6 +591,7 @@ class DeviceGeometry:
 _SWEEP_TYPES = {
     "index"          : (None,        "Sweep index",        ""),
     "electric_field" : ("ef",        r"$E_F$",             "mV/nm"),
+    "carrier_density": ("carrier_density", r"$\Delta n$",  r"cm$^{-2}$"),
     "top_voltage"    : ("v_top",     r"$V_\mathrm{top}$",  "V"),
     "bottom_voltage" : ("v_bot",     r"$V_\mathrm{bot}$",  "V"),
     "power"          : ("power",     "Power",              "µW"),
@@ -503,6 +613,26 @@ _SWEEP_REQUIRES = {
     "piezo_x"        : ("scanner_x",),
     "piezo_y"        : ("scanner_y",),
 }
+
+# Which electrode each gate-backed curated entry belongs to.  Which acquisition
+# channel reached which electrode is per-session wiring that no export records, so
+# these are declared through ``gates=`` and nowhere else; any sweep type requiring
+# one of them therefore needs that declaration too, which _resolve_sweep derives
+# from this table rather than relisting.
+_GATE_ROLE_CURATED = {"top": "v_top", "bottom": "v_bot"}
+_GATE_CURATED      = tuple(_GATE_ROLE_CURATED.values())
+_ROLE_FOR_CURATED  = {attr: role for role, attr in _GATE_ROLE_CURATED.items()}
+
+# Electrodes that gate the TMDC across a dielectric.  A potential *difference*
+# between the two is what defines a displacement field, so a field needs both.
+_GATE_ELECTRODES = tuple(_GATE_ROLE_CURATED)
+
+# Every role a ``gates`` mapping may name.  ``"channel"`` is a contact to the TMDC
+# itself — the ground reference of a doping measurement — not a gate: it sits
+# inside the stack rather than across a dielectric from it, so it carries no
+# thickness and enters no field.  Naming it records that the device is contacted
+# and is what makes a single-gate declaration unambiguous.
+_GATE_ROLES = _GATE_ELECTRODES + ("channel",)
 
 # Recognised input formats, dispatched on the file suffix.
 _CSV_SUFFIXES  = (".csv",)
@@ -761,6 +891,11 @@ class _AttoCubeSweep:
     # ``curated_scales``; everything else in the file is reached through the
     # generic :attr:`parameters` store.  A row listed here that a given file does
     # not contain is not an error — the property raises only if accessed.
+    #
+    # The two gate entries are the exception: their labels come from ``gates``
+    # alone, and the rows below are never read without one.  They are listed here
+    # so that the file's own candidate rows can be named in that error, and so
+    # ``curated_scales`` still reaches them.
     _CURATED = {
         "v_top":     ("V_A",              1.0,      "V"),
         "v_bot":     ("V_B",              1.0,      "V"),
@@ -779,6 +914,7 @@ class _AttoCubeSweep:
         *,
         spectra_type   : str  = None,
         geometry              = None,
+        gates          : dict = None,
         curated_labels : dict = None,
         curated_scales : dict = None,
     ) -> dict:
@@ -805,12 +941,32 @@ class _AttoCubeSweep:
         self.spectra_type = self._resolve_spectra_type(spectra_type, meta)
         self.geometry     = geometry if geometry is not None else meta.get("geometry")
 
+        # Which acquisition channel reached which electrode, and thereby which
+        # electrodes the device has at all.  The explicit argument first, then
+        # whatever an HDF5 file recorded.  ``None`` means the session's wiring was
+        # never stated, and every role-dependent quantity then refuses rather than
+        # guessing.  Resolved before the curated registry because it supplies two of
+        # that registry's labels.
+        self._gates = self._resolve_gates(
+            gates if gates is not None else meta.get("gates")
+        )
+
         # First creates a curated registry using defaults
         # Then updates the registry with values from the file's metadata and any explicit overrides provided during construction.
         # Raises an error if an unknown curated parameter name is encountered.
         self._curated = {name: list(cfg) for name, cfg in self._CURATED.items()}
+        # An HDF5 file dumps the *resolved* label of every curated entry, gates
+        # included.  Those are the writer's bookkeeping rather than a statement of
+        # wiring, so drop them here and let the file's own ``gates`` attribute be
+        # the only thing that can declare a role — a caller passing them is a
+        # different case, and raises below.
+        meta_labels = {
+            name: value
+            for name, value in (meta.get("curated_labels") or {}).items()
+            if name not in _GATE_CURATED
+        }
         # Curated config has format (label, scale, unit).  Only label (index 0) and scale (index 1) can be overwritten
-        for store, idx in ((meta.get("curated_labels"), 0),
+        for store, idx in ((meta_labels,                0),
                            (curated_labels,             0),
                            (meta.get("curated_scales"), 1),
                            (curated_scales,             1)):
@@ -820,13 +976,81 @@ class _AttoCubeSweep:
                         f"'{name}' is not a curated parameter. "
                         f"Valid names: {sorted(self._CURATED)}."
                     )
+                if idx == 0 and name in _GATE_CURATED:
+                    raise ValueError(
+                        f"'{name}' cannot be set through curated_labels. Which "
+                        f"acquisition channel drove which physical gate is "
+                        f"per-session wiring, declared through gates= so that the "
+                        f"mapping is recorded once and travels with the scan: "
+                        f"gates={{'top': '<row>', 'bottom': '<row>'}}."
+                    )
                 # If a curated parameter is not present in the file's metadata or the provided overrides, it retains its default value from _CURATED.
                 # If idx == 0, we are updating the label; if idx == 1, we are updating the scale. The value is converted to float for scales.
                 self._curated[name][idx] = value if idx == 0 else float(value)
+
+        # The declared mapping is what backs the gate roles.  A role left out, or
+        # present with a None row (an electrode tied to ground that no channel
+        # records), leaves its _CURATED entry alone — nothing will read it, because
+        # the raise lives on ``self._gates`` so that a defaulted label can never be
+        # mistaken for a stated one.
+        for role, attr in _GATE_ROLE_CURATED.items():
+            label = (self._gates or {}).get(role)
+            if label is not None:
+                self._curated[attr][0] = label
+
         # Conver to tuple - not mutable, so that the curated parameters cannot be changed after initialization.
         self._curated = {name: tuple(cfg) for name, cfg in self._curated.items()}
 
         return payload
+
+    @staticmethod
+    def _resolve_gates(gates) -> dict:
+        """
+        Validate a declared electrode mapping, or pass ``None`` through.
+
+        The roles *present* describe the device: two gate electrodes is a
+        dual-gated stack, one gate plus a channel contact is a single-gated one.
+        Returns a copy in canonical role order, so that mutating the caller's dict
+        afterwards cannot change what the scan recorded.
+        """
+        if gates is None:
+            return None
+        if not isinstance(gates, dict):
+            raise ValueError(
+                f"gates must be a dict mapping electrode roles to parameter rows, "
+                f"got {type(gates).__name__}. Valid roles: {sorted(_GATE_ROLES)}."
+            )
+
+        unknown = sorted(set(gates) - set(_GATE_ROLES))
+        if unknown:
+            raise ValueError(
+                f"gates names unknown role(s) {unknown}. Valid roles: "
+                f"{sorted(_GATE_ROLES)} — 'top'/'bottom' are gate electrodes, "
+                f"'channel' is a contact to the TMDC itself."
+            )
+
+        electrodes = set(gates) & set(_GATE_ELECTRODES)
+        if not electrodes:
+            raise ValueError(
+                f"gates must name at least one gate electrode "
+                f"({' or '.join(_GATE_ELECTRODES)}); got {sorted(gates)}. A channel "
+                f"contact alone describes no gated device."
+            )
+        # One gate and no channel is ambiguous in the way this argument exists to
+        # remove: it cannot be told from a two-gate device whose other gate was
+        # forgotten.  Requiring the contact makes the single-gate case a statement.
+        if len(electrodes) == 1 and "channel" not in gates:
+            missing = next(e for e in _GATE_ELECTRODES if e not in electrodes)
+            raise ValueError(
+                f"gates names only the {electrodes.pop()} gate, which is ambiguous: "
+                f"a single-gated device is declared by naming its channel contact "
+                f"too — gates={{..., 'channel': '<row>'}}, or 'channel': None when "
+                f"the TMDC is hard-grounded and no row records it. If the device is "
+                f"dual-gated, name the {missing!r} gate as well (None if it is tied "
+                f"to ground). A lone gate with a floating TMDC defines neither a "
+                f"field nor a density."
+            )
+        return {role: gates[role] for role in _GATE_ROLES if role in gates}
 
     def _bind_sweep_axis(self, sweep, sweep_label, sweep_unit) -> None:
         """
@@ -980,17 +1204,43 @@ class _AttoCubeSweep:
 
         if sweep in _SWEEP_TYPES:
             source, default_label, default_unit = _SWEEP_TYPES[sweep]
+            # A sweep resolving through a gate role needs the electrode declared
+            # first, so this comes before the row check: without a mapping there is
+            # no row to look for. Derived from _SWEEP_REQUIRES via
+            # _ROLE_FOR_CURATED rather than listed again, so a new gate-backed
+            # sweep type inherits the requirement.
+            grounded = []
+            for name in _SWEEP_REQUIRES.get(sweep, ()):
+                role = _ROLE_FOR_CURATED.get(name)
+                if role is None:
+                    continue
+                self._require_role(role, f"sweep={sweep!r}")
+                if self._gates[role] is None:
+                    grounded.append(role)
+            if grounded:
+                raise ValueError(
+                    f"sweep={sweep!r} resolves through the "
+                    f"{', '.join(repr(r) for r in grounded)} electrode, which gates "
+                    f"declared as tied to ground — its voltage is zero at every "
+                    f"sweep point, so it is not an axis. Sweep the driven electrode "
+                    f"instead, or use sweep=None for the index."
+                )
             # Fail on the row the *declared* sweep needs, not on every curated
             # row: the requirement follows what the caller said was measured.
             for name in _SWEEP_REQUIRES.get(sweep, ()):
                 csv_label = self._curated[name][0]
                 if csv_label not in self.parameters:
+                    # A gate row is named through gates=, everything else through
+                    # curated_labels; point at whichever one applies.
+                    fix = (f"Re-declare it with gates={{'top': '<row>', "
+                           f"'bottom': '<row>'}}"
+                           if name in _GATE_CURATED else
+                           f"Pass curated_labels={{'{name}': '<row>'}}")
                     raise KeyError(
                         f"sweep={sweep!r} needs the curated parameter '{name}' "
                         f"(row '{csv_label}'), which '{self.path}' does not "
                         f"contain. Available rows: {self.parameter_labels}. "
-                        f"Pass curated_labels={{'{name}': '<row>'}} if it is "
-                        f"under another name."
+                        f"{fix} if it is under another name."
                     )
             if sweep == "electric_field" and self.geometry is None:
                 raise ValueError(
@@ -999,6 +1249,23 @@ class _AttoCubeSweep:
                     "raw gate voltage instead, use sweep='top_voltage' or "
                     "'bottom_voltage'."
                 )
+            # carrier_density sums over whichever gates the device declares, so its
+            # requirement is not a fixed row list and cannot live in
+            # _SWEEP_REQUIRES.  Checked here so it fails at load, like the rest.
+            if sweep == "carrier_density":
+                if self.geometry is None:
+                    raise ValueError(
+                        "sweep='carrier_density' needs a DeviceGeometry for the "
+                        "gate capacitance — pass geometry= with the hBN thickness "
+                        "of each gate. To sweep a raw gate voltage instead, use "
+                        "sweep='top_voltage' or 'bottom_voltage'."
+                    )
+                # Charge has to come from somewhere: a density is defined against
+                # the contact that supplies it, so the contact must be declared.
+                self._require_role("channel", "sweep='carrier_density'")
+                for role in _GATE_ELECTRODES:
+                    if role in self._gates:
+                        self.geometry.gate_capacitance(role)
             kind = ("index", None) if source is None else ("curated", source)
             return (sweep, kind,
                     label if label is not None else default_label,
@@ -1061,17 +1328,138 @@ class _AttoCubeSweep:
         label = self._curated[name][0]
         return self._curated_value(name) if label in self.parameters else None
 
+    @property
+    def signal_label(self) -> str:
+        """
+        Returns the signal label as defined by the spectroscopy type. 
+        """
+        return 
+
     # --- Curated parameter properties (scaled views into self.parameters) ---
 
     @property
+    def gates(self) -> dict:
+        """
+        Which parameter row reached each electrode, or ``None`` if undeclared.
+
+        As given to *gates* at load time, in canonical role order. The roles
+        present describe the device — ``{"top", "bottom"}`` a dual-gated stack,
+        ``{"bottom", "channel"}`` a bottom-gated one with a contacted TMDC — and a
+        value of ``None`` means that electrode is tied to ground with no parameter
+        row recording it.
+
+        ``None`` means the wiring was never stated, in which case :attr:`v_top`,
+        :attr:`v_bot`, :attr:`v_channel`, :attr:`ef` and the gate sweep types all
+        raise.
+        """
+        return dict(self._gates) if self._gates is not None else None
+
+    @property
+    def is_dual_gated(self) -> bool:
+        """
+        Whether *gates* declared both gate electrodes, so a field is defined.
+
+        ``False`` both for a single-gated device and for a scan whose wiring was
+        never declared — in neither case can :attr:`ef` be computed.
+        """
+        return (self._gates is not None
+                and all(role in self._gates for role in _GATE_ELECTRODES))
+
+    def _require_gates(self, what: str) -> None:
+        """Raise unless the electrode mapping was declared at all."""
+        if self._gates is not None:
+            return
+        raise ValueError(
+            f"{what} is defined per electrode, but which acquisition channel "
+            f"reached which electrode was not declared for '{self.path}'. The "
+            f"electrodes can be wired either way round and no export records "
+            f"which, so transposing them mirrors the field axis and flips the sign "
+            f"of any extracted dipole. Pass gates={{'top': '<row>', 'bottom': "
+            f"'<row>'}} for a dual-gated device, or gates={{'bottom': '<row>', "
+            f"'channel': '<row>'}} for a single-gated one; candidate rows in this "
+            f"file: {self._gate_candidates()}. To work in channel terms instead, "
+            f"read the row directly — scan['<row>'], or sweep='<row>' for an axis."
+        )
+
+    def _require_role(self, role: str, what: str) -> None:
+        """Raise unless *role* is one of the electrodes this device declared."""
+        self._require_gates(what)
+        if role in self._gates:
+            return
+        # The device does not have this electrode.  For a gate that means there is
+        # no gate-to-gate potential difference and so no displacement field; the
+        # single knob such a device has controls carrier density instead.
+        extra = (" A single-gated device has no gate-to-gate potential difference "
+                 "and so no displacement field: carrier density is the quantity "
+                 "it controls."
+                 if role in _GATE_ELECTRODES and not self.is_dual_gated else "")
+        raise ValueError(
+            f"{what} needs the {role!r} electrode, which '{self.path}' does not "
+            f"have: gates declared {sorted(self._gates)}.{extra}"
+        )
+
+    def _gate_value(self, role: str) -> np.ndarray:
+        """
+        The voltage on a declared electrode, in V.
+
+        A role declared as ``None`` is tied to ground with no row recording it, so
+        its voltage is zero at every sweep point — that is what the declaration
+        says, not an assumption about a missing row.
+        """
+        label = self._gates[role]
+        if label is None:
+            return np.zeros(self.n_sweeps)
+        attr = _GATE_ROLE_CURATED.get(role)
+        # Gate electrodes go through the curated registry so a curated_scales
+        # override still applies; the channel has no curated entry of its own.
+        return (self._curated_value(attr) if attr is not None
+                else self.get_parameter(label))
+
+    def _gate_candidates(self) -> list:
+        """
+        Rows that plausibly carry an electrode voltage, for the undeclared error.
+
+        The conventional gate rows first if this file has them, then any other row
+        that varied — a row held at a constant 0 V is a grounded electrode and
+        cannot be told from an unused channel, so it is not proposed.
+        """
+        varying = self.varying_parameters()
+        default = [self._CURATED[name][0] for name in _GATE_CURATED
+                   if self._CURATED[name][0] in self.parameters]
+        return default + [lbl for lbl in varying if lbl not in default]
+
+    @property
     def v_top(self) -> np.ndarray:
-        """Top gate voltage in V (per sweep)."""
-        return self._curated_value("v_top")
+        """
+        Top gate voltage in V (per sweep).
+
+        Raises ``ValueError`` unless *gates* declared a top gate and which row
+        reached it; see :attr:`gates`.
+        """
+        self._require_role("top", "v_top")
+        return self._gate_value("top")
 
     @property
     def v_bot(self) -> np.ndarray:
-        """Bottom gate voltage in V (per sweep)."""
-        return self._curated_value("v_bot")
+        """
+        Bottom gate voltage in V (per sweep).
+
+        Raises ``ValueError`` unless *gates* declared a bottom gate and which row
+        reached it; see :attr:`gates`.
+        """
+        self._require_role("bottom", "v_bot")
+        return self._gate_value("bottom")
+
+    @property
+    def v_channel(self) -> np.ndarray:
+        """
+        Voltage on the contact to the TMDC itself, in V (per sweep).
+
+        Zero throughout for a grounded channel, which is the usual case. Raises
+        ``ValueError`` unless *gates* declared a ``"channel"`` role.
+        """
+        self._require_role("channel", "v_channel")
+        return self._gate_value("channel")
 
     @property
     def power(self) -> np.ndarray:
@@ -1104,10 +1492,64 @@ class _AttoCubeSweep:
         Displacement field in mV/nm (per sweep), or ``None`` if no
         :class:`DeviceGeometry` was supplied.  Computed from the curated
         :attr:`v_top` / :attr:`v_bot`.
+
+        Raises ``ValueError`` when a geometry *was* supplied but the device is not
+        :attr:`is_dual_gated` — an undeclared wiring leaves the field's sign
+        undefined, and a single gate has no field at all. Saying no field was
+        computed needs neither, so the ungated case still returns ``None``.
         """
         if self.geometry is None:
             return None
+        # Named explicitly so the error says "ef", not "v_top" — the caller asked
+        # for a field and the reason it cannot have one is about the device.
+        for role in _GATE_ELECTRODES:
+            self._require_role(role, "ef")
         return self.geometry.electric_field(self.v_top, self.v_bot)
+
+    @property
+    def carrier_density(self) -> np.ndarray:
+        """
+        Gate-induced sheet carrier density in cm⁻² (per sweep), or ``None`` if no
+        :class:`DeviceGeometry` was supplied.
+
+        Summed over the gate electrodes *gates* declared, referenced to zero gate
+        voltage — so this is the density induced **relative to 0 V**, not an
+        absolute density, which needs a threshold no instrument file records. Call
+        :meth:`DeviceGeometry.carrier_density` directly with *v_ref* to reference it
+        elsewhere, or to a measured threshold.
+
+        Raises ``ValueError`` unless *gates* declared a ``"channel"`` role: a
+        density is defined against the contact that supplies the charge. Warns when
+        that contact's row varies across the sweep, since the reference then moves
+        with the axis and is not accounted for.
+        """
+        if self.geometry is None:
+            return None
+        self._require_role("channel", "carrier_density")
+
+        # The density is referenced to the contact, so a contact that is itself
+        # being driven moves the reference under the axis.  Legitimate for a
+        # source-drain bias measurement, wrong for a doping sweep, and the file
+        # cannot tell which — so say what was seen rather than pick.
+        channel_row = self._gates["channel"]
+        if channel_row is not None and channel_row in self.varying_parameters():
+            span = float(np.ptp(self.parameters[channel_row]))
+            warnings.warn(
+                f"carrier_density references the channel contact, but its row "
+                f"'{channel_row}' varies by {span:.4g} V across the sweep, so the "
+                f"reference moves with the axis. The returned density is relative "
+                f"to 0 V on the gates alone and does not account for it. Expected "
+                f"for a source-drain bias; for a doping sweep the channel should "
+                f"be at a fixed potential.",
+                UserWarning, stacklevel=2,
+            )
+
+        # One kwarg per declared gate, keyed by the same v_top / v_bot names
+        # DeviceGeometry takes; a gate the device lacks is left out of the sum
+        # rather than passed as zero.
+        volts = {_GATE_ROLE_CURATED[role]: self._gate_value(role)
+                 for role in _GATE_ELECTRODES if role in self._gates}
+        return self.geometry.carrier_density(**volts)
 
     @property
     def curated_parameters(self) -> dict:
@@ -1266,34 +1708,56 @@ class _AttoCubeSweep:
         """
         How the gates were driven, read off the data.
 
-        ``None`` when the curated gate rows are absent from the file.  Purely
-        descriptive: the correlation sign distinguishes an anti-symmetric
-        (field-like) sweep from a symmetric (doping-like) one, but which physical
-        electrode each channel drove is per-session wiring that no file records
-        — see :meth:`DeviceGeometry.electric_field`.
+        ``None`` when no gate row is available to look at.  Purely descriptive:
+        the correlation sign distinguishes an anti-symmetric (field-like) sweep
+        from a symmetric (doping-like) one.
+
+        Never raises, and never needs *gates*: how many channels moved together is
+        a property of the data, and the correlation is symmetric in the two rows,
+        so the verdict is unchanged by transposing them. Only the wording differs —
+        with a declared mapping a single driven gate is named by its role
+        (``"bottom-gate only"``), and without one by its channel
+        (``"single gate driven ('V_B')"``), because which electrode that channel
+        reached is not in the file.
+
+        A single-gated device reports on its one gate; the channel contact is not
+        a gate and is not included.
         """
-        labels = [self._curated[n][0] for n in ("v_top", "v_bot")]
-        if any(lbl not in self.parameters for lbl in labels):
+        # Read the rows straight from the store rather than through v_top / v_bot,
+        # which require a declared mapping this property deliberately does without.
+        # A grounded electrode (declared None) has no row and cannot be described.
+        if self._gates is not None:
+            rows = {role: self._gates[role] for role in _GATE_ELECTRODES
+                    if self._gates.get(role) is not None}
+        else:
+            rows = {role: self._CURATED[attr][0]
+                    for role, attr in _GATE_ROLE_CURATED.items()}
+        rows = {role: lbl for role, lbl in rows.items() if lbl in self.parameters}
+        if not rows:
             return None
 
         varying = self.varying_parameters()
-        top_var, bot_var = (lbl in varying for lbl in labels)
+        driven  = [role for role, lbl in rows.items() if lbl in varying]
 
-        if not (top_var or bot_var):
+        if not driven:
             return "gates static"
-        if top_var and not bot_var:
-            return "top-gate only"
-        if bot_var and not top_var:
-            return "bottom-gate only"
+
+        # One gate available or one gate driven: describe that gate alone.  Naming
+        # its role needs the declaration; without one, name the channel, which is
+        # true whatever the wiring.
+        if len(rows) == 1 or len(driven) == 1:
+            role = driven[0]
+            if self._gates is None:
+                return f"single gate driven ('{rows[role]}')"
+            return f"{role}-gate only"
 
         if self.n_sweeps < 3:
             return "dual-gate"
-        # Calculate the Pearson coefficient of the top- and bottom-gate voltages
-        # [0, 0] = correlation of v_top with itself
-        # [0, 1] = correlation of v_top with v_bot
-        # [1, 0] = correlation of v_bot with v_top
-        # [1, 1] = correlation of v_bot with itself
-        r = float(np.corrcoef(self.v_top, self.v_bot)[0, 1])
+        first, second = (rows[role] for role in driven[:2])
+        # Pearson coefficient of the two gate channels.  [0, 1] is the cross term;
+        # it is symmetric in the two, so the sign does not depend on the wiring.
+        r = float(np.corrcoef(self.parameters[first],
+                              self.parameters[second])[0, 1])
         if r < -0.95:
             return "dual-gate, anti-correlated (field-like)"
         if r > 0.95:
@@ -1415,17 +1879,29 @@ class _AttoCubeSweep:
 
         # Gate wiring is per-session and unrecorded, so state which row was read
         # as which gate: transposing them flips the sign of any extracted dipole.
+        # Undeclared, say so here rather than anywhere else — this is where someone
+        # looks after loading, and the failure being guarded against is a plot that
+        # looks entirely normal.
         if self.gate_mode is not None:
-            lines.append(
-                f"  {'Gates':<{w}}: {self.gate_mode}  "
-                f"(top ← '{self._curated['v_top'][0]}', "
-                f"bottom ← '{self._curated['v_bot'][0]}')"
-            )
+            if self._gates is not None:
+                # Every declared role, so the device topology is visible too: a
+                # missing 'top' is what makes this a single-gated device.
+                wiring = "(" + ", ".join(
+                    f"{role} ← " + ("grounded" if lbl is None else f"'{lbl}'")
+                    for role, lbl in self._gates.items()
+                ) + ")"
+            else:
+                wiring = ("— wiring not declared; pass "
+                          "gates={'top': ..., 'bottom': ...} for v_top/v_bot/E_F")
+            lines.append(f"  {'Gates':<{w}}: {self.gate_mode}  {wiring}")
 
         # Context the sweep axis does not already show; skip E_F when the field
-        # *is* the swept axis, which the Sweep line has just reported.
+        # *is* the swept axis, which the Sweep line has just reported, and when the
+        # device cannot define one — an undeclared wiring leaves its sign undefined,
+        # a single gate leaves it undefined outright.  A repr must render whatever
+        # state the object is in.
         extra = [("Power", self._curated_or_none("power"), "µW")]
-        if self.sweep_type != "electric_field":
+        if self.sweep_type != "electric_field" and self.is_dual_gated:
             extra.append(("E_F", self.ef, "mV/nm"))
         for label, arr, unit in extra:
             if arr is not None:
@@ -1498,12 +1974,13 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         the session that made it.
     sweep : str, optional
         What was scanned.  Either a key of :data:`_SWEEP_TYPES`
-        (``"electric_field"``, ``"top_voltage"``, ``"bottom_voltage"``,
-        ``"power"``, ``"piezo_x"``, ``"piezo_y"``) or any raw CSV row
+        (``"electric_field"``, ``"carrier_density"``, ``"top_voltage"``,
+        ``"bottom_voltage"``, ``"power"``, ``"piezo_x"``, ``"piezo_y"``) or any raw CSV row
         label (``"Galvo_Y"``, ``"T"``, …), which is then used in its file
         units.  ``None`` (default) means **no axis is assumed**: the sweep axis
         becomes the sweep index (for sweep of length N, [1,2,3,…,N]).  Use :meth:`varying_parameters` to see which
-        rows actually changed before committing to one.
+        rows actually changed before committing to one.  The three gate sweeps
+        name a physical electrode, so they also need *gates*.
     sweep_label, sweep_unit : str, optional
         Override the axis label / unit for the resolved sweep.  Needed mainly
         for raw-row sweeps, whose units the file does not state.
@@ -1556,10 +2033,38 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         *bg_region_nm* / *bg_region_eV* nor *bg_spectrum* — because the λ²
         factor scales a dark pedestal into a curved baseline instead of
         leaving it a flat offset.
+    gates : dict, optional
+        Which parameter row reached each electrode.  The roles *present* describe
+        the device, so this declares its topology as well as its wiring:
+
+        - ``{"top": "V_A", "bottom": "V_B"}`` — dual-gated. :attr:`ef` available.
+        - ``{"bottom": "V_A", "channel": "V_B"}`` — bottom-gated with a contact to
+          the TMDC. One gate is one degree of freedom, so there is no independent
+          field: :attr:`v_top` and :attr:`ef` raise.
+
+        ``"top"`` and ``"bottom"`` are gate electrodes across a dielectric;
+        ``"channel"`` is a contact to the TMDC itself, the ground reference of a
+        doping measurement.  A value of ``None`` means that electrode is tied to
+        ground and no row records it, giving zero at every sweep point.  At least
+        one gate is required, and a lone gate must be accompanied by its
+        ``"channel"`` — one gate with a floating TMDC defines neither a field nor a
+        density, so the declaration would be ambiguous rather than informative.
+
+        The electrodes can be wired either way round and no export records which
+        way, so this is per-session information the file cannot supply.  Without
+        it, :attr:`v_top`, :attr:`v_bot`, :attr:`v_channel`, :attr:`ef` and
+        ``sweep="electric_field"`` / ``"top_voltage"`` / ``"bottom_voltage"`` all
+        raise rather than assume one: transposing two gates mirrors the field axis
+        and flips the sign of any extracted dipole.  Work in channel terms with
+        ``scan["V_A"]`` or ``sweep="V_A"`` if the roles are not needed.
+
+        Recorded on the scan (:attr:`gates`), shown in :func:`repr`, and written
+        into exported HDF5.
     curated_labels : dict, optional
         Override which CSV row backs a curated attribute, e.g.
-        ``{"v_top": "V_B", "v_bot": "V_A"}`` for the opposite gate wiring.
-        Keys are :attr:`_CURATED` names; unknown keys raise.
+        ``{"power": "Laser Power"}``.  Keys are :attr:`_CURATED` names; unknown
+        keys raise, as do ``"v_top"`` and ``"v_bot"`` — those are declared through
+        *gates*, so that one fact has one spelling.
     curated_scales : dict, optional
         Override the scale factor of a curated attribute, e.g.
         ``{"power": 1.0}`` to keep raw power.  Same keys as *curated_labels*.
@@ -1622,9 +2127,20 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Y-axis label for the measured signal, from :attr:`spectra_type` — e.g.
         ``"PL intensity (counts)"``, ``"$\\Delta R/R_0$"``.  Use this instead of
         hardcoding "PL" in a plot that may be handed reflectance.
+    gates : dict or None
+        The declared electrode mapping, or ``None`` if the wiring was never
+        stated.  Read-only property.
+    is_dual_gated : bool
+        Whether *gates* declared both gate electrodes, so a field is defined.
+        ``False`` for a single-gated device and for an undeclared wiring alike.
+        Read-only property.
     v_top, v_bot : np.ndarray, shape (n_sweeps,)
         Top / bottom gate voltages in V.  Read-only properties (scaled views
-        into :attr:`parameters`).
+        into :attr:`parameters`).  Raise unless *gates* declared that electrode.
+    v_channel : np.ndarray, shape (n_sweeps,)
+        Voltage on the contact to the TMDC itself in V, zero throughout for the
+        usual grounded channel.  Raises unless *gates* declared a ``"channel"``.
+        Read-only property.
     power : np.ndarray, shape (n_sweeps,)
         Excitation power in µW.  Read-only property (scaled view).
     Ich1, Ich2 : np.ndarray, shape (n_sweeps,)
@@ -1635,12 +2151,21 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         file; supply one through *curated_scales*.  Read-only properties (views).
     ef : np.ndarray or None, shape (n_sweeps,)
         Displacement field in mV/nm, or ``None`` if no geometry supplied.
-        Read-only property computed from :attr:`v_top` / :attr:`v_bot`.
+        Read-only property computed from :attr:`v_top` / :attr:`v_bot`, so it
+        raises when a geometry was supplied and the device is not
+        :attr:`is_dual_gated` — either because *gates* was not given, or because
+        the device has one gate and therefore no field to report.
+    carrier_density : np.ndarray or None, shape (n_sweeps,)
+        Gate-induced sheet density in cm⁻² relative to zero gate voltage, summed
+        over the declared gates, or ``None`` if no geometry supplied.  Raises
+        unless *gates* declared a ``"channel"``.  Read-only property; see
+        :meth:`DeviceGeometry.carrier_density` for a different reference.
     gate_mode : str or None
         Description of how the gates were driven — ``"dual-gate,
         anti-correlated (field-like)"``, ``"bottom-gate only"``, … — or ``None``
         when the gate rows are absent.  Descriptive, from the data; see
-        :meth:`varying_parameters`.
+        :meth:`varying_parameters`.  Needs no *gates*: without one, a single
+        driven gate is named by its channel rather than by a role.
     source_metadata : dict
         Metadata recorded in the source file, empty for CSV input.  Includes the
         ``apply_jacobian`` / ``bg_region_nm`` of the session that wrote an HDF5
@@ -1679,11 +2204,13 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     --------
     >>> geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
 
-    **A displacement-field PL sweep** (what ``AttoCubePLVabScan`` used to be):
+    **A displacement-field PL sweep.**  The field's sign depends on which channel
+    reached which electrode, so that mapping is stated rather than assumed:
 
     >>> scan = AttoCubeSpectralSweep(
     ...     "myscan.csv", spectra_type="PL",
     ...     sweep="electric_field", geometry=geom,
+    ...     gates={"top": "V_A", "bottom": "V_B"},
     ... )
     >>> scan.sweep_axis_label
     '$E_F$ (mV/nm)'
@@ -1700,12 +2227,34 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     >>> scan.gate_mode
     'dual-gate, anti-correlated (field-like)'
 
-    **Opposite gate wiring**, recorded rather than assumed:
+    **The same device rewired the other way round**, which mirrors the field axis:
 
     >>> scan = AttoCubeSpectralSweep(
     ...     "myscan.csv", spectra_type="PL", sweep="electric_field",
-    ...     geometry=geom, curated_labels={"v_top": "V_B", "v_bot": "V_A"},
+    ...     geometry=geom, gates={"top": "V_B", "bottom": "V_A"},
     ... )
+
+    **A bottom-gated device with the TMDC contacted** — a doping sweep.  One gate
+    is one degree of freedom, so ``ef`` and ``v_top`` raise; sweep the gate itself:
+
+    >>> scan = AttoCubeSpectralSweep(
+    ...     "doping.csv", spectra_type="PL", sweep="bottom_voltage",
+    ...     gates={"bottom": "V_A", "channel": "V_B"},
+    ... )
+    >>> scan.is_dual_gated
+    False
+    >>> scan.gate_mode
+    'bottom-gate only'
+
+    **The same sweep on a density axis**, which is what one gate controls:
+
+    >>> bottom = DeviceGeometry.from_single("WSe2", d_hbn_bottom=46)
+    >>> scan = AttoCubeSpectralSweep(
+    ...     "doping.csv", spectra_type="PL", sweep="carrier_density",
+    ...     geometry=bottom, gates={"bottom": "V_A", "channel": "V_B"},
+    ... )
+    >>> scan.sweep_axis_label
+    '$\\Delta n$ (cm$^{-2}$)'
 
     **Any instrument parameter, and a raw row as the sweep axis:**
 
@@ -1719,10 +2268,11 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
     >>> scan = AttoCubeSpectralSweep(
     ...     "myscan.csv", spectra_type="PL", sweep="electric_field",
-    ...     geometry=geom, bg_region_eV=(1.28, 1.32), apply_jacobian=True,
+    ...     geometry=geom, gates={"top": "V_A", "bottom": "V_B"},
+    ...     bg_region_eV=(1.28, 1.32), apply_jacobian=True,
     ... )
     >>> scan.to_hdf5("myscan.h5")
-    >>> again = AttoCubeSpectralSweep("myscan.h5")   # type, sweep, geometry restored
+    >>> again = AttoCubeSpectralSweep("myscan.h5")   # type, sweep, geometry, gates restored
 
     See Also
     --------
@@ -1753,6 +2303,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         reference_scale : float = None,
         contrast        : str   = "contrast",
         apply_jacobian  : bool  = False,
+        gates           : dict  = None,
         curated_labels  : dict  = None,
         curated_scales  : dict  = None,
         roi             : int   = None,
@@ -1764,7 +2315,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
         # --- Decode, and settle everything independent of the spectral axis ---
         payload = self._decode_and_describe(
-            path, spectra_type=spectra_type, geometry=geometry,
+            path, spectra_type=spectra_type, geometry=geometry, gates=gates,
             curated_labels=curated_labels, curated_scales=curated_scales,
         )
         meta = payload["metadata"]
@@ -2171,7 +2722,12 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
     sweep axis of displacement field when a :class:`DeviceGeometry` is supplied,
     top-gate voltage otherwise — which is what the old ``gate_axis`` did.  The
     old per-channel ``*_label`` / ``power_scale`` arguments are accepted and
-    folded into the new *curated_labels* / *curated_scales* dictionaries.
+    folded into the new *gates* / *curated_labels* / *curated_scales* arguments.
+
+    Assumes ``V_A`` drove the top gate and ``V_B`` the bottom unless
+    *top_gate_label* / *bot_gate_label* say otherwise. That assumption is what
+    :class:`AttoCubeSpectralSweep` refuses to make; it survives here only so that
+    existing scripts keep running unchanged.
 
     .. deprecated::
        Use :class:`AttoCubeSpectralSweep` with an explicit ``spectra_type=`` and
@@ -2209,10 +2765,18 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
         )
 
         labels = {name: value for name, value in (
-            ("v_top", top_gate_label), ("v_bot", bot_gate_label),
             ("power", power_label),
             ("Ich1",  ich1_label),     ("Ich2",  ich2_label),
         ) if value is not None}
+
+        # Both sweeps below resolve through a gate role, which the new API requires
+        # be declared.  State the historical mapping here so scripts written against
+        # this class keep producing the numbers they always did — its FutureWarning
+        # is what asks callers to confirm the wiring rather than inherit it.
+        gates = {
+            "top":    top_gate_label if top_gate_label is not None else "V_A",
+            "bottom": bot_gate_label if bot_gate_label is not None else "V_B",
+        }
 
         super().__init__(
             path,
@@ -2220,6 +2784,7 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
             # The old gate_axis was ef when a geometry was given, else v_top.
             sweep          = "electric_field" if geometry is not None else "top_voltage",
             geometry       = geometry,
+            gates          = gates,
             bg_region_nm   = bg_region_nm,
             bg_region_eV   = bg_region_eV,
             apply_jacobian = apply_jacobian,
@@ -2278,14 +2843,19 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         class name already declares the modality here, whereas a spectral sweep
         may be PL, R, RC, T or A and cannot know which.
     sweep, sweep_label, sweep_unit : str, optional
-        As :class:`AttoCubeSpectralSweep`.  The example 3-point sweep is a
-        displacement-field sweep, so ``sweep="electric_field"`` with a *geometry*
-        gives a field axis.
+        As :class:`AttoCubeSpectralSweep`.  A gate sweep needs a *geometry* for
+        ``"electric_field"``, and *gates* for any of the three.
     geometry : DeviceGeometry, optional
     bg_region_ns : tuple of (t_min, t_max), optional
         **Pre-pulse** time window whose mean is subtracted from every decay —
         the TCSPC equivalent of a spectral background window, and the dark/
         afterpulse floor before the rise.  ``None`` (default) subtracts nothing.
+    gates : dict, optional
+        Which parameter row reached each electrode, e.g.
+        ``{"top": "V_A", "bottom": "V_B"}``.  As
+        :class:`AttoCubeSpectralSweep` — the roles present describe the device, and
+        the declaration is required for :attr:`v_top`, :attr:`v_bot`,
+        :attr:`v_channel`, :attr:`ef` and the gate sweep types.
     curated_labels, curated_scales : dict, optional
     time_rtol : float
         Tolerance for agreement between the per-file time axes.  They are *not*
@@ -2334,7 +2904,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
     >>> geom  = DeviceGeometry.from_single("WSe2", d_hbn_top=53, d_hbn_bottom=46)
     >>> sweep = AttoCubeTRPLSweep(
     ...     "examples/data/TRPL/", sweep="electric_field", geometry=geom,
-    ...     bg_region_ns=(0.0, 1.0),
+    ...     gates={"top": "V_A", "bottom": "V_B"}, bg_region_ns=(0.0, 1.0),
     ... )
     >>> sweep.time.max(), sweep.n_sweeps
     (12.817, 3)
@@ -2365,6 +2935,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         sweep_unit     : str   = None,
         geometry       : DeviceGeometry = None,
         bg_region_ns   : tuple = None,
+        gates          : dict  = None,
         curated_labels : dict  = None,
         curated_scales : dict  = None,
         time_rtol      : float = 1e-4,
@@ -2373,7 +2944,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         self._time_rtol = time_rtol
 
         payload = self._decode_and_describe(
-            path, spectra_type=spectra_type, geometry=geometry,
+            path, spectra_type=spectra_type, geometry=geometry, gates=gates,
             curated_labels=curated_labels, curated_scales=curated_scales,
         )
 

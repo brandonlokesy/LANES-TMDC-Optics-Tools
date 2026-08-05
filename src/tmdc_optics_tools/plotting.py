@@ -285,11 +285,16 @@ def plot_spectrum(
         y = y / y.max()
 
     if label is None:
-        label = (
-            f"$E_F$ = {scan.ef[sweep_index]:.1f} mV/nm"
-            if scan.ef is not None
-            else f"$V_{{top}}$ = {scan.v_top[sweep_index]:.2f} V"
-        )
+        # Fall back to whatever the scan says it swept rather than to a gate
+        # voltage: a gate role needs a declared wiring, and the sweep axis is
+        # already the scan's own answer to "what varied", labelled and in its own
+        # units.  A field needs a geometry and two declared gates, so check the
+        # device first — reading scan.ef without them raises.
+        if scan.is_dual_gated and scan.ef is not None:
+            label = f"$E_F$ = {scan.ef[sweep_index]:.1f} mV/nm"
+        else:
+            label = (f"{scan.sweep_axis_label} = "
+                     f"{scan.sweep_axis[sweep_index]:.4g}")
 
     line, = ax.plot(x, y, label=label, **line_kwargs)
     ax.set_xlabel(xlabel)
@@ -377,7 +382,9 @@ def plot_current(
     ax : matplotlib.axes.Axes, optional
         Must be a standard (non-twin) axes.
     ef_axis : bool
-        Use displacement field on the x-axis if available.
+        Use displacement field on the x-axis when the scan can supply one — it
+        needs both a :class:`DeviceGeometry` and a declared channel-to-gate
+        mapping.  Otherwise the scan's declared sweep axis is used.
     color_ich1, color_ich2, color_power : str
         Matplotlib colours for the respective traces.
 
@@ -391,10 +398,14 @@ def plot_current(
         fig     = ax.get_figure()
         ax_left = ax
 
-    if ef_axis and scan.ef is not None:
+    # A field needs a geometry *and* two declared gate electrodes, so check the
+    # device first — reading scan.ef without them raises.  Otherwise use the scan's
+    # own sweep axis: labelling this "$V_top$" would assert a wiring the scan may
+    # not have been told, or a gate the device may not have.
+    if ef_axis and scan.is_dual_gated and scan.ef is not None:
         x, xlabel = scan.ef, r"$E_F$ (mV/nm)"
     else:
-        x, xlabel = scan.v_top, r"$V_\mathrm{top}$ (V)"
+        x, xlabel = scan.sweep_axis, scan.sweep_axis_label
 
     l1, = ax_left.plot(x, scan.Ich1, color=color_ich1, label=r"$I_\mathrm{ch1}$")
     l2, = ax_left.plot(x, scan.Ich2, color=color_ich2, label=r"$I_\mathrm{ch2}$")

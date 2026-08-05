@@ -1,4 +1,4 @@
-"""
+﻿"""
 Round-trip tests for tmdc_optics_tools.hdf5.
 
 The point of storing metadata alongside the data is that a re-read reproduces the
@@ -21,7 +21,7 @@ from tmdc_optics_tools.loaders import (
     StackLayer,
 )
 
-from test_loaders import N_SWEEPS, PARAMS, make_spectral_csv
+from test_loaders import GATES, N_SWEEPS, PARAMS, make_spectral_csv
 
 
 @pytest.fixture
@@ -40,6 +40,7 @@ def scan(tmp_path, geom):
     make_spectral_csv(csv)
     return AttoCubeSpectralSweep(
         str(csv), spectra_type="PL", sweep="electric_field", geometry=geom,
+        gates=GATES,
     )
 
 
@@ -113,7 +114,8 @@ def test_geometry_with_no_top_hbn_round_trips(tmp_path):
     single = DeviceGeometry(tmdc_stack=[StackLayer("WSe2")],
                             d_hbn_top=None, d_hbn_bottom=50.0)
     scan = AttoCubeSpectralSweep(str(csv), spectra_type="PL",
-                                 sweep="bottom_voltage", geometry=single)
+                                 sweep="bottom_voltage", geometry=single,
+                                 gates=GATES)
     scan.to_hdf5(tmp_path / "single.h5")
     back = AttoCubeSpectralSweep(tmp_path / "single.h5")
 
@@ -129,16 +131,33 @@ def test_curated_overrides_restored(tmp_path, geom):
     make_spectral_csv(csv)
     scan = AttoCubeSpectralSweep(
         str(csv), spectra_type="PL", sweep="electric_field", geometry=geom,
-        curated_labels={"v_top": "V_B", "v_bot": "V_A"},
+        gates={"top": "V_B", "bottom": "V_A"},
         curated_scales={"power": 1.0},
     )
     scan.to_hdf5(tmp_path / "wired.h5")
     back = AttoCubeSpectralSweep(tmp_path / "wired.h5")
 
+    assert back.gates == {"top": "V_B", "bottom": "V_A"}
     assert back.curated_parameters["v_top"][0] == "V_B"
     assert back.curated_parameters["v_bot"][0] == "V_A"
     assert back.curated_parameters["power"][1] == 1.0
     assert np.allclose(back.ef, scan.ef)
+
+
+def test_undeclared_wiring_stays_undeclared_on_read(tmp_path):
+    # The curated dump always carries a resolved label for both gate rows, so
+    # without a separate record a round trip would turn an unstated wiring into a
+    # stated one -- laundering the assumption into provenance.
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    scan = AttoCubeSpectralSweep(str(csv), spectra_type="PL")
+    assert scan.gates is None
+    scan.to_hdf5(tmp_path / "unwired.h5")
+    back = AttoCubeSpectralSweep(tmp_path / "unwired.h5")
+
+    assert back.gates is None
+    with pytest.raises(ValueError, match="not declared"):
+        back.v_top
 
 
 def test_raw_row_sweep_metadata_restored(tmp_path):
@@ -171,7 +190,7 @@ def test_corrections_are_not_replayed_on_read(tmp_path, geom):
     make_spectral_csv(csv)
     corrected = AttoCubeSpectralSweep(
         str(csv), spectra_type="PL", sweep="electric_field", geometry=geom,
-        bg_region_nm=(806.0, 809.0), apply_jacobian=True,
+        gates=GATES, bg_region_nm=(806.0, 809.0), apply_jacobian=True,
     )
     corrected.to_hdf5(tmp_path / "corrected.h5")
     back = AttoCubeSpectralSweep(tmp_path / "corrected.h5")
@@ -190,7 +209,7 @@ def test_stored_spectra_are_raw(tmp_path, geom):
     make_spectral_csv(csv)
     corrected = AttoCubeSpectralSweep(
         str(csv), spectra_type="PL", sweep="electric_field", geometry=geom,
-        bg_region_nm=(806.0, 809.0), apply_jacobian=True,
+        gates=GATES, bg_region_nm=(806.0, 809.0), apply_jacobian=True,
     )
     corrected.to_hdf5(tmp_path / "corrected.h5")
     back = AttoCubeSpectralSweep(tmp_path / "corrected.h5")
@@ -202,7 +221,7 @@ def test_reapplying_corrections_on_read_reproduces_them(tmp_path, geom):
     csv = tmp_path / "scan.csv"
     make_spectral_csv(csv)
     kwargs = dict(spectra_type="PL", sweep="electric_field", geometry=geom,
-                  bg_region_nm=(806.0, 809.0), apply_jacobian=True)
+                  gates=GATES, bg_region_nm=(806.0, 809.0), apply_jacobian=True)
     original = AttoCubeSpectralSweep(str(csv), **kwargs)
     original.to_hdf5(tmp_path / "scan.h5")
     back = AttoCubeSpectralSweep(tmp_path / "scan.h5", **kwargs)
@@ -253,7 +272,8 @@ def test_unknown_suffix_names_the_supported_formats(tmp_path):
 
 def test_trpl_sweep_round_trips(tmp_path):
     # An assembled 4-file directory collapses to one self-describing archive.
-    trpl = AttoCubeTRPLSweep("examples/data/TRPL", bg_region_ns=(0.0, 1.0))
+    trpl = AttoCubeTRPLSweep("examples/data/TRPL", bg_region_ns=(0.0, 1.0),
+                             gates=GATES)
     out  = trpl.to_hdf5(tmp_path / "trpl.h5")
     back = AttoCubeTRPLSweep(out)
 

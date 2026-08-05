@@ -222,22 +222,60 @@ TODO — provenance not yet recorded, ask before documenting or changing:
   quoted as **3.76**, and 3.9 is also the canonical SiO₂ value. Worth checking
   against the table: it propagates into `eps_stack`, though only weakly into
   `electric_field` now that the exact form is used.
-- **Gate polarity is per-session wiring, not a property of the code.** The
-  electrodes can be hooked up in either configuration, so which acquisition channel
-  drove which gate is *not* inferable and must be recorded per scan; the old MATLAB
-  used `dm(4,…)`/`dm(6,…)` with no note of which was which.
-  `electric_field(v_top=, v_bot=)` puts the mapping on the caller by design —
-  transposing them mirrors the field axis and flips the sign of any extracted
-  dipole. The senior's thesis is itself inconsistent here (eq. 3.11 carries a
-  leading minus, 3.12/3.13 do not), so don't inherit its sign.
-  *Partly addressed 2026-07-30:* `AttoCubeSpectralSweep` now **records** the
-  mapping — `curated_labels={"v_top": …, "v_bot": …}`, printed in `__repr__` as
-  `(top ← 'V_A', bottom ← 'V_B')` and written into exported HDF5 — and
-  `gate_mode` reports whether the two gates were driven anti-correlated
-  (field-like) or correlated (doping-like). What is recorded is still the
-  *channel-to-argument* mapping, not the physical wiring: the default remains
-  `V_A`→top, `V_B`→bottom, which is a convention no file confirms. Ask per
-  session; don't add a sign to the physics.
+- ~~**Gate polarity is per-session wiring**~~ **Enforced 2026-08-05 — the code no
+  longer guesses, but you still have to know.** The electrodes can be hooked up in
+  either configuration, so which acquisition channel drove which gate is *not*
+  inferable and must come from the lab notebook per session; the old MATLAB used
+  `dm(4,…)`/`dm(6,…)` with no note of which was which. The senior's thesis is itself
+  inconsistent here (eq. 3.11 carries a leading minus, 3.12/3.13 do not), so don't
+  inherit its sign, and don't add a sign to the physics.
+
+  The loaders now take `gates=` and **refuse** to produce `v_top`, `v_bot`,
+  `v_channel`, `ef`, or a `top_voltage`/`bottom_voltage`/`electric_field` sweep
+  without it — closing E7b, which was opened by exactly this going wrong on a real
+  measurement. The mapping is recorded on the scan (`scan.gates`), printed in
+  `__repr__`, and written into exported HDF5 as its own attribute so a round trip
+  cannot launder an unstated wiring into a stated one. Channel-level work needs no
+  declaration: `scan["V_A"]` and `sweep="V_A"` are unaffected. Details, including
+  what deliberately does *not* raise, are in E7b.
+
+- **`gates` declares device topology, not just wiring.** The roles *present* say
+  what the device is, and what is computable follows (E7c):
+
+  | Declaration | Device | Available |
+  |---|---|---|
+  | `{"top": "V_A", "bottom": "V_B"}` | dual-gated | `ef`, `v_top`, `v_bot` |
+  | `{"bottom": "V_A", "channel": None}` | bottom-gated, TMDC grounded | `carrier_density`, `v_bot`; `ef` raises |
+
+  `"channel"` is a contact to the TMDC itself — **not a gate**: it sits inside the
+  stack, carries no thickness, enters no field, and is excluded from `gate_mode`.
+  A value of `None` means the electrode is hard-grounded with no row recording it.
+  `is_dual_gated` is the one predicate for "a field is defined"; `plotting` branches
+  on it. At least one gate is required, and a lone gate must name its `"channel"`,
+  or a single-gated device could not be told from a forgotten second gate.
+
+  **Do not make `ef` work for a single-gated device.** Its derivation fails twice
+  there — no second equipotential to define `V_BG − V_TG`, and a grounded TMDC *is*
+  the free charge the no-free-charge assumption excludes. One gate is also one
+  degree of freedom, so field and density are locked; independent control is what
+  the dual-gate anti-symmetric sweep buys. See E7c.
+
+**Carrier density** — `DeviceGeometry.gate_capacitance(gate)` is `ε₀ε_hBN/d_hBN`.
+The TMDC is the **counter-electrode**, not a slab inside the capacitor, so neither
+its thickness nor `eps_stack` enters — that is the sign you have reached for the
+wrong tool. `carrier_density` sums `C_i(V_i − V_ref)/e` over the supplied gates,
+signed with electrons positive, in cm⁻².
+
+- **`v_ref` is a gate voltage, not a threshold**, so the result is a density
+  *difference*. Absolute `n` needs the threshold at which the channel populates —
+  a transfer curve or the PL charging step, in no file. Pass it as `v_ref` if
+  measured; don't add a guessed one.
+- Geometric only: quantum and interface-trap capacitance are in series and make the
+  effective value smaller, so this is an **upper bound**.
+- `carrier_density` warns when the declared channel's row varies — the density is
+  referenced to that contact, so a driven contact moves the reference under the
+  axis. Legitimate for a source-drain bias, wrong for a doping sweep, and no file
+  distinguishes them.
 
 ## Design principle — corrections are opt-in
 
@@ -546,8 +584,9 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 **Fixed — don't re-report.** `remove_cosmic_rays` (A1), `DeviceGeometry.eps_hs` /
 `__repr__` and `optical_thickness` (A2), the `animate_real_space_PL_map` laser
 circle (A3), zero-filled blocks loaded as sweep points (A6), the `_CURATED`
-fail-fast (E1), and the 2026-07-30 rewrite — `AttoCubeSpectralSweep`, `hdf5.py`,
-`AttoCubeTRPLSweep` (G1–G4). Diagnosis, fix and tests for each are in the audit.
+fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), and the
+2026-07-30 rewrite — `AttoCubeSpectralSweep`, `hdf5.py`, `AttoCubeTRPLSweep`
+(G1–G4). Diagnosis, fix and tests for each are in the audit.
 
 **Settled — don't re-litigate, and don't "helpfully" restore.** Each line is a
 decision; the argument for it is in the audit under the ID given.
@@ -570,6 +609,25 @@ decision; the argument for it is in the audit under the ID given.
 - No row-by-row value check against the TRPL metadata companion. (G4)
 - The `AttoCubePLVabScan` shim raises `FutureWarning`, not `DeprecationWarning`. (G1)
 - Background is subtracted in wavelength space **before** the Jacobian. (G5)
+- The channel-to-gate mapping is declared through **`gates=` and nowhere else**;
+  `v_top` / `v_bot` are rejected as `curated_labels` keys. One fact, one spelling.
+  (E7b)
+- **`v_top` / `v_bot` / `top_voltage` / `bottom_voltage` keep naming physical
+  roles** — don't rename them to `V_A` / `V_B`. Asked and settled 2026-08-05: the
+  role layer is where the field's sign convention lives, so channel names there
+  would make `electric_field` unambiguous-looking and still wrong half the time,
+  moving the ambiguity out of a recorded mapping and into the researcher's head.
+  Channels are already reachable as raw rows. (E7b)
+- `gate_mode` and `__repr__` **never raise** for an undeclared mapping, and
+  `ef` returns `None` rather than raising when no geometry was supplied. A
+  diagnostic that dies is no diagnostic. (E7b)
+- **`"channel"` is a `gates` role, not a third gate.** Asked and settled
+  2026-08-05: it records the contact that grounds the TMDC, so it makes a
+  single-gate declaration unambiguous and is what a density is referenced to. It
+  is excluded from `gate_mode` and from every field. (E7c)
+- **`carrier_density` returns a density *difference*, referenced to a gate
+  voltage.** Absolute `n` needs a threshold no file records; don't default one.
+  (E7c)
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object

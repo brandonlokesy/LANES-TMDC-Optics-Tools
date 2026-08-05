@@ -96,6 +96,8 @@ The dielectric constant of the TMDC layers alone (excluding hBN) can be called w
 
 These scans are a map of the PL spectra with respect to the voltages A and B applied to the sample. Typically, we apply these voltages to the top and bottom gate to tune the electric field applied to the heterostructure. When the sample geometry is given, the electric field applied to the heterostructure is calculated.
 
+Which channel reached which gate depends on how the sample was connected, and no export file records it — so `AttoCubeSpectralSweep` requires it as `gates={"top": "V_A", "bottom": "V_B"}` and refuses to produce `v_top`, `v_bot` or `ef` without it. Transposing the two mirrors the field axis and flips the sign of any dipole extracted from it. The deprecated `AttoCubePLVabScan` below assumes `V_A`→top / `V_B`→bottom so that older scripts keep running; check it against your wiring before trusting a sign.
+
 ```python
 from tmdc_optics_tools.loaders import AttoCubePLVabScan
 

@@ -22,6 +22,7 @@ Quick start
 >>> geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
 >>> scan = AttoCubeSpectralSweep(
 ...     "myscan.csv", spectra_type="PL", sweep="electric_field", geometry=geom,
+...     gates={"top": "V_A", "bottom": "V_B"},   # which channel reached which gate
 ... )
 >>> print(scan)
 >>> fig, ax, mesh = plotting.plot_spectral_map(scan, x_axis="energy")

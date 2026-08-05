@@ -129,7 +129,7 @@ def plot_spectral_map(
     clim           : tuple = None,
     colorbar       : bool  = True,
     colorbar_label : str   = "PL intensity",
-    rescale_img    : bool  = True,
+    rescale_img    : bool  = False,
 ) -> tuple:
     """
     Plot every spectrum of a sweep as a 2-D map: spectral axis against sweep axis.
@@ -167,7 +167,7 @@ def plot_spectral_map(
         ``" (counts)"`` is appended according to *rescale_img*.  The default
         assumes PL, so a reflectance or contrast map needs one passed.
     rescale_img : bool
-        Rescale intensity to [0, 1] before plotting.
+        Default is `False`. If `True`, rescales intensity to [0, 1] before plotting.
 
     Returns
     -------

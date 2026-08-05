@@ -2131,6 +2131,9 @@ def plot_power_series(
     spectra_source   : str    = "best",
     # --- background subtraction (post-load, in addition to loader bg) ---
     bg_region        : tuple  = None,
+    # --- sweep selection and stacking ---
+    sweep_step       : int    = 1,
+    spectrum_offset  : float  = 0.0,
     # --- colour mapping ---
     cmap             : str    = "viridis",
     power_scale      : str    = "linear",
@@ -2150,7 +2153,7 @@ def plot_power_series(
     peak_marker_lw   : float  = 1.0,
     peak_marker_ls   : str    = "--",
     # --- axes labels ---
-    ylabel           : str    = "PL intensity (counts)",
+    ylabel           : str    = None,
 ) -> tuple:
     """
     Plot a power-series of PL spectra with each line coloured by optical power.
@@ -2201,6 +2204,26 @@ def plot_power_series(
         Additional background region subtracted *after* loading (same units
         as *x_axis*).  Applied on top of any background already baked into
         *spectra_source*.  ``None`` (default) skips this step.
+    sweep_step : int
+        Plot every *sweep_step*-th sweep, starting from the first.  ``1``
+        (default) plots all of them, ``2`` every other one, and so on.  Must
+        be a positive integer.  Thinning the lines does not change the
+        colorbar, which always spans the whole scan's power range.
+    spectrum_offset : float
+        Stack the plotted spectra by adding a cumulative vertical shift, in
+        the units of the plotted array: the first drawn spectrum is shifted by
+        ``0``, the second by ``spectrum_offset``, the *j*-th by
+        ``j * spectrum_offset``.  Negative values stack downward.  ``0.0``
+        (default) draws them overlapping on a shared baseline.
+
+        The shift counts drawn spectra, not sweep indices, so it closes the
+        gaps a *sweep_step* leaves rather than stacking blank space.  It is
+        absolute, so a value that separates one scan will not suit another
+        whose counts differ by orders of magnitude — read a spectrum's peak
+        height off an unstacked plot first.  The y tick *values* are no longer
+        absolute signal once a shift is applied, which *ylabel* reflects; the
+        spacing between them still is.  Hide them with
+        ``ax.set_yticks([])`` if the numbers distract.
 
     Colour mapping
     --------------
@@ -2244,8 +2267,11 @@ def plot_power_series(
 
     Axes
     ----
-    ylabel : str
-        Y-axis label.  Default ``"PL intensity (counts)"``.
+    ylabel : str, optional
+        Y-axis label.  ``None`` (default) takes it from the scan's
+        spectroscopy type, so a reflectance scan is not labelled as PL, and
+        marks the axis as offset and arbitrary when *spectrum_offset* is
+        non-zero.
 
     Returns
     -------
@@ -2255,9 +2281,22 @@ def plot_power_series(
     cb : matplotlib.colorbar.Colorbar or None
         Colorbar object, or ``None`` when *colorbar* is ``False``.
     lines : list of matplotlib.lines.Line2D
-        One Line2D per sweep, in sweep order (same order as ``scan.power``).
+        One Line2D per *drawn* sweep, in sweep order — so ``lines[j]`` is the
+        spectrum taken at ``scan.power[::sweep_step][j]``.  Their y data
+        includes any *spectrum_offset*.
+
+    Raises
+    ------
+    ValueError
+        If *sweep_step* is not a positive integer.
     """
     from .constants import HC_EV_NM  # local import to avoid circular at module level
+
+    if not isinstance(sweep_step, (int, np.integer)) or sweep_step < 1:
+        raise ValueError(
+            f"sweep_step must be a positive integer, got {sweep_step!r}.  "
+            f"Use 1 to plot every sweep, 2 for every other one, and so on."
+        )
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -2296,16 +2335,22 @@ def plot_power_series(
     power_norm_linear = (power - p_min) / max(p_max - p_min, 1e-12)
 
     # --- draw lines --------------------------------------------------------
+    # Two counters, and they differ once sweep_step > 1: i indexes the scan, so
+    # colour and alpha keep tracking each line's own power, while j counts drawn
+    # lines, so the offsets stack contiguously instead of leaving gaps where a
+    # skipped sweep would have been.
     lines = []
-    for i, p in enumerate(power):
-        colour = sm.to_rgba(p)
+    for j, i in enumerate(range(0, len(power), sweep_step)):
+        colour = sm.to_rgba(power[i])
         a = float(alpha_min + (1.0 - alpha_min) * power_norm_linear[i]) \
             if alpha_by_power else float(alpha)
-        y = data[:, i]
+        y = data[:, i] + j * spectrum_offset
         (line,) = ax.plot(x, y, color=colour, lw=lw, alpha=a)
         lines.append(line)
 
         if peak_marker:
+            # argmax is invariant to the additive offset, so the un-shifted
+            # spectrum would give the same position.
             x_peak = x[np.argmax(y)]
             ax.axvline(
                 x_peak,
@@ -2316,6 +2361,17 @@ def plot_power_series(
             )
 
     # --- axes formatting --------------------------------------------------
+    if ylabel is None:
+        if spectrum_offset:
+            # Stacking destroys the absolute scale, so the unit goes.  A
+            # dimensionless signal has none to drop -- signal_label then equals
+            # signal_name -- and is only marked as shifted.
+            has_unit = scan.signal_label != scan.signal_name
+            ylabel = (f"{scan.signal_name} (a.u., offset)" if has_unit
+                      else f"{scan.signal_name} (offset)")
+        else:
+            ylabel = scan.signal_label
+
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
 

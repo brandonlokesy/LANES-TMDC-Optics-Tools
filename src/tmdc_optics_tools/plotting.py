@@ -2065,7 +2065,7 @@ _SPECTRA_SOURCES = {
 }
 
 _SPECTRA_SOURCE_LABELS = {
-    "best"                      : "best available (bg-corrected if set)",
+    "best"                      : "best available (repaired, bg-corrected if set)",
     "raw"                       : "raw counts, wavelength space",
     "energy"                    : "energy axis (Jacobian if configured)",
     "energy_bg"                 : "energy axis, bg-subtracted",
@@ -2091,7 +2091,15 @@ def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
         )
 
     if src == "best":
-        arr = scan.best_energy_spectra if x_axis == "energy" else scan.spectra
+        if x_axis == "energy":
+            arr = scan.best_energy_spectra
+        else:
+            # Wavelength space has no background-corrected array to offer, but a
+            # cosmic-ray repair does live here — and "best" ignoring a declared
+            # one would put spikes on the plot that no other source shows.
+            arr = getattr(scan, "spectra_cr", None)
+            if arr is None:
+                arr = scan.spectra
     elif src == "raw":
         arr = scan.spectra
     else:

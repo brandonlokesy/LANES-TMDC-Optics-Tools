@@ -60,6 +60,8 @@ def make_spectral_csv(
     params      : dict = None,
     zero_blocks : int  = 0,
     interleave  : bool = False,
+    roi1        : np.ndarray = None,
+    wavelength  : np.ndarray = None,
 ) -> None:
     """
     Write a spectral CSV with labeled parameter rows + 2 padding columns.
@@ -69,6 +71,14 @@ def make_spectral_csv(
     params : dict, optional
         Overrides the default :data:`PARAMS` row set, so a test can supply
         awkward labels (e.g. one containing ``/``) without a second builder.
+    roi1 : np.ndarray, shape (n_pixels, N_SWEEPS), optional
+        Overrides the ``ExpROI1`` counts, for a test that needs spectra with
+        structure rather than the default index ramp.  More pixel rows than
+        *params* has labels is fine — the surplus rows are unlabeled, which is
+        what the export does.
+    wavelength : np.ndarray, shape (n_pixels,), optional
+        Wavelength axis to write, defaulting to :data:`WAVELENGTH`.  Give it
+        whenever *roi1* has a different pixel count.
     zero_blocks : int
         Append this many extra *declared* blocks filled entirely with literal
         zeros — what the real exporter does when it over-allocates the header.
@@ -80,6 +90,8 @@ def make_spectral_csv(
     """
     params = PARAMS if params is None else params
     labels = list(params)                          # first len(params) rows
+    wl     = WAVELENGTH if wavelength is None else np.asarray(wavelength, float)
+    n_pixels = wl.size
 
     n_declared = N_SWEEPS + zero_blocks
     header = ["Parameters Labels"]
@@ -89,13 +101,14 @@ def make_spectral_csv(
 
     zeros = ["0.0", "0.0", "0.0", "0.0"]
     lines = [",".join(header)]
-    for r in range(N_PIXELS):
+    for r in range(n_pixels):
         label = labels[r] if r < len(labels) else ""
         par = params[label] if label else np.zeros(N_SWEEPS)
         real = []
         for i in range(N_SWEEPS):
-            real += [f"{par[i]}", f"{WAVELENGTH[r]}",
-                     f"{_roi1(r, i)}", f"{_roi2(r, i)}"]
+            counts = _roi1(r, i) if roi1 is None else roi1[r, i]
+            real += [f"{par[i]}", f"{wl[r]}",
+                     f"{counts}", f"{_roi2(r, i)}"]
         pad = zeros * zero_blocks
         row = [label] + (pad + real if interleave else real + pad)
         row += ["", ""]                            # padding cells

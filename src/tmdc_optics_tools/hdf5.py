@@ -23,7 +23,8 @@ Layout
     ├── metadata/                  attrs: spectra_type, axis_kind, sweep_type,
     │   │                                 sweep_label, sweep_unit, source_file,
     │   │                                 curated_labels, curated_scales,
-    │   │                                 gates (only if declared),
+    │   │                                 gates, cosmic_rays (each only if
+    │   │                                 declared),
     │   │                                 + provenance (see below)
     │   └── geometry/              attrs: d_hbn_top, d_hbn_bottom, eps_hbn, label
     │       └── tmdc_stack         structured dataset, one row per layer
@@ -61,12 +62,14 @@ Everything derivable from what is:
   rather than properties of the measurement.  Writing them would freeze one
   session's choices into the archive, and a later reader could not tell the
   stored array from a raw one.
+* **The cosmic-ray-repaired spectra** — the same argument, and the reason the
+  stored ``spectra`` is the array the source file held.
 * **The sweep axis** — a field axis is ``eps_stack``-weighted arithmetic on
   ``V_A``/``V_B`` and the geometry, all of which are stored.
 
-So ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``, and the ``bg_spectrum``
-/ ``reference`` spectra *are* recorded, but as provenance of the session that
-wrote the file, exposed on read as
+So ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``, ``cosmic_rays``, and
+the ``bg_spectrum`` / ``reference`` spectra *are* recorded, but as provenance of
+the session that wrote the file, exposed on read as
 :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.source_metadata`.  They
 are **not** replayed: re-applying a correction because a file mentions one would
 make loading a decision, which is the one thing loading must not be.  Raw arrays
@@ -138,7 +141,7 @@ _CLASS_FOR_AXIS_KIND = {
 }
 
 # Keys stored as JSON strings because HDF5 attributes have no mapping type.
-_JSON_ATTRS = ("curated_labels", "curated_scales", "gates")
+_JSON_ATTRS = ("curated_labels", "curated_scales", "gates", "cosmic_rays")
 
 # Structured dtype for the TMDC stack: one row per layer, so layer *order* — the
 # physical stacking sequence — is carried by the dataset rather than by dataset
@@ -302,6 +305,10 @@ def write_sweep(
         if scan._LAYOUT_KIND == "spectral":
             meta.attrs["roi"]            = int(scan.roi)
             meta.attrs["apply_jacobian"] = bool(scan.apply_jacobian)
+            # The declaration, not the repaired array: `spectra` is written as the
+            # source file had it, so a reader that wants the repair asks for it.
+            if scan.cosmic_rays is not None:
+                meta.attrs["cosmic_rays"] = json.dumps(scan.cosmic_rays)
             if scan.bg_region_nm is not None:
                 meta.attrs["bg_region_nm"] = np.asarray(scan.bg_region_nm,
                                                         dtype=float)
@@ -408,7 +415,8 @@ def read_sweep(path) -> dict:
             channel-to-gate mapping, or ``None`` if the writer never declared
             one), plus the writing session's
             ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``,
-            ``bg_spectrum``, ``reference`` and ``source_files`` as provenance.
+            ``cosmic_rays``, ``bg_spectrum``, ``reference`` and ``source_files``
+            as provenance.
 
     Raises
     ------

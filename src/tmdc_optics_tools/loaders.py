@@ -27,6 +27,7 @@ AttoCubeLaserReferenceImage
 
 from __future__ import annotations
 
+import inspect
 import re
 import warnings
 from pathlib import Path
@@ -1930,6 +1931,16 @@ class _AttoCubeSweep:
 # AttoCubeSpectralSweep
 # ---------------------------------------------------------------------------
 
+# Accepted keys of the `cosmic_rays=` declaration, read off the function they are
+# forwarded to so the two cannot drift apart as that signature grows.  `spectra`
+# is the array being loaded and `axis` is fixed by this class's
+# (n_pixels, n_sweeps) convention, so neither is the caller's to set — passing an
+# axis would transpose the detection without changing the stored shape.
+_COSMIC_RAY_KEYS = frozenset(
+    inspect.signature(processing.remove_cosmic_rays).parameters
+) - {"spectra", "axis"}
+
+
 class AttoCubeSpectralSweep(_AttoCubeSweep):
     """
     A sweep of spectra from the AttoCube cryogenic confocal.
@@ -1988,6 +1999,20 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Device geometry used to convert gate voltages to a displacement field.
         Without it :attr:`ef` is ``None``, and ``sweep="electric_field"``
         raises.
+    cosmic_rays : dict, optional
+        Opts into cosmic-ray repair, and carries the keyword arguments forwarded
+        to :func:`~tmdc_optics_tools.processing.remove_cosmic_rays` — e.g.
+        ``{"sigma_threshold": 4.0}``, or ``{}`` to accept that function's
+        defaults.  ``None`` (default) leaves the counts alone.  An unknown key
+        raises; ``spectra`` and ``axis`` are not accepted, being the array this
+        loader read and the axis convention it stores it in.
+
+        Runs in wavelength space and **before every other correction**, so it
+        feeds each array below: a spike inside the *bg_region* window would
+        otherwise bias the pedestal estimate, and a spike in either array of a
+        contrast biases the ratio non-linearly.  :attr:`spectra` is left as the
+        file wrote it — the repaired counts are :attr:`spectra_cr` and the pixels
+        replaced are :attr:`cosmic_ray_mask`.
     bg_region_nm : tuple of (wl_min, wl_max), optional
         Wavelength range in **nm** used to estimate the background level.
         The mean counts in this window are subtracted from every sweep
@@ -2080,6 +2105,17 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Photon energy axis in eV (ascending order).
     spectra : np.ndarray, shape (n_pixels, n_sweeps)
         Raw PL counts in wavelength space. Never modified after loading.
+    spectra_cr : np.ndarray or None, shape (n_pixels, n_sweeps)
+        Wavelength-space counts with cosmic rays replaced by local medians, or
+        ``None`` when *cosmic_rays* was not given.  Where it exists it is what
+        every array below is built from, :attr:`contrast` included.
+    cosmic_ray_mask : np.ndarray[bool] or None, shape (n_pixels, n_sweeps)
+        Which pixels :attr:`spectra_cr` replaced, ``None`` when no repair was
+        asked for.  ``cosmic_ray_mask.mean(axis=1)`` localises a detector defect
+        or a narrow spectral feature flagged in most sweeps, which a cosmic ray
+        cannot be.
+    cosmic_rays : dict or None
+        The repair arguments as declared, or ``None``.
     energy_spectra : np.ndarray, shape (n_pixels, n_sweeps)
         Spectra remapped to the energy axis.  Jacobian correction applied
         if *apply_jacobian* is ``True``.  No background subtraction.
@@ -2168,9 +2204,10 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         driven gate is named by its channel rather than by a role.
     source_metadata : dict
         Metadata recorded in the source file, empty for CSV input.  Includes the
-        ``apply_jacobian`` / ``bg_region_nm`` of the session that wrote an HDF5
-        file — provenance only.  Those corrections are **not** replayed on read;
-        the stored spectra are raw, and a correction stays the caller's decision.
+        ``apply_jacobian`` / ``bg_region_nm`` / ``cosmic_rays`` of the session
+        that wrote an HDF5 file — provenance only.  Those corrections are **not**
+        replayed on read; the stored spectra are raw, and a correction stays the
+        caller's decision.  Pass ``cosmic_rays=`` again to repeat a repair.
     curated_parameters : dict[str, tuple]
         Mapping ``attr -> (csv_label, scale, unit)`` documenting which rows are
         promoted to the curated properties above, the scale applied, and the
@@ -2296,6 +2333,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         sweep_label    : str   = None,
         sweep_unit     : str   = None,
         geometry        : DeviceGeometry = None,
+        cosmic_rays     : dict  = None,
         bg_region_nm    : tuple = None,
         bg_region_eV    : tuple = None,
         bg_spectrum            = None,
@@ -2308,10 +2346,22 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         curated_scales  : dict  = None,
         roi             : int   = None,
     ):
+        # Both checks precede the read: an export is large enough that a mistyped
+        # argument should not cost the decode before it is reported.
         if bg_region_nm is not None and bg_region_eV is not None:
             raise ValueError(
                 "Provide at most one of bg_region_nm or bg_region_eV, not both."
             )
+        if cosmic_rays is not None:
+            unknown = set(cosmic_rays) - _COSMIC_RAY_KEYS
+            if unknown:
+                raise ValueError(
+                    f"cosmic_rays received unknown key(s) {sorted(unknown)}. "
+                    f"Accepted: {sorted(_COSMIC_RAY_KEYS)} — these are forwarded "
+                    f"to processing.remove_cosmic_rays, whose 'spectra' and "
+                    f"'axis' are set by the loader. Pass cosmic_rays={{}} to "
+                    f"accept every default."
+                )
 
         # --- Decode, and settle everything independent of the spectral axis ---
         payload = self._decode_and_describe(
@@ -2392,6 +2442,27 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
                 UserWarning, stacklevel=3,
             )
 
+        # --- Cosmic rays, ahead of every other correction ----------------------
+        # First because both of the corrections below read the counts as if they
+        # were signal: a spike inside the bg_region window pulls the pedestal
+        # estimate up, and one in either array of a contrast biases the ratio
+        # non-linearly.  In wavelength space because the 3-point Laplacian the
+        # detection is built on assumes uniform sample spacing, which the detector
+        # axis has and the energy axis does not.
+        self.cosmic_rays = dict(cosmic_rays) if cosmic_rays is not None else None
+        if cosmic_rays is None:
+            self.spectra_cr      = None
+            self.cosmic_ray_mask = None
+        else:
+            self.spectra_cr, self.cosmic_ray_mask = processing.remove_cosmic_rays(
+                self.spectra, axis=0, **cosmic_rays
+            )
+
+        # What every array below is built from: the repaired counts where a repair
+        # was asked for, the file's own otherwise.  `spectra` is never reassigned,
+        # so a repair adds an array rather than replacing one.
+        signal = self.spectra if self.spectra_cr is None else self.spectra_cr
+
         # --- Build energy axis and energy-space spectra ---
         self.energy       = HC_EV_NM / self.wavelength              # eV, descending at this point
         _sort_idx         = np.argsort(self.energy)                 # ascending energy sort index
@@ -2399,7 +2470,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
         # energy_spectra: Jacobian applied (or not), no background subtraction
         self.energy_spectra = self._build_energy_spectra(
-            self.spectra, self.wavelength, _sort_idx, apply_jacobian
+            signal, self.wavelength, _sort_idx, apply_jacobian
         )
 
         # energy_spectra_pre_jacobian: always no Jacobian, no background subtraction.
@@ -2407,18 +2478,18 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         # when apply_jacobian=True so both representations are always available.
         if apply_jacobian:
             self.energy_spectra_pre_jacobian = self._build_energy_spectra(
-                self.spectra, self.wavelength, _sort_idx, apply_jacobian=False
+                signal, self.wavelength, _sort_idx, apply_jacobian=False
             )
         else:
             self.energy_spectra_pre_jacobian = self.energy_spectra
 
         # --- Wavelength-space corrections, in the order the physics requires ---
         # 1. the bg_region window mean
-        # 2. a measured background spectrum. 
+        # 2. a measured background spectrum.
         # Both must precede any ratio: a pedestal in either array biases a contrast
         # non-linearly, and both must precede the Jacobian (a flat pedestal B
         # becomes B·λ²/hc — curved, not flat — in energy space).
-        corrected = self.spectra
+        corrected = signal
         if self.bg_region_nm is not None:
             corrected = subtract_background(
                 corrected,
@@ -2431,8 +2502,10 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
                 corrected, self.bg_spectrum, axis=0)
 
         # energy_spectra_bg: background-corrected, then Jacobian applied (or not).
-        # None when neither background mechanism was used.
-        if corrected is not self.spectra:
+        # None when neither background mechanism was used.  Compared against
+        # `signal`, not `spectra`, so a cosmic-ray repair on its own does not
+        # masquerade as a background subtraction.
+        if corrected is not signal:
             self.energy_spectra_bg = self._build_energy_spectra(
                 corrected, self.wavelength, _sort_idx, apply_jacobian
             )
@@ -2698,6 +2771,12 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
     def _repr_extra_lines(self, w: int) -> list:
         lines = [f"  {'ROI':<{w}}: ExpROI{self._roi}"]
+        if self.cosmic_ray_mask is not None:
+            n_flagged = int(self.cosmic_ray_mask.sum())
+            lines.append(
+                f"  {'Cosmic rays':<{w}}: {n_flagged} pixel"
+                f"{'' if n_flagged == 1 else 's'} replaced"
+            )
         if self.bg_region_nm is not None:
             lines.append(
                 f"  {'BG region':<{w}}: "

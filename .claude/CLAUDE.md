@@ -628,6 +628,11 @@ decision; the argument for it is in the audit under the ID given.
 - **`carrier_density` returns a density *difference*, referenced to a gate
   voltage.** Absolute `n` needs a threshold no file records; don't default one.
   (E7c)
+- **Cosmic-ray repair is a load-time `cosmic_rays=` dict, run first in the
+  wavelength-space chain** — not a plotting argument and not a third flag with its
+  own energy-space arrays. It feeds the background estimate, the contrast and the
+  fits; `spectra` stays the file's own counts, `spectra_cr` holds the repair and
+  `cosmic_ray_mask` says what moved. (E13)
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object

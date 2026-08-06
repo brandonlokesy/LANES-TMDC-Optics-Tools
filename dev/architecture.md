@@ -818,8 +818,20 @@ scan.nearest_index(15.0, axis="top_voltage")
 
 Flat sweeps only, because on a nest an arbitrary quantity matches `n_slow` points or
 one depending on how the scan was driven — the return rank would follow the data
-rather than the call. And because such a quantity need not be monotonic along the
-sweep, `nearest_index` warns when the value found occurs at more than one point.
+rather than the call.
+
+Such a quantity need not label its points individually, so a coordinate can name
+several of them. `nearest_index` **warns** and returns the first, a single `int`
+being its whole contract; `get_spectrum_at` **raises**, because it returns data and
+the API already holds the complete answer — a declared nest gives every match at
+once through `fast=`/`slow=`. The same fact is checked once at load, against
+whatever `sweep=` names:
+
+> **Does the sweep axis give each point its own value?** A map positions its
+> spectra along it, so points sharing a value land on top of each other and only
+> one is drawn. Both quantities of a nest repeat, and so do deliberate repeat
+> measurements — all of them warn, with no grid-detection guard, since
+> `sweep_grid()` sees nothing in a field × power nest.
 
 ---
 

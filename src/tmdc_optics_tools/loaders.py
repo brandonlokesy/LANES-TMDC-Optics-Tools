@@ -978,6 +978,14 @@ def _count_distinct(values: np.ndarray, atol: float) -> int:
     return int(1 + np.count_nonzero(np.diff(ordered) > atol))
 
 
+def _render_indices(indices: np.ndarray, limit: int = 6) -> str:
+    """Render matched sweep positions for a message, capped so it stays readable."""
+    shown = ", ".join(str(i) for i in indices[:limit])
+    if indices.size > limit:
+        return f"{indices.size} sweep points (indices {shown}, …)"
+    return f"{indices.size} sweep points (indices {shown})"
+
+
 def _nest_shape(fast: np.ndarray, slow: np.ndarray, n_sweeps: int) -> tuple:
     """
     Return ``(n_fast, n_slow)`` if *fast* runs to completion inside *slow*.
@@ -1290,44 +1298,53 @@ class _AttoCubeSweep:
         property that the sweep resolution has already checked the rows for.
         """
         self._nesting = self._resolve_nesting(fast_sweep, slow_sweep)
-        self._warn_if_sweep_is_sawtooth()
+        self._warn_if_sweep_axis_repeats()
 
-    def _warn_if_sweep_is_sawtooth(self) -> None:
+    def _warn_if_sweep_axis_repeats(self) -> None:
         """
-        Warn when the declared sweep axis runs the same values over and over.
+        Warn when the declared sweep axis does not give each point its own value.
 
-        A raster flattened into one file leaves its fast axis non-monotonic, and
-        ``__repr__`` prints only the endpoints — so nothing announces it, while
-        every plot against that axis overplots one row per point of the outer
-        axis and every fit treats those rows as repeat measurements of one
-        position.  Not an error: one axis of a raster is a legitimate thing to
-        ask for when slicing a single row.
+        The sweep axis is what a map positions its spectra along, so points
+        sharing a value land on top of each other and only one of them is drawn.
+        ``__repr__`` prints the endpoints and reads perfectly well either way, so
+        nothing else announces it.
+
+        Both ways a flattened nest does this are caught: the inner quantity
+        restarts every row and the outer holds still through one, and both leave
+        repeats.  Repeat measurements at each setting collapse a map the same
+        way, and are warned about for the same reason.
+
+        Not an error — one quantity of a nest is a legitimate axis when the
+        caller means to slice, and the declaration is theirs to make.
         """
         if self.sweep_type == "index":
             return
         axis   = self.sweep_axis
         finite = axis[np.isfinite(axis)]
-        if finite.size < 3:
+        if finite.size < 2:
             return
-        step = np.diff(finite)
-        if np.all(step >= 0) or np.all(step <= 0):
+        n_distinct = _count_distinct(finite, _axis_atol(finite))
+        if n_distinct >= finite.size:
             return
 
-        # Only a nest explains a sawtooth; without one the axis is simply
-        # unordered, which is the caller's business and not this warning's.
+        # For the message only: naming the nest, when there is one to name, turns
+        # "this is wrong" into "here is what to use instead".
         structure = self._nesting if self._nesting is not None else self.sweep_grid()
-        if structure is None:
-            return
+        if structure is not None:
+            fix = (f" These points are a 2-D nest ({structure}) — address it with "
+                   f"as_grid() and get_spectrum_at(fast=..., slow=...).")
+        else:
+            fix = (" If these points are a nest, declare it with fast_sweep= and "
+                   "slow_sweep=; if they are repeat measurements at each setting, "
+                   "sweep=None gives the flat index.")
 
         unit = f" {self._sweep_unit}" if self._sweep_unit else ""
         warnings.warn(
-            f"sweep={self.sweep_type!r} is not monotonic in '{self.path}': it "
-            f"runs {finite.min():.4g} → {finite.max():.4g}{unit} repeatedly, "
-            f"because this sweep is a flattened 2-D nest ({structure}). Plots "
-            f"against it will overplot, and fits will read repeated rows as "
-            f"repeat measurements of one point. Use the nest instead — "
-            f"as_grid() and get_spectrum_at(fast=..., slow=...) — or sweep=None "
-            f"for the flat index.",
+            f"sweep={self.sweep_type!r} takes only {n_distinct} different values "
+            f"across {finite.size} sweep points in '{self.path}' "
+            f"({finite.min():.4g} → {finite.max():.4g}{unit}), so it does not "
+            f"label them individually. Plotted against it, points sharing a value "
+            f"land in the same place and only one of them is drawn.{fix}",
             UserWarning, stacklevel=4,
         )
 
@@ -2118,6 +2135,29 @@ class _AttoCubeSweep:
             monotonically along the sweep is guaranteed not to: a hysteresis
             loop passes the same gate voltage twice.
         """
+        idx, values, label, unit, matches = self._nearest(value, axis, depth=4)
+        if matches.size > 1:
+            warnings.warn(
+                f"{label} holds {float(values[idx]):.6g}"
+                f"{f' {unit}' if unit else ''} at {_render_indices(matches)}, so "
+                f"looking it up by value does not identify one; using index "
+                f"{idx}. Address these by index, or search a quantity that "
+                f"changes monotonically along the sweep.",
+                UserWarning, stacklevel=3,
+            )
+        return idx
+
+    def _nearest(self, value: float, axis: str, depth: int = 3) -> tuple:
+        """
+        Locate *value* on *axis*, warning when nothing lies near it.
+
+        Returns ``(idx, values, label, unit, matches)``, *matches* being every
+        index sharing the coordinate found — one element when the lookup is
+        unambiguous.  What to do about more than one is the caller's policy:
+        :meth:`nearest_index` warns because a single index is its whole contract,
+        while an accessor returning spectra refuses, since dropping all but one
+        of them would be a silent partial answer.
+        """
         values, label, unit = self._lookup_axis(axis)
         value = float(value)
 
@@ -2138,31 +2178,49 @@ class _AttoCubeSweep:
 
         if abs(found - value) > 0.5 * step:
             warnings.warn(
-                f"nearest_index({value:.6g}, axis={axis!r}) on {label} has no "
-                f"point at {value:.6g}{suffix}; using index {idx} at "
-                f"{found:.6g}{suffix}, which is {abs(found - value):.6g}{suffix} "
-                f"away. The axis spans {finite.min():.6g} to {finite.max():.6g}"
-                f"{suffix} in {finite.size} points.",
-                UserWarning, stacklevel=3,
+                f"Looking up {value:.6g}{suffix} on {label} (axis={axis!r}) found "
+                f"no point there; using index {idx} at {found:.6g}{suffix}, which "
+                f"is {abs(found - value):.6g}{suffix} away. The axis spans "
+                f"{finite.min():.6g} to {finite.max():.6g}{suffix} in "
+                f"{finite.size} points.",
+                UserWarning, stacklevel=depth,
             )
 
-        # A quantity that is not the axis the sweep was ordered by need not be
-        # injective — a hysteresis loop passes the same gate voltage twice, and
-        # argmin would pick one without saying so.  Tested on the *coordinate*
-        # rather than the distance, so a request landing midway between two
-        # distinct points does not trip this.
-        same = np.flatnonzero(np.abs(values - found) <= _axis_atol(values))
-        if same.size > 1:
-            shown = ", ".join(str(i) for i in same[:6])
-            more  = f", … ({same.size} in all)" if same.size > 6 else ""
-            warnings.warn(
-                f"{label} holds {found:.6g}{suffix} at {same.size} sweep points "
-                f"(indices {shown}{more}), so looking it up by value does not "
-                f"identify one; using index {idx}. Address these by index, or "
-                f"search a quantity that changes monotonically along the sweep.",
-                UserWarning, stacklevel=3,
-            )
-        return idx
+        # A quantity that is not what the sweep was ordered by need not label its
+        # points individually — a hysteresis loop passes the same gate voltage
+        # twice, and every quantity of a nest repeats.  Compared on the
+        # *coordinate* rather than the distance, so a request landing midway
+        # between two distinct points is not a tie.
+        matches = np.flatnonzero(np.abs(values - found) <= _axis_atol(values))
+        return idx, values, label, unit, matches
+
+    def _index_for_value(self, value: float, axis: str, what: str) -> int:
+        """
+        Locate *value* on *axis*, refusing when it does not identify one point.
+
+        The accessors' policy.  Where :meth:`nearest_index` owes the caller an
+        integer and can only warn, an accessor has a complete answer to point at:
+        a declared nest addresses every match at once through ``fast=`` / ``slow=``.
+        """
+        idx, values, label, unit, matches = self._nearest(value, axis, depth=5)
+        if matches.size == 1:
+            return idx
+
+        grid = self.sweep_grid()
+        if grid is not None:
+            fix = (f" This file looks like {grid} — declare it with "
+                   f"fast_sweep='{grid.fast_label}', slow_sweep='{grid.slow_label}', "
+                   f"and fast= / slow= then return every spectrum at a coordinate "
+                   f"rather than one of them.")
+        else:
+            fix = (" If these points are a nest, declare it with fast_sweep= and "
+                   "slow_sweep=, and address it with fast= / slow=.")
+        raise ValueError(
+            f"{what}: {label} holds {float(values[idx]):.6g}"
+            f"{f' {unit}' if unit else ''} at {_render_indices(matches)}, so it "
+            f"does not identify one spectrum.{fix} To take a single one of them, "
+            f"use get_spectrum_by_index()."
+        )
 
     def _positional_index(self, index, axis: str, length: int) -> int:
         """Validate an integer position, accepting Python-style negatives."""
@@ -2189,8 +2247,10 @@ class _AttoCubeSweep:
         nest, pinning the slow axis takes one contiguous run of columns while
         pinning the fast axis strides across every run.
         """
-        locate = ((lambda v, ax: self.nearest_index(v, ax)) if by_value else
-                  (lambda v, ax: self._positional_index(
+        # By value the accessors refuse an ambiguous coordinate rather than
+        # returning one of the points it names; see _index_for_value.
+        locate = ((lambda v, ax: self._index_for_value(v, ax, what)) if by_value
+                  else (lambda v, ax: self._positional_index(
                       v, ax, len(self._lookup_axis(ax)[0]))))
         arg = "value" if by_value else "index"
 
@@ -3478,12 +3538,18 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         ValueError
             If *value* is given for a nested sweep, or *fast*/*slow* for a flat
             one, or if neither is given.  For the whole grid, use :meth:`as_grid`.
+        ValueError
+            If a coordinate names more than one sweep point, since returning one
+            of them would drop the rest without saying so.  Every quantity of a
+            nest repeats, so this is what an undeclared nest looks like from
+            here; the message says what to declare.  :meth:`nearest_index` warns
+            instead of raising, because a single index is all it can return.
 
         Warns
         -----
         UserWarning
             When a requested coordinate is further than half a step from any real
-            point, or occurs at more than one — see :meth:`nearest_index`.
+            point — see :meth:`nearest_index`.
 
         See Also
         --------

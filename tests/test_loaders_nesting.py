@@ -311,9 +311,10 @@ def test_nearest_index_rejects_an_unknown_axis(nested):
 
 
 def test_a_value_off_the_axis_warns_and_names_both(nested):
-    with pytest.warns(UserWarning, match="no point at 500") as caught:
+    with pytest.warns(UserWarning, match="found no point there") as caught:
         idx = nested.nearest_index(500.0, axis="slow")
     assert idx == N_SLOW - 1
+    assert "Looking up 500" in str(caught[0].message)
     assert "using index 2 at 10" in str(caught[0].message)
 
 
@@ -415,30 +416,102 @@ def test_a_value_midway_between_distinct_points_is_not_a_duplicate(field_sweep):
 
 
 # ---------------------------------------------------------------------------
-# A8 — a 1-D sweep declared on a raster
+# A8 — a sweep axis that does not label its points individually
 # ---------------------------------------------------------------------------
 
 
-def test_a_sawtooth_sweep_axis_warns_and_names_the_grid(raster_csv):
-    with pytest.warns(UserWarning, match="not monotonic") as caught:
-        AttoCubeSpectralSweep(str(raster_csv), spectra_type="PL",
-                              sweep="piezo_x")
-    msg = str(caught[0].message)
+@pytest.mark.parametrize("sweep, n_distinct", [
+    ("piezo_x", N_FAST),     # the inner quantity: restarts every row
+    ("piezo_y", N_SLOW),     # the outer one: holds still through a row
+])
+def test_either_quantity_of_a_nest_warns_when_declared_as_the_axis(
+        raster_csv, sweep, n_distinct):
+    """Both leave repeats, so both collapse a map — direction is beside the point."""
+    with pytest.warns(UserWarning, match="does not label them individually") as c:
+        AttoCubeSpectralSweep(str(raster_csv), spectra_type="PL", sweep=sweep)
+    msg = str(c[0].message)
+    assert f"only {n_distinct} different values across {N_SWEEPS}" in msg
     assert "Scanner X (4) × Scanner Y (3)" in msg
     assert "as_grid()" in msg
 
 
-def test_a_monotonic_sweep_on_the_same_raster_is_silent(raster_csv):
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        AttoCubeSpectralSweep(str(raster_csv), spectra_type="PL",
-                              sweep="piezo_y")
+def test_a_nest_no_grid_search_can_see_still_warns(field_csv, geometry):
+    """
+    The case a grid-detection guard would have missed.
+
+    Both gates vary at every point of the field x power scan, so ``sweep_grid()``
+    finds nothing to report — while ``sweep="power"`` collapses a map exactly as
+    a raster's slow axis does.
+    """
+    with pytest.warns(UserWarning, match="does not label them individually") as c:
+        scan = AttoCubeSpectralSweep(str(field_csv), spectra_type="PL",
+                                     gates=GATES, geometry=geometry,
+                                     sweep="power")
+    assert scan.sweep_grid() is None
+    assert "fast_sweep=" in str(c[0].message)
 
 
 def test_an_undeclared_sweep_on_a_raster_is_silent(raster_csv):
+    """The flat index labels every point, so there is nothing to say."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         AttoCubeSpectralSweep(str(raster_csv), spectra_type="PL")
+
+
+def test_an_axis_that_labels_every_point_is_silent(field_csv, geometry):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        AttoCubeSpectralSweep(str(field_csv), spectra_type="PL", gates=GATES,
+                              geometry=geometry, sweep="top_voltage")
+
+
+# ---------------------------------------------------------------------------
+# An ambiguous coordinate is refused by the accessors, warned by nearest_index
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def undeclared_raster(raster_csv):
+    """A raster nobody declared — flat as far as the loader knows."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return AttoCubeSpectralSweep(str(raster_csv), spectra_type="PL")
+
+
+def test_an_ambiguous_coordinate_is_refused_not_silently_narrowed(
+        undeclared_raster):
+    with pytest.raises(ValueError) as exc:
+        undeclared_raster.get_spectrum_at(5.0, axis="piezo_y")
+    msg = str(exc.value)
+    assert "does not identify one spectrum" in msg
+    assert "4 sweep points (indices 4, 5, 6, 7)" in msg
+    # It names the complete answer rather than only refusing.
+    assert "fast_sweep='Scanner X'" in msg and "slow_sweep='Scanner Y'" in msg
+    assert "get_spectrum_by_index()" in msg
+
+
+def test_the_declared_nest_answers_what_the_refusal_points_at(nested):
+    """The route the message names returns every match, not one of them."""
+    block = nested.get_spectrum_at(slow=5.0)
+    assert block.shape == (nested.n_pixels, N_FAST)
+
+
+def test_nearest_index_still_warns_rather_than_raising(undeclared_raster):
+    """A single index is its whole contract, so it has nothing better to return."""
+    with pytest.warns(UserWarning, match="does not identify one"):
+        idx = undeclared_raster.nearest_index(5.0, axis="piezo_y")
+    assert idx == N_FAST      # first point of the second row
+
+
+def test_an_unambiguous_coordinate_still_works(field_sweep):
+    assert (field_sweep.get_spectrum_at(15.0, axis="top_voltage").shape
+            == (field_sweep.n_pixels,))
+
+
+def test_by_index_is_unaffected_by_ambiguity(undeclared_raster):
+    """An index says which point it means, so there is nothing to refuse."""
+    assert (undeclared_raster.get_spectrum_by_index(5).shape
+            == (undeclared_raster.n_pixels,))
 
 
 def test_repr_distinguishes_a_declared_nest_from_a_detected_one(nested, flat):

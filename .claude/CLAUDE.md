@@ -122,7 +122,7 @@ failure, so there is no traceback, and it lands on whichever test reaches BLAS f
 i.e. a different one each run. Nothing is wrong with the environment when this
 happens.
 
-`pytest` **is installed** in `viz-sci-plot` (9.1.1; the whole suite runs — 327 tests
+`pytest` **is installed** in `viz-sci-plot` (9.1.1; the whole suite runs — 334 tests
 passing as of 2026-08-06) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
 the dependency exists only in this one environment. Tests are local-only by
 deliberate choice — do not add a test job to CI. CI
@@ -685,9 +685,22 @@ decision; the argument for it is in the audit under the ID given.
   don't extend it to nests:** there an arbitrary quantity matches `n_slow` points
   or one depending on how the scan was driven, so the return rank would follow the
   data rather than the call. Declare `fast_sweep=` in the coordinate you want
-  instead. Because such a quantity need not be monotonic, `nearest_index` warns
-  when the value found occurs more than once — tested on the coordinate, not the
-  distance, so a midway request is not a false positive. (E14)
+  instead. (E14)
+- **An ambiguous coordinate is warned by `nearest_index` and *refused* by the
+  accessors.** Not an inconsistency: a single `int` is all `nearest_index` can
+  return, whereas `get_spectrum_at` returns data and the API already has the
+  complete answer — a declared nest gives every match at once through
+  `fast=`/`slow=`, so handing back one of four would be a silent partial answer.
+  Matches are compared on the coordinate, not the distance, so a request landing
+  midway between two distinct points is not a tie. (E14)
+- **The sweep axis must label each point individually, and the loader warns when
+  it does not.** Asked as *"how many different values does this axis take?"*, not
+  *"is it monotonic?"* — the latter is a side effect that catches a nest's inner
+  quantity (sawtooth) and misses its outer one (staircase), which is the worse
+  failure of the two. **No grid guard:** `sweep_grid()` returns `None` for a field
+  × power nest, so a guarded check would be silent on exactly the case E14 exists
+  for. Deliberate repeat measurements warn too — their map collapses the same way.
+  (A8, E14)
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object

@@ -283,7 +283,7 @@ pre-built sweep with `sweep="piezo_y"`. Say so in the `spectra` docstring entry.
 
 ### Correction owed to the audit
 
-`audit-2026-07.md:692` calls the old `sweep_unit="V"` default "a position
+The E12 entry in `audit-2026-07.md` calls the old `sweep_unit="V"` default "a position
 default carrying a voltage unit, **wrong** before this rewrite and now
 redundant". The 2026-08-04 answer that the scanner rows carry piezo *drive
 voltage* makes it not wrong — only redundant. Fix that line when this lands.

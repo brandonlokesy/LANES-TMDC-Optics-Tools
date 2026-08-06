@@ -22,10 +22,13 @@
       spot and a remote spatially-filtered spot (two-spot galvo scans). Both are
       always loaded; the loader warns when the *selected* one is all zeros.
 - Still open on this class:
-    - Nested sweeps: a 2-D raster arrives as **one flattened file** (41×51 in the
-      reflectance example) and a TRPL sweep as a **directory**. `sweep_grid()`
-      detects and reports the raster shape; reshaping is the item below.
-    - Field × power (a genuinely 2-parameter sweep) still unseen in a real file.
+    - ~~Nested sweeps~~ **done 2026-08-06 (E14).** A 2-D raster arrives as **one
+      flattened file** (41×51 in the reflectance example) and a TRPL sweep as a
+      **directory**. `sweep_grid()` detects; `fast_sweep=`/`slow_sweep=` declares,
+      and `as_grid()` reshapes. TRPL inherits the machinery but has no
+      `get_decay_at` yet, and no nested TRPL sweep has been seen.
+    - Field × power (a genuinely 2-parameter sweep) still unseen in a real file —
+      though it is now expressible, and is what the E14 fixtures model.
 - HDF5 export/import: done (`hdf5.py`, `scan.to_hdf5()`, `.h5` accepted by the
   loader, both axis kinds). `dev/hdf5`'s `converters.py` remains unmerged — its CLI
   for bulk CSV→HDF5/TIFF conversion is the part not covered by this work, and the
@@ -36,10 +39,14 @@
       Escapes notice today only because the committed example is zero-padded.
       Copy `AttoCubeTRPLSweep._order_by_iter`, gap warning included.
 - Position in scans (x,y).
-    - for x (..) for y (...) can be flipped to for y (...) for x (..). reverse the nested loop
-    - Reshape a raster sweep to `(n_points, n_y, n_x)` and plot it as a map.
-      `sweep_grid()` already reports the shape and which axis is inner, so the
-      loop-order flip is readable off the data rather than guessed.
+    - ~~for x (..) for y (...) can be flipped to for y (...) for x (..)~~ **settled
+      2026-07-31, built 2026-08-06 (E14).** The flip is settled *by statement*, not
+      read off the data: `fast_sweep=` names the inner loop. A swapped declaration
+      is refused, and the message names the swap.
+    - ~~Reshape a raster sweep~~ **done (E14)**: `as_grid()` gives
+      `(n_points, n_slow, n_fast)` as a view.
+    - **Still open: plot it as a map.** `as_grid()` plus `nesting.fast_axis` /
+      `slow_axis` are the inputs a `plot_spatial_map` needs; nothing draws one yet.
 - TRPL follow-ups (see E12):
     - No plotting: `_resolve_x_axis` knows only energy/wavelength. Let it ask the
       scan for its own axis instead of adding a third string.

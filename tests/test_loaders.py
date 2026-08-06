@@ -71,6 +71,8 @@ def make_spectral_csv(
     params : dict, optional
         Overrides the default :data:`PARAMS` row set, so a test can supply
         awkward labels (e.g. one containing ``/``) without a second builder.
+        The sweep count is taken from the row length, so a longer row set writes
+        a longer sweep — which is how a raster fixture is built.
     roi1 : np.ndarray, shape (n_pixels, N_SWEEPS), optional
         Overrides the ``ExpROI1`` counts, for a test that needs spectra with
         structure rather than the default index ramp.  More pixel rows than
@@ -92,8 +94,10 @@ def make_spectral_csv(
     labels = list(params)                          # first len(params) rows
     wl     = WAVELENGTH if wavelength is None else np.asarray(wavelength, float)
     n_pixels = wl.size
+    # The rows are one value per sweep point, so their length *is* the count.
+    n_sweeps = len(next(iter(params.values())))
 
-    n_declared = N_SWEEPS + zero_blocks
+    n_declared = n_sweeps + zero_blocks
     header = ["Parameters Labels"]
     for i in range(n_declared):
         header += [f"Par_{i}", f"Wavelength{i}", f"ExpROI1_{i}", f"ExpROI2_{i}"]
@@ -103,9 +107,9 @@ def make_spectral_csv(
     lines = [",".join(header)]
     for r in range(n_pixels):
         label = labels[r] if r < len(labels) else ""
-        par = params[label] if label else np.zeros(N_SWEEPS)
+        par = params[label] if label else np.zeros(n_sweeps)
         real = []
-        for i in range(N_SWEEPS):
+        for i in range(n_sweeps):
             counts = _roi1(r, i) if roi1 is None else roi1[r, i]
             real += [f"{par[i]}", f"{wl[r]}",
                      f"{counts}", f"{_roi2(r, i)}"]

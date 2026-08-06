@@ -22,6 +22,12 @@ from skimage.exposure import rescale_intensity
 
 from . import processing
 from . import diffusion as _diffusion
+# The spectra-source registry names attributes on the loader classes, so it lives
+# with them; imported here under its own name because this is where callers of
+# ``spectra_source=`` are.
+from .loaders import (
+    _SPECTRA_SOURCES, _SPECTRA_SOURCE_LABELS, _resolve_spectra,
+)
 
 # Optional: cmcrameri diverging colormaps (pip install cmcrameri)
 try:
@@ -2101,84 +2107,6 @@ class DiffusionCloudPanel(AnimationPanel):
 # with rarely-used names while keeping the import cost near zero).
 from matplotlib.colors import Normalize, LogNorm, BoundaryNorm
 from matplotlib.cm import ScalarMappable
-
-
-# Mapping of string names → spectra array attribute on AttoCubeSpectralSweep.
-# The sentinel value None means "wavelength-space spectra" — these are
-# served on the wavelength axis regardless of x_axis.
-_SPECTRA_SOURCES = {
-    "best"                      : None,   # resolved at call time
-    "raw"                       : "spectra",
-    "energy"                    : "energy_spectra",
-    "energy_bg"                 : "energy_spectra_bg",
-    "energy_pre_jacobian"       : "energy_spectra_pre_jacobian",
-    # Contrast is opt-in by name: "best" never returns it, because ΔR/R₀ is a
-    # different physical quantity from the counts, not a better-corrected version
-    # of them.  See AttoCubeSpectralSweep.best_energy_spectra.
-    "contrast"                  : "energy_contrast",
-    "contrast_wavelength"       : "contrast",
-}
-
-_SPECTRA_SOURCE_LABELS = {
-    "best"                      : "best available (repaired, bg-corrected if set)",
-    "raw"                       : "raw counts, wavelength space",
-    "energy"                    : "energy axis (Jacobian if configured)",
-    "energy_bg"                 : "energy axis, bg-subtracted",
-    "energy_pre_jacobian"       : "energy axis, no Jacobian",
-    "contrast"                  : "contrast vs reference, energy axis",
-    "contrast_wavelength"       : "contrast vs reference, wavelength space",
-}
-
-
-def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
-    """
-    Return the ``(n_pixels, n_sweeps)`` array for *spectra_source*.
-
-    Raises ``ValueError`` when the requested source is unavailable (e.g.
-    ``"energy_bg"`` but no ``bg_region`` was set) or incompatible with the
-    chosen *x_axis* (e.g. wavelength-space source with ``x_axis="energy"``).
-    """
-    src = spectra_source.lower()
-    if src not in _SPECTRA_SOURCES:
-        raise ValueError(
-            f"spectra_source {src!r} is not recognised. "
-            f"Choose from: {list(_SPECTRA_SOURCES)}."
-        )
-
-    if src == "best":
-        if x_axis == "energy":
-            arr = scan.best_energy_spectra
-        else:
-            # Wavelength space has no background-corrected array to offer, but a
-            # cosmic-ray repair does live here — and "best" ignoring a declared
-            # one would put spikes on the plot that no other source shows.
-            arr = getattr(scan, "spectra_cr", None)
-            if arr is None:
-                arr = scan.spectra
-    elif src == "raw":
-        arr = scan.spectra
-    else:
-        attr = _SPECTRA_SOURCES[src]
-        arr = getattr(scan, attr, None)
-        if arr is None:
-            needs = ("a reference= spectrum" if src.startswith("contrast")
-                     else "bg_region and/or apply_jacobian")
-            raise ValueError(
-                f"spectra_source={src!r} is not available on this scan.  "
-                f"Check that {needs} was set at load time."
-            )
-
-    # Warn if wavelength-space data is being plotted on energy axis.
-    if src == "raw" and x_axis == "energy":
-        import warnings
-        warnings.warn(
-            "spectra_source='raw' uses the wavelength-space array which has "
-            "descending energy order and unequal pixel spacing.  "
-            "Consider 'energy' or 'best' for an energy-axis plot.",
-            UserWarning, stacklevel=3,
-        )
-
-    return np.asarray(arr, dtype=float)
 
 
 def plot_power_series(

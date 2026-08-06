@@ -73,8 +73,14 @@ Two block layouts, told apart by the header's field names (`_read_block_layout`)
   **content, not filename**. Order data files by the integer in `_iter_N`;
   lexicographic order puts `iter_10` before `iter_2`.
 - **A 2-D spatial raster is one flattened file** (41 X inside 51 Y for the
-  reflectance example). `sweep_grid()` detects and reports the shape; it does
-  **not** reshape — that is still open work.
+  reflectance example). `sweep_grid()` detects and reports the shape; `as_grid()`
+  reshapes it, once the nest is declared with `fast_sweep=` / `slow_sweep=` (E14).
+- **The committed reflectance export is a truncation, not a raster.**
+  `examples/data/reflectance-contrast/sample_truncated_…csv` holds the first **50**
+  points of that 41 × 51 scan — one complete X row plus 9 of the next — which the
+  filename says and the numbers above do not. So it is a real fixture for the
+  aborted-scan refusal and for nothing else: **no complete raster is committed**,
+  and a test needing one must synthesise it (`tests/test_loaders_nesting.py`).
 
 Still unknown, and no file can answer it: which acquisition software and version
 emits this, and whether the layout is version-stable.
@@ -116,8 +122,8 @@ failure, so there is no traceback, and it lands on whichever test reaches BLAS f
 i.e. a different one each run. Nothing is wrong with the environment when this
 happens.
 
-`pytest` **is installed** in `viz-sci-plot` (9.1.1; the whole suite runs — 154 tests
-passing as of 2026-08-04) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
+`pytest` **is installed** in `viz-sci-plot` (9.1.1; the whole suite runs — 327 tests
+passing as of 2026-08-06) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
 the dependency exists only in this one environment. Tests are local-only by
 deliberate choice — do not add a test job to CI. CI
 (`.github/workflows/docs.yml`) builds and deploys docs only. Declaring the extra is
@@ -599,8 +605,10 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 
 **Fixed — don't re-report.** `remove_cosmic_rays` (A1), `DeviceGeometry.eps_hs` /
 `__repr__` and `optical_thickness` (A2), the `animate_real_space_PL_map` laser
-circle (A3), zero-filled blocks loaded as sweep points (A6), the `_CURATED`
-fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), and the
+circle (A3), zero-filled blocks loaded as sweep points (A6), the silent sawtooth
+sweep axis on a raster (A8), the `_CURATED`
+fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), nested
+sweeps (E14), and the
 2026-07-30 rewrite — `AttoCubeSpectralSweep`, `hdf5.py`, `AttoCubeTRPLSweep`
 (G1–G4). Diagnosis, fix and tests for each are in the audit.
 
@@ -649,6 +657,37 @@ decision; the argument for it is in the audit under the ID given.
   own energy-space arrays. It feeds the background estimate, the contrast and the
   fits; `spectra` stays the file's own counts, `spectra_cr` holds the repair and
   `cosmic_ray_mask` says what moved. (E13)
+- **Nested sweeps are declared with `fast_sweep=` / `slow_sweep=`, which are not
+  aliases of `sweep=`.** Settled 2026-08-06, superseding the `grid=(inner, outer)`
+  tuple. Everywhere in this package **"sweep" means the flattened measurement
+  point** — `n_sweeps`, `sweep_index`, `sweep_mask`, and `sweep_axis` (an array *of
+  length `n_sweeps`*). So `sweep=` answers *"which array labels each flat point"*
+  and the nest declaration is a separate statement, *"those points are `n_fast`
+  inside `n_slow`"*. Don't redefine `sweep=` to mean the fast axis: it would be the
+  one place in the package the word meant an axis, two lines from `n_sweeps` still
+  meaning the other thing. On a nested scan `sweep=` is normally omitted, so
+  `sweep_axis` is the flat index. (E14)
+- **Both nest axes resolve through `_resolve_sweep`, so a derived quantity can be
+  an axis.** This is the point of the whole design: with both gates moved together
+  to sweep the field, each gate row takes a different value at every point, so no
+  row can be the axis while `electric_field` takes exactly `n_fast`.
+  `sweep_grid()` still detects on raw rows only and so reports the channels — it
+  says what to declare, as `gate_mode` does for `gates=`. (E14, A10)
+- **`spectra` keeps shape `(n_points, n_sweeps)` whether or not a nest is
+  declared**; the grid is a view from `as_grid(array)`. A declaration must not
+  change the rank of an attribute — `n_sweeps` is `spectra.shape[1]`, and every
+  consumer would have to branch on `is_nested`. Accessor results are views too,
+  which is why the selectors are ints and slices rather than fancy indexing. (E14)
+- **`axis=` locates a point by a quantity other than the declared sweep axis** —
+  `get_spectrum_at(15.0, axis="top_voltage")` on a field sweep driven by both
+  gates. Fourth entry point onto the same `_resolve_sweep` vocabulary; a
+  parameter, not a `get_spectrum_from_parameter` sibling. **Flat sweeps only, and
+  don't extend it to nests:** there an arbitrary quantity matches `n_slow` points
+  or one depending on how the scan was driven, so the return rank would follow the
+  data rather than the call. Declare `fast_sweep=` in the coordinate you want
+  instead. Because such a quantity need not be monotonic, `nearest_index` warns
+  when the value found occurs more than once — tested on the coordinate, not the
+  distance, so a midway request is not a false positive. (E14)
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
@@ -663,12 +702,16 @@ decision; the argument for it is in the audit under the ID given.
   E12 is owed. The hardcoded-"PL intensity" half is **done** (2026-08-06); see
   *parameters earn their place* for the label contract that replaced it, and
   `dev/plan-E12.md` Step 3 for what remains.
-- **A declared 1-D sweep on a raster gives a sawtooth axis, silently** (A8).
-  `sweep="piezo_x"` on the reflectance raster succeeds and returns `Scanner X`
-  repeated 51 times, non-monotonic; `__repr__` prints only min and max so it looks
-  fine, and any plot against it overplots 51 times. `sweep_grid()` already detects
-  the raster, so the fix is to compare the two and warn. Don't make it an error —
-  one axis of a raster is legitimate when slicing a single row.
+- **`varying_parameters` overflows on a zero-mean row** (A10) — which is what an
+  anti-symmetric gate sweep is, so this is the routine case. `scale =
+  max(abs(mean), tiny)` divides by ~2.2e-308 rather than by zero, so the rank comes
+  back `inf` (with a numpy `RuntimeWarning`) for an exactly-zero mean and ~1e16 for
+  float dust. The ordering then cannot separate the two gates or rank anything
+  against them, and `sweep_grid()` inherits it — it returns the first verifying
+  pair in that order, so it names a gate row where the scanner pair nests equally
+  well. Not fatal now that a nest is declared rather than detected; scale by
+  something that cannot vanish, and keep the `rtol * scale` threshold on the line
+  above using the same scale.
 - **`_is_image_csv` accepts a two-row spectrum as an image** (A9), because it only
   tests whether the first line parses as floats — and a `SingleSpectrum`'s first row
   is its wavelength axis. A directory of single spectra therefore loads as 2×N
@@ -683,19 +726,10 @@ decision; the argument for it is in the audit under the ID given.
   (`contour_*`, `centroid_*`, `roi_color`, `bg_region_color`, `laser_*`,
   `xlabel`/`ylabel`, `colorbar_label`) and return its artists instead of only
   `result`. Signature change, acceptable pre-adoption. See E11.
-- **An x/y raster gets a grid API, not a `_SWEEP_TYPES` entry.** Asked and settled
-  2026-07-31, so don't re-propose a `"piezo_xy"`: that registry answers *"which 1-D
-  array of length `n_sweeps` is the sweep axis"*, and `sweep_axis` returns exactly one
-  array that plotting calls `.min()`/`.max()` on. A raster has two axes, so there is
-  nothing single to return — a tuple breaks the contract, a flat index is already
-  `sweep=None`, and one-of-the-two is already `piezo_x`/`piezo_y`. What is
-  missing is the **reshape** to `(n_points, n_y, n_x)` plus map plotting, on top of
-  the shape `sweep_grid()` already reports. Give it an explicit
-  `grid=("Scanner X", "Scanner Y")` declaration, **inner axis first**: detection needs
-  `n_inner × n_outer == n_sweeps` exactly and so fails on an aborted scan with a
-  partial final row, and declaring it settles the x/y loop-order flip by statement
-  rather than inference — the same "put it on the caller" pattern as `sweep=` and gate
-  polarity.
+- ~~An x/y raster gets a `grid=(inner, outer)` declaration~~ **Built 2026-08-06 as
+  `fast_sweep=` / `slow_sweep=` (E14).** The "not a `_SWEEP_TYPES` entry" half of the
+  2026-07-31 decision stands — don't re-propose a `"piezo_xy"`. The tuple spelling
+  does not: see *nested sweeps* below.
 
 ## Working style
 

@@ -635,6 +635,93 @@ _GATE_ELECTRODES = tuple(_GATE_ROLE_CURATED)
 # and is what makes a single-gate declaration unambiguous.
 _GATE_ROLES = _GATE_ELECTRODES + ("channel",)
 
+
+# ---------------------------------------------------------------------------
+# Spectra-source registry
+# ---------------------------------------------------------------------------
+
+# Mapping of string names → spectra array attribute on AttoCubeSpectralSweep.
+# The sentinel value None means "wavelength-space spectra" — these are
+# served on the wavelength axis regardless of x_axis.
+_SPECTRA_SOURCES = {
+    "best"                      : None,   # resolved at call time
+    "raw"                       : "spectra",
+    "energy"                    : "energy_spectra",
+    "energy_bg"                 : "energy_spectra_bg",
+    "energy_pre_jacobian"       : "energy_spectra_pre_jacobian",
+    # Contrast is opt-in by name: "best" never returns it, because ΔR/R₀ is a
+    # different physical quantity from the counts, not a better-corrected version
+    # of them.  See AttoCubeSpectralSweep.best_energy_spectra.
+    "contrast"                  : "energy_contrast",
+    "contrast_wavelength"       : "contrast",
+}
+
+_SPECTRA_SOURCE_LABELS = {
+    "best"                      : "best available (repaired, bg-corrected if set)",
+    "raw"                       : "raw counts, wavelength space",
+    "energy"                    : "energy axis (Jacobian if configured)",
+    "energy_bg"                 : "energy axis, bg-subtracted",
+    "energy_pre_jacobian"       : "energy axis, no Jacobian",
+    "contrast"                  : "contrast vs reference, energy axis",
+    "contrast_wavelength"       : "contrast vs reference, wavelength space",
+}
+
+
+def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
+    """
+    Return the ``(n_pixels, n_sweeps)`` array for *spectra_source*.
+
+    Reads *scan* by attribute name, so it serves anything mirroring
+    :class:`AttoCubeSpectralSweep`.  :class:`SingleSpectrum` carries only a subset
+    of the arrays; a source it lacks degrades to the nearest available one where
+    there is one, and raises otherwise.
+
+    Raises ``ValueError`` when the requested source is unavailable (e.g.
+    ``"energy_bg"`` but no ``bg_region`` was set) or incompatible with the
+    chosen *x_axis* (e.g. wavelength-space source with ``x_axis="energy"``).
+    """
+    src = spectra_source.lower()
+    if src not in _SPECTRA_SOURCES:
+        raise ValueError(
+            f"spectra_source {src!r} is not recognised. "
+            f"Choose from: {list(_SPECTRA_SOURCES)}."
+        )
+
+    if src == "best":
+        if x_axis == "energy":
+            arr = scan.best_energy_spectra
+        else:
+            # Wavelength space has no background-corrected array to offer, but a
+            # cosmic-ray repair does live here — and "best" ignoring a declared
+            # one would put spikes on the plot that no other source shows.
+            arr = getattr(scan, "spectra_cr", None)
+            if arr is None:
+                arr = scan.spectra
+    elif src == "raw":
+        arr = scan.spectra
+    else:
+        attr = _SPECTRA_SOURCES[src]
+        arr = getattr(scan, attr, None)
+        if arr is None:
+            needs = ("a reference= spectrum" if src.startswith("contrast")
+                     else "bg_region and/or apply_jacobian")
+            raise ValueError(
+                f"spectra_source={src!r} is not available on this scan.  "
+                f"Check that {needs} was set at load time."
+            )
+
+    # Warn if wavelength-space data is being plotted on energy axis.
+    if src == "raw" and x_axis == "energy":
+        warnings.warn(
+            "spectra_source='raw' uses the wavelength-space array which has "
+            "descending energy order and unequal pixel spacing.  "
+            "Consider 'energy' or 'best' for an energy-axis plot.",
+            UserWarning, stacklevel=3,
+        )
+
+    return np.asarray(arr, dtype=float)
+
+
 # Recognised input formats, dispatched on the file suffix.
 _CSV_SUFFIXES  = (".csv",)
 _HDF5_SUFFIXES = (".h5", ".hdf5", ".he5")
@@ -844,16 +931,137 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, path) -> tuple:
 # ---------------------------------------------------------------------------
 
 class SweepGrid(NamedTuple):
-    """A detected 2-D raster: the inner (fast) axis and the outer (slow) one."""
-    inner_label : str
-    n_inner     : int
-    outer_label : str
-    n_outer     : int
+    """
+    A 2-D raster detected in the parameter rows: its fast axis and its slow one.
+
+    What :meth:`_AttoCubeSweep.sweep_grid` reports.  Names the same two axes a
+    nest is declared with, so a detection reads directly as the ``fast_sweep=`` /
+    ``slow_sweep=`` to pass — but it is a row-level guess, and a nest whose axis
+    is a derived quantity will be reported through the rows that carry it.
+    """
+    fast_label : str
+    n_fast     : int
+    slow_label : str
+    n_slow     : int
 
     def __str__(self) -> str:
-        return (f"{self.inner_label} ({self.n_inner}) × "
-                f"{self.outer_label} ({self.n_outer}) = "
-                f"{self.n_inner * self.n_outer}")
+        return (f"{self.fast_label} ({self.n_fast}) × "
+                f"{self.slow_label} ({self.n_slow}) = "
+                f"{self.n_fast * self.n_slow}")
+
+
+# Fraction of an axis's own span by which two values may differ and still count
+# as the same grid point.  Scaled to the span rather than to the value so that an
+# axis crossing zero — an anti-symmetric field sweep, say — is handled like any
+# other, and loose enough for a derived axis that is recomputed per sweep point
+# rather than read back as a repeated literal.
+_NEST_RTOL = 1e-3
+
+
+def _axis_atol(values: np.ndarray, rtol: float = _NEST_RTOL) -> float:
+    """Absolute tolerance for *values*, scaled to their span."""
+    finite = values[np.isfinite(values)]
+    span   = float(np.ptp(finite)) if finite.size else 0.0
+    return max(rtol * span, np.finfo(float).tiny)
+
+
+def _count_distinct(values: np.ndarray, atol: float) -> int:
+    """
+    Number of distinct values in *values*, treating gaps ≤ *atol* as equal.
+
+    Sorting first turns "how many distinct" into "how many gaps exceed atol",
+    which is one vectorised pass rather than a pairwise comparison.
+    """
+    ordered = np.sort(values[np.isfinite(values)])
+    if ordered.size == 0:
+        return 0
+    return int(1 + np.count_nonzero(np.diff(ordered) > atol))
+
+
+def _nest_shape(fast: np.ndarray, slow: np.ndarray, n_sweeps: int) -> tuple:
+    """
+    Return ``(n_fast, n_slow)`` if *fast* runs to completion inside *slow*.
+
+    Both arrays are the flattened ``(n_sweeps,)`` readings of the two declared
+    axes.  ``None`` when they do not form a nest in that order — the caller
+    retries with the arguments swapped to tell a genuine mismatch from a
+    reversed declaration.
+    """
+    fast_atol = _axis_atol(fast)
+    slow_atol = _axis_atol(slow)
+
+    n_fast = _count_distinct(fast, fast_atol)
+    if n_fast < 2 or n_sweeps % n_fast:
+        return None
+    n_slow = n_sweeps // n_fast
+
+    fast_grid = fast.reshape(n_slow, n_fast)
+    slow_grid = slow.reshape(n_slow, n_fast)
+
+    # (n_fast,) broadcast down the rows: the fast axis must repeat the same run
+    # of values in every row.  (n_slow, 1) broadcast across the columns: the slow
+    # axis must hold still for the whole of each row.
+    if not np.allclose(fast_grid, fast_grid[0], rtol=0, atol=fast_atol,
+                       equal_nan=True):
+        return None
+    if not np.allclose(slow_grid, slow_grid[:, :1], rtol=0, atol=slow_atol,
+                       equal_nan=True):
+        return None
+    # A slow axis that revisits a value would make a lookup by value ambiguous.
+    if _count_distinct(slow_grid[:, 0], slow_atol) != n_slow:
+        return None
+    return n_fast, n_slow
+
+
+@_dataclass(frozen=True, eq=False)
+class SweepNesting:
+    """
+    A declared 2-D sweep: a fast (inner) axis run to completion inside a slow one.
+
+    Held by :attr:`_AttoCubeSweep.nesting`.  The two coordinate arrays are the
+    distinct values of each axis in acquisition order, so a descending sweep stays
+    descending; they are *not* sorted.
+    """
+    fast_type  : str
+    fast_label : str
+    fast_unit  : str
+    fast_axis  : np.ndarray
+    slow_type  : str
+    slow_label : str
+    slow_unit  : str
+    slow_axis  : np.ndarray
+
+    @property
+    def n_fast(self) -> int:
+        """Points along the fast axis."""
+        return int(self.fast_axis.size)
+
+    @property
+    def n_slow(self) -> int:
+        """Points along the slow axis."""
+        return int(self.slow_axis.size)
+
+    @property
+    def shape(self) -> tuple:
+        """``(n_slow, n_fast)`` — the grid shape a flat sweep reshapes to."""
+        return (self.n_slow, self.n_fast)
+
+    @property
+    def fast_axis_label(self) -> str:
+        """Label for :attr:`fast_axis`, with its unit when one is known."""
+        return f"{self.fast_label} ({self.fast_unit})" if self.fast_unit \
+            else self.fast_label
+
+    @property
+    def slow_axis_label(self) -> str:
+        """Label for :attr:`slow_axis`, with its unit when one is known."""
+        return f"{self.slow_label} ({self.slow_unit})" if self.slow_unit \
+            else self.slow_label
+
+    def __str__(self) -> str:
+        return (f"{self.fast_type} ({self.n_fast}, fast) × "
+                f"{self.slow_type} ({self.n_slow}, slow) = "
+                f"{self.n_fast * self.n_slow}")
 
 
 class _AttoCubeSweep:
@@ -874,6 +1082,7 @@ class _AttoCubeSweep:
         payload = self._decode_and_describe(path, spectra_type=..., ...)
         # ... set the axis and signal arrays, apply corrections ...
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
+        self._bind_nesting(fast_sweep, slow_sweep)
 
     That sequence is spelled out in each subclass rather than hidden behind a
     template method, because the ordering matters — the sweep axis cannot be
@@ -884,6 +1093,10 @@ class _AttoCubeSweep:
     _LAYOUT_KIND = None     # "spectral" | "temporal": which export it accepts
     _AXIS_ATTR   = None     # attribute holding the (n_points,) axis
     _SIGNAL_ATTR = None     # attribute holding the (n_points, n_sweeps) signal
+
+    # No nest until one is declared, so a subclass that never calls
+    # _bind_nesting still answers is_nested.
+    _nesting = None
 
     # Canonical curated parameters: attribute name -> (CSV row label, scale, unit).
     # These are the analysis-primary quantities promoted to first-class
@@ -1068,6 +1281,148 @@ class _AttoCubeSweep:
             sweep_unit  if sweep_unit  is not None else meta.get("sweep_unit"),
         )
 
+    def _bind_nesting(self, fast_sweep, slow_sweep) -> None:
+        """
+        Resolve the declared nest, then check the sweep axis against it.
+
+        Called after :meth:`_bind_sweep_axis`: both nest axes are length
+        ``n_sweeps`` and are verified against it, and a curated axis may read a
+        property that the sweep resolution has already checked the rows for.
+        """
+        self._nesting = self._resolve_nesting(fast_sweep, slow_sweep)
+        self._warn_if_sweep_is_sawtooth()
+
+    def _warn_if_sweep_is_sawtooth(self) -> None:
+        """
+        Warn when the declared sweep axis runs the same values over and over.
+
+        A raster flattened into one file leaves its fast axis non-monotonic, and
+        ``__repr__`` prints only the endpoints — so nothing announces it, while
+        every plot against that axis overplots one row per point of the outer
+        axis and every fit treats those rows as repeat measurements of one
+        position.  Not an error: one axis of a raster is a legitimate thing to
+        ask for when slicing a single row.
+        """
+        if self.sweep_type == "index":
+            return
+        axis   = self.sweep_axis
+        finite = axis[np.isfinite(axis)]
+        if finite.size < 3:
+            return
+        step = np.diff(finite)
+        if np.all(step >= 0) or np.all(step <= 0):
+            return
+
+        # Only a nest explains a sawtooth; without one the axis is simply
+        # unordered, which is the caller's business and not this warning's.
+        structure = self._nesting if self._nesting is not None else self.sweep_grid()
+        if structure is None:
+            return
+
+        unit = f" {self._sweep_unit}" if self._sweep_unit else ""
+        warnings.warn(
+            f"sweep={self.sweep_type!r} is not monotonic in '{self.path}': it "
+            f"runs {finite.min():.4g} → {finite.max():.4g}{unit} repeatedly, "
+            f"because this sweep is a flattened 2-D nest ({structure}). Plots "
+            f"against it will overplot, and fits will read repeated rows as "
+            f"repeat measurements of one point. Use the nest instead — "
+            f"as_grid() and get_spectrum_at(fast=..., slow=...) — or sweep=None "
+            f"for the flat index.",
+            UserWarning, stacklevel=4,
+        )
+
+    def _resolve_nesting(self, fast_sweep, slow_sweep) -> SweepNesting:
+        """Build the declared nest, or return ``None`` when none was declared."""
+        meta = self.source_metadata
+        fast = fast_sweep if fast_sweep is not None else meta.get("fast_sweep")
+        slow = slow_sweep if slow_sweep is not None else meta.get("slow_sweep")
+
+        if fast is None and slow is None:
+            return None
+
+        # One without the other cannot be told from a forgotten second axis, and
+        # which of the two is inner is the fact the declaration exists to carry.
+        if fast is None or slow is None:
+            given, missing = (("slow_sweep", "fast_sweep") if fast is None
+                              else ("fast_sweep", "slow_sweep"))
+            raise ValueError(
+                f"{given}={slow if fast is None else fast!r} was declared without "
+                f"{missing}. A nest needs both axes named: the inner one as "
+                f"fast_sweep (it runs to completion at each point of the outer), "
+                f"the outer as slow_sweep. Pass neither to leave the sweep flat."
+            )
+
+        if fast == slow:
+            raise ValueError(
+                f"fast_sweep and slow_sweep are both {fast!r}. A nest needs two "
+                f"different axes."
+            )
+
+        resolved = {}
+        for param, declared in (("fast_sweep", fast), ("slow_sweep", slow)):
+            key, source, label, unit = self._resolve_sweep(
+                declared, None, None, param=param)
+            if key == "index":
+                raise ValueError(
+                    f"{param}='index' is not an axis of a nest — the sweep index "
+                    f"is the flat position the nest is being declared over. Name "
+                    f"the parameter that was scanned."
+                )
+            resolved[param] = (key, self._axis_for_source(source), label, unit)
+
+        (fast_key, fast_flat, fast_label, fast_unit) = resolved["fast_sweep"]
+        (slow_key, slow_flat, slow_label, slow_unit) = resolved["slow_sweep"]
+
+        shape = _nest_shape(fast_flat, slow_flat, self.n_sweeps)
+        if shape is None:
+            raise ValueError(self._nesting_failure(
+                fast_key, fast_flat, slow_key, slow_flat))
+        n_fast, n_slow = shape
+
+        # Read the coordinates straight out of the verified reshape, in
+        # acquisition order: row 0 holds one full run of the fast axis, and column
+        # 0 holds the slow value each row was taken at.
+        return SweepNesting(
+            fast_type = fast_key,
+            fast_label= fast_label,
+            fast_unit = fast_unit,
+            fast_axis = fast_flat.reshape(n_slow, n_fast)[0].copy(),
+            slow_type = slow_key,
+            slow_label= slow_label,
+            slow_unit = slow_unit,
+            slow_axis = slow_flat.reshape(n_slow, n_fast)[:, 0].copy(),
+        )
+
+    def _nesting_failure(self, fast_key, fast_flat, slow_key, slow_flat) -> str:
+        """Explain why a declared nest did not verify, checking for a swap first."""
+        n        = self.n_sweeps
+        n_fast   = _count_distinct(fast_flat, _axis_atol(fast_flat))
+        n_slow   = _count_distinct(slow_flat, _axis_atol(slow_flat))
+        head     = (f"fast_sweep={fast_key!r} ({n_fast} distinct) inside "
+                    f"slow_sweep={slow_key!r} ({n_slow} distinct) does not "
+                    f"describe the {n} sweep points in '{self.path}'.")
+
+        # The declaration exists to settle which axis is inner, so the reversed
+        # reading is the one mistake worth naming outright.
+        if _nest_shape(slow_flat, fast_flat, n) is not None:
+            return (f"{head}\n  Swapping them does: pass "
+                    f"fast_sweep={slow_key!r}, slow_sweep={fast_key!r}. The fast "
+                    f"axis is the one that runs to completion at each point of "
+                    f"the slow one.")
+
+        if n_fast * n_slow != n:
+            return (f"{head}\n  {n_fast} × {n_slow} = {n_fast * n_slow}, not {n}. "
+                    f"Either one of these is not a nest axis, or the scan was "
+                    f"aborted part-way through a row — a partial final row cannot "
+                    f"be reshaped. Compare against sweep_grid() and "
+                    f"varying_parameters(); slice the completed rows, or leave the "
+                    f"sweep flat.")
+
+        return (f"{head}\n  The counts multiply correctly, but the values do not "
+                f"repeat in a regular nest — the fast axis does not run the same "
+                f"values in every row, or the slow axis does not hold still "
+                f"across a row. Compare against sweep_grid().")
+
     def _validate_axis_and_signals(self, axis, signals: dict) -> None:
         """
         Check the decoded arrays are self-consistent before anything uses them.
@@ -1192,13 +1547,16 @@ class _AttoCubeSweep:
             )
         return spectra_type
 
-    def _resolve_sweep(self, sweep, label, unit) -> tuple:
+    def _resolve_sweep(self, sweep, label, unit, *, param: str = "sweep") -> tuple:
         """
-        Resolve the declared sweep to ``(key, source, label, unit)``.
+        Resolve a declared axis to ``(key, source, label, unit)``.
 
         *source* is a ``(kind, name)`` pair consumed by :attr:`sweep_axis`:
         ``("curated", attr)`` for a registry entry, ``("row", label)`` for a raw
         CSV row, ``("index", None)`` when nothing was declared.
+
+        *param* is the name of the argument being resolved, interpolated into
+        every message so the error names the argument the caller actually passed.
         """
         if sweep is None:
             sweep = "index"
@@ -1215,16 +1573,16 @@ class _AttoCubeSweep:
                 role = _ROLE_FOR_CURATED.get(name)
                 if role is None:
                     continue
-                self._require_role(role, f"sweep={sweep!r}")
+                self._require_role(role, f"{param}={sweep!r}")
                 if self._gates[role] is None:
                     grounded.append(role)
             if grounded:
                 raise ValueError(
-                    f"sweep={sweep!r} resolves through the "
+                    f"{param}={sweep!r} resolves through the "
                     f"{', '.join(repr(r) for r in grounded)} electrode, which gates "
                     f"declared as tied to ground — its voltage is zero at every "
                     f"sweep point, so it is not an axis. Sweep the driven electrode "
-                    f"instead, or use sweep=None for the index."
+                    f"instead, or pass {param}=None."
                 )
             # Fail on the row the *declared* sweep needs, not on every curated
             # row: the requirement follows what the caller said was measured.
@@ -1238,17 +1596,17 @@ class _AttoCubeSweep:
                            if name in _GATE_CURATED else
                            f"Pass curated_labels={{'{name}': '<row>'}}")
                     raise KeyError(
-                        f"sweep={sweep!r} needs the curated parameter '{name}' "
+                        f"{param}={sweep!r} needs the curated parameter '{name}' "
                         f"(row '{csv_label}'), which '{self.path}' does not "
                         f"contain. Available rows: {self.parameter_labels}. "
                         f"{fix} if it is under another name."
                     )
             if sweep == "electric_field" and self.geometry is None:
                 raise ValueError(
-                    "sweep='electric_field' needs a DeviceGeometry to convert "
-                    "gate voltages into a field — pass geometry=. To sweep a "
-                    "raw gate voltage instead, use sweep='top_voltage' or "
-                    "'bottom_voltage'."
+                    f"{param}='electric_field' needs a DeviceGeometry to convert "
+                    f"gate voltages into a field — pass geometry=. To use a "
+                    f"raw gate voltage instead, use {param}='top_voltage' or "
+                    f"'bottom_voltage'."
                 )
             # carrier_density sums over whichever gates the device declares, so its
             # requirement is not a fixed row list and cannot live in
@@ -1256,14 +1614,14 @@ class _AttoCubeSweep:
             if sweep == "carrier_density":
                 if self.geometry is None:
                     raise ValueError(
-                        "sweep='carrier_density' needs a DeviceGeometry for the "
-                        "gate capacitance — pass geometry= with the hBN thickness "
-                        "of each gate. To sweep a raw gate voltage instead, use "
-                        "sweep='top_voltage' or 'bottom_voltage'."
+                        f"{param}='carrier_density' needs a DeviceGeometry for the "
+                        f"gate capacitance — pass geometry= with the hBN thickness "
+                        f"of each gate. To use a raw gate voltage instead, use "
+                        f"{param}='top_voltage' or 'bottom_voltage'."
                     )
                 # Charge has to come from somewhere: a density is defined against
                 # the contact that supplies it, so the contact must be declared.
-                self._require_role("channel", "sweep='carrier_density'")
+                self._require_role("channel", f"{param}='carrier_density'")
                 for role in _GATE_ELECTRODES:
                     if role in self._gates:
                         self.geometry.gate_capacitance(role)
@@ -1281,7 +1639,7 @@ class _AttoCubeSweep:
                     unit  if unit  is not None else "")
 
         raise ValueError(
-            f"sweep={sweep!r} is neither a known sweep type nor a parameter row "
+            f"{param}={sweep!r} is neither a known sweep type nor a parameter row "
             f"in '{self.path}'.\n"
             f"  Sweep types : {sorted(_SWEEP_TYPES)}\n"
             f"  File rows   : {self.parameter_labels}"
@@ -1596,7 +1954,11 @@ class _AttoCubeSweep:
         sweep returns ``arange(n_sweeps)`` — never a guess at which parameter was
         meant.  See :meth:`varying_parameters`.
         """
-        kind, name = self._sweep_source
+        return self._axis_for_source(self._sweep_source)
+
+    def _axis_for_source(self, source: tuple) -> np.ndarray:
+        """Read the ``(n_sweeps,)`` array a ``(kind, name)`` source points at."""
+        kind, name = source
         if kind == "index":
             return np.arange(self.n_sweeps, dtype=float)
         if kind == "row":
@@ -1619,6 +1981,276 @@ class _AttoCubeSweep:
     def sweep_unit(self) -> str:
         """Unit of :attr:`sweep_axis`; empty when the file does not state one."""
         return self._sweep_unit
+
+    # --- The declared nest ---------------------------------------------------
+
+    @property
+    def nesting(self) -> SweepNesting:
+        """
+        The declared 2-D nest, or ``None`` when the sweep is flat.
+
+        Carries both coordinate axes with their labels and units.  A nest is
+        declared with ``fast_sweep=`` and ``slow_sweep=`` at load time and is
+        never inferred; :meth:`sweep_grid` reports what a file looks like it
+        contains, which is the diagnostic for deciding what to declare.
+        """
+        return self._nesting
+
+    @property
+    def is_nested(self) -> bool:
+        """Whether a 2-D nest was declared — the predicate :meth:`as_grid` needs."""
+        return self._nesting is not None
+
+    def as_grid(self, array: np.ndarray) -> np.ndarray:
+        """
+        Reshape a flat-sweep array onto the declared nest.
+
+        Parameters
+        ----------
+        array : np.ndarray
+            Either a signal array of shape ``(n_points, n_sweeps)`` — the spectra,
+            any corrected variant of them, the decays — or a per-sweep-point row
+            of shape ``(n_sweeps,)``, such as anything from :attr:`parameters`.
+
+        Returns
+        -------
+        np.ndarray
+            ``(n_points, n_slow, n_fast)`` for a signal array,
+            ``(n_slow, n_fast)`` for a per-point row.  The fast axis is last,
+            because the sweep was written with it running fastest.
+
+        Raises
+        ------
+        ValueError
+            If no nest was declared, or if *array* does not have ``n_sweeps`` as
+            its trailing dimension.
+
+        Notes
+        -----
+        A **view**, not a copy: the flat sweep is already in the right memory
+        order, so nothing moves.  It therefore shares storage with the array it
+        came from, and the never-mutate-after-load rule reaches it.
+
+        Examples
+        --------
+        >>> cube = scan.as_grid(scan.spectra)            # doctest: +SKIP
+        >>> cube.shape                                   # doctest: +SKIP
+        (1340, 51, 41)
+        >>> scan.as_grid(scan["Scanner X"]).shape        # doctest: +SKIP
+        (51, 41)
+        """
+        nest  = self._require_nesting("as_grid()")
+        array = np.asarray(array)
+        n     = self.n_sweeps
+
+        if array.ndim not in (1, 2) or array.shape[-1] != n:
+            raise ValueError(
+                f"as_grid() takes an array whose last axis is the {n} sweep "
+                f"points — either (n_points, {n}) or ({n},) — and got shape "
+                f"{array.shape}. An array indexed some other way has no nest to "
+                f"be put onto."
+            )
+        return array.reshape(array.shape[:-1] + nest.shape)
+
+    # --- Locating a sweep point ----------------------------------------------
+
+    def _lookup_axis(self, axis: str) -> tuple:
+        """
+        Return ``(values, label, unit)`` for an axis name.
+
+        ``"sweep"`` is the declared sweep axis; ``"fast"`` and ``"slow"`` are the
+        nest coordinates.  Anything else resolves the way ``sweep=`` does — a
+        registry key or a raw row label — so any per-sweep-point quantity can be
+        looked up, whether or not it is what the sweep was declared with.
+        """
+        if axis == "sweep":
+            return self.sweep_axis, self.sweep_label, self.sweep_unit
+        if axis in ("fast", "slow"):
+            nest = self._require_nesting(f"axis={axis!r}")
+            return (getattr(nest, f"{axis}_axis"),
+                    getattr(nest, f"{axis}_label"),
+                    getattr(nest, f"{axis}_unit"))
+        try:
+            _, source, label, unit = self._resolve_sweep(
+                axis, None, None, param="axis")
+        except ValueError as exc:
+            raise ValueError(
+                f"{exc}\n  Also accepted : 'sweep' (the declared sweep axis), "
+                f"'fast' and 'slow' (the nest coordinates)."
+            ) from None
+        return self._axis_for_source(source), label, unit
+
+    def nearest_index(self, value: float, axis: str = "sweep") -> int:
+        """
+        Position along *axis* of the point closest to *value*.
+
+        Parameters
+        ----------
+        value : float
+            The coordinate wanted, in the axis's own units.
+        axis : str
+            Which axis to search.  ``"sweep"`` is the flat sweep axis, so the
+            result indexes the columns of :attr:`spectra` directly.  ``"fast"``
+            and ``"slow"`` are the nest coordinates and need a declared nest.
+            Any other name is a quantity to search *instead* of the declared
+            axis, spelled as ``sweep=`` spells it — a registry key such as
+            ``"top_voltage"`` or ``"power"``, or a raw row label such as
+            ``"V_A"``.  Useful when a sweep is declared in one coordinate and
+            you want to locate a point by another: a field sweep driven by both
+            gates at a fixed ratio can be searched by ``"top_voltage"``.
+
+        Returns
+        -------
+        int
+            An index into that axis — always a single position, never a set.
+
+        Warns
+        -----
+        UserWarning
+            When the closest point is further than half the axis's median step
+            from *value*.  A nearest-value lookup cannot fail, so asking for a
+            coordinate the scan does not hold returns a real spectrum from
+            somewhere else; the warning names what was asked for and what was
+            used.  A request landing between two real points is silent.
+        UserWarning
+            When the value found occurs at more than one sweep point, so the
+            request does not identify one.  Only a quantity that changes
+            monotonically along the sweep is guaranteed not to: a hysteresis
+            loop passes the same gate voltage twice.
+        """
+        values, label, unit = self._lookup_axis(axis)
+        value = float(value)
+
+        # inf where the axis is not finite, so a NaN row cannot win the argmin.
+        distance = np.where(np.isfinite(values), np.abs(values - value), np.inf)
+        if not np.isfinite(distance).any():
+            raise ValueError(
+                f"The {axis!r} axis holds no finite values, so there is no "
+                f"nearest point to {value:.6g}."
+            )
+        idx   = int(np.argmin(distance))
+        found = float(values[idx])
+
+        finite = values[np.isfinite(values)]
+        step   = (float(np.median(np.abs(np.diff(np.sort(finite)))))
+                  if finite.size > 1 else 0.0)
+        suffix = f" {unit}" if unit else ""
+
+        if abs(found - value) > 0.5 * step:
+            warnings.warn(
+                f"nearest_index({value:.6g}, axis={axis!r}) on {label} has no "
+                f"point at {value:.6g}{suffix}; using index {idx} at "
+                f"{found:.6g}{suffix}, which is {abs(found - value):.6g}{suffix} "
+                f"away. The axis spans {finite.min():.6g} to {finite.max():.6g}"
+                f"{suffix} in {finite.size} points.",
+                UserWarning, stacklevel=3,
+            )
+
+        # A quantity that is not the axis the sweep was ordered by need not be
+        # injective — a hysteresis loop passes the same gate voltage twice, and
+        # argmin would pick one without saying so.  Tested on the *coordinate*
+        # rather than the distance, so a request landing midway between two
+        # distinct points does not trip this.
+        same = np.flatnonzero(np.abs(values - found) <= _axis_atol(values))
+        if same.size > 1:
+            shown = ", ".join(str(i) for i in same[:6])
+            more  = f", … ({same.size} in all)" if same.size > 6 else ""
+            warnings.warn(
+                f"{label} holds {found:.6g}{suffix} at {same.size} sweep points "
+                f"(indices {shown}{more}), so looking it up by value does not "
+                f"identify one; using index {idx}. Address these by index, or "
+                f"search a quantity that changes monotonically along the sweep.",
+                UserWarning, stacklevel=3,
+            )
+        return idx
+
+    def _positional_index(self, index, axis: str, length: int) -> int:
+        """Validate an integer position, accepting Python-style negatives."""
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            raise TypeError(
+                f"A {axis!r} index must be an integer, got {index!r}. To look up "
+                f"by value instead, use the *_at accessor."
+            ) from None
+        if not -length <= index < length:
+            raise IndexError(
+                f"{axis!r} index {index} is out of range for {length} points."
+            )
+        return index % length
+
+    def _sweep_selector(self, value=None, *, axis: str = "sweep",
+                        fast=None, slow=None, by_value: bool, what: str):
+        """
+        Resolve a point request into an ``int`` or ``slice`` over the sweep axis.
+
+        An ``int`` drops the sweep dimension, a ``slice`` keeps it — and both are
+        basic indexing, so the signal array is viewed rather than copied.  For a
+        nest, pinning the slow axis takes one contiguous run of columns while
+        pinning the fast axis strides across every run.
+        """
+        locate = ((lambda v, ax: self.nearest_index(v, ax)) if by_value else
+                  (lambda v, ax: self._positional_index(
+                      v, ax, len(self._lookup_axis(ax)[0]))))
+        arg = "value" if by_value else "index"
+
+        # axis= says what the positional argument is read against, so it is an
+        # alternative to naming the nest axes rather than a modifier of them.
+        if axis != "sweep" and (fast is not None or slow is not None):
+            raise ValueError(
+                f"{what}: axis={axis!r} names the quantity the positional {arg} "
+                f"is read against, so it cannot be combined with fast= or "
+                f"slow=. To address a nest by another quantity, declare the nest "
+                f"in it: fast_sweep={axis!r}."
+            )
+
+        if not self.is_nested:
+            if fast is not None or slow is not None:
+                raise ValueError(
+                    f"{what}: fast= and slow= need a declared nest, and this "
+                    f"sweep is flat ({self.n_sweeps} points). Give the {arg} "
+                    f"positionally to index the sweep axis, or declare the nest "
+                    f"with fast_sweep= and slow_sweep= at load time."
+                )
+            if value is None:
+                raise ValueError(f"{what} needs a {arg}.")
+            return locate(value, axis)
+
+        nest = self._nesting
+        if value is not None:
+            raise ValueError(
+                f"{what}: this sweep is a declared nest ({nest}), so a single "
+                f"{arg} does not locate a point. Name the axes: fast= and/or "
+                f"slow=."
+            )
+        if fast is None and slow is None:
+            raise ValueError(
+                f"{what}: name fast= and/or slow=. Naming both gives one "
+                f"spectrum, naming one gives the line of spectra along the "
+                f"other. For the whole grid at once, use as_grid()."
+            )
+
+        n_fast = nest.n_fast
+        if fast is not None and slow is not None:
+            return locate(slow, "slow") * n_fast + locate(fast, "fast")
+        if slow is not None:
+            start = locate(slow, "slow") * n_fast
+            return slice(start, start + n_fast)
+        return slice(locate(fast, "fast"), None, n_fast)
+
+    def _require_nesting(self, what: str) -> SweepNesting:
+        """Return the nest, or raise naming what needed it."""
+        if self._nesting is None:
+            detected = self.sweep_grid()
+            hint = (f" This file looks like {detected}; declare it with "
+                    f"fast_sweep= and slow_sweep=."
+                    if detected is not None else
+                    " Declare one with fast_sweep= and slow_sweep= at load time.")
+            raise ValueError(
+                f"{what} needs a declared nest, and this sweep is flat "
+                f"({self.n_sweeps} points).{hint}"
+            )
+        return self._nesting
 
     # --- What the measurement is -------------------------------------------
 
@@ -1786,9 +2418,21 @@ class _AttoCubeSweep:
         Returns
         -------
         SweepGrid or None
-            ``(inner_label, n_inner, outer_label, n_outer)``, inner being the
-            fast axis.  ``None`` when the sweep is not a raster — which is the
-            normal case for a gate or power sweep.
+            ``(fast_label, n_fast, slow_label, n_slow)``.  ``None`` when the
+            sweep is not a raster — the normal case for a gate or power sweep.
+
+        See Also
+        --------
+        nesting : the nest actually declared, which is what reshaping uses.
+
+        Notes
+        -----
+        Reports; does not decide.  Both axes are looked for among the raw
+        parameter rows, so a nest whose axis is a *derived* quantity — an
+        anti-symmetric gate pair sweeping the field, say — is reported through
+        the channels that carry it rather than through the field.  Declare the
+        nest with ``fast_sweep=`` / ``slow_sweep=``, which accept the same
+        vocabulary as ``sweep=``.
         """
         n = self.n_sweeps
         if n < 4: # Checks if less than 4 points -- not a grid sweep
@@ -1803,20 +2447,19 @@ class _AttoCubeSweep:
                 # If n_unique is more than 1 but less than n, it could be a sweep grid
                 counts[label] = n_unique
 
-        for inner, n_inner in counts.items():
-            for outer, n_outer in counts.items():
-                if inner == outer or n_inner * n_outer != n:
-                    # If inner loop = outer loop, or the n_inner * n_outer does not give the total sweep length, skip
+        for fast, n_fast in counts.items():
+            for slow, n_slow in counts.items():
+                if fast == slow or n_fast * n_slow != n:
+                    # Same row twice, or the two counts do not account for every
+                    # sweep point: not this pair.
                     continue
-                values = self.parameters[inner]
+                values = self.parameters[fast]
                 # The fast axis runs through all its values, then starts over.
-                # Check if the candidate inner axis has a repeat every n_inner points as expected from a flattened raster
-                if (np.unique(values[:n_inner]).size == n_inner
-                        and np.isclose(values[0], values[n_inner])):
-                        # Take the first n_inner values, find unique values and count them.
-                        # If it equals n_inner, the first block contains all distinct values of the inner axis with no repeats yet
-                        # Then check if number at value[0] is close to values[n_inner] to see if the inner axis repeats after n_inner points
-                    return SweepGrid(inner, n_inner, outer, n_outer)
+                # The first n_fast values holding every distinct value with no
+                # repeat, and value n_fast returning to the first, is that.
+                if (np.unique(values[:n_fast]).size == n_fast
+                        and np.isclose(values[0], values[n_fast])):
+                    return SweepGrid(fast, n_fast, slow, n_slow)
         return None
 
     # --- Export ------------------------------------------------------------
@@ -1918,9 +2561,19 @@ class _AttoCubeSweep:
         if varying:
             lines.append(f"  {'Varying':<{w}}: {', '.join(varying)}")
 
-        grid = self.sweep_grid()
-        if grid is not None:
-            lines.append(f"  {'Grid':<{w}}: {grid}")
+        # A declared nest is a fact about the scan; a detected one is only a
+        # reading of the rows, so say which of the two this is.  Same split as
+        # the gate wiring above.
+        if self._nesting is not None:
+            lines.append(f"  {'Nesting':<{w}}: {self._nesting}")
+        else:
+            grid = self.sweep_grid()
+            if grid is not None:
+                lines.append(
+                    f"  {'Grid':<{w}}: {grid}  — detected, not declared; pass "
+                    f"fast_sweep='{grid.fast_label}', "
+                    f"slow_sweep='{grid.slow_label}'"
+                )
 
         if self.n_declared_sweeps != self.n_sweeps:
             lines.append(
@@ -2340,6 +2993,8 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         sweep          : str   = None,
         sweep_label    : str   = None,
         sweep_unit     : str   = None,
+        fast_sweep     : str   = None,
+        slow_sweep     : str   = None,
         geometry        : DeviceGeometry = None,
         cosmic_rays     : dict  = None,
         bg_region_nm    : tuple = None,
@@ -2422,6 +3077,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         # What *is* checked is the row the declared sweep needs — which is why
         # this comes after the signal array, since it validates against n_sweeps.
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
+        self._bind_nesting(fast_sweep, slow_sweep)
 
         # --- Resolve background window to nm (always work in wavelength space) ---
         if bg_region_eV is not None:
@@ -2768,6 +3424,127 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         name, unit = SIGNAL_LABELS["RC"]
         return f"{name} ({unit})" if unit else name
 
+    # --- Picking spectra out of the sweep ------------------------------------
+
+    def get_spectrum_at(self, value: float = None, *,
+                        axis   : str   = "sweep",
+                        fast   : float = None,
+                        slow   : float = None,
+                        source : str   = "best",
+                        x_axis : str   = "energy") -> np.ndarray:
+        """
+        Spectra at the sweep coordinate closest to the value(s) given.
+
+        **The rank of the result depends on how much you specify.**  Pinning
+        every axis gives one spectrum, ``(n_pixels,)``; leaving one free gives
+        the line of spectra along it, ``(n_pixels, n)`` with the swept dimension
+        last, as everywhere else in the package.
+
+        Parameters
+        ----------
+        value : float, optional
+            Coordinate on the sweep axis.  For a flat sweep only; a nest is
+            addressed with *fast* and *slow*.
+        axis : str
+            Which quantity *value* is read against, spelled as ``sweep=`` spells
+            it: a registry key such as ``"top_voltage"`` or a raw row label such
+            as ``"V_A"``.  The default searches the declared sweep axis.  Use it
+            when a sweep is declared in one coordinate and you want a point in
+            another — a field sweep driven by both gates at a fixed ratio can be
+            addressed by ``axis="top_voltage"``.  Not combinable with *fast* or
+            *slow*: to address a nest by another quantity, declare the nest in
+            it.
+        fast, slow : float, optional
+            Coordinates on the nest axes.  Give both for a single spectrum, or
+            one to hold that axis and take every point of the other.
+        source : str
+            Which array to read: ``"best"`` (repaired and background-corrected
+            where available), ``"raw"``, ``"energy"``, ``"energy_bg"``,
+            ``"energy_pre_jacobian"``, ``"contrast"``, ``"contrast_wavelength"``.
+        x_axis : {"energy", "wavelength"}
+            Which spectral ordering ``"best"`` should resolve to.  The returned
+            spectra run along :attr:`energy` or :attr:`wavelength` accordingly.
+
+        Returns
+        -------
+        np.ndarray
+            A **view** into the source array, never a copy, so the
+            never-mutate rule reaches it.  Strided rather than contiguous, as
+            any column selection out of a row-major array is; anything
+            downstream that demands contiguity will copy it.
+
+        Raises
+        ------
+        ValueError
+            If *value* is given for a nested sweep, or *fast*/*slow* for a flat
+            one, or if neither is given.  For the whole grid, use :meth:`as_grid`.
+
+        Warns
+        -----
+        UserWarning
+            When a requested coordinate is further than half a step from any real
+            point, or occurs at more than one — see :meth:`nearest_index`.
+
+        See Also
+        --------
+        get_spectrum_by_index : the same selection by integer position.
+        nearest_index : the index alone, for composing against another array.
+        as_grid : the whole sweep reshaped onto the nest.
+
+        Examples
+        --------
+        >>> scan.get_spectrum_at(2.5).shape                  # doctest: +SKIP
+        (1340,)
+        >>> scan.get_spectrum_at(15.0, axis="top_voltage").shape  # doctest: +SKIP
+        (1340,)
+        >>> scan.get_spectrum_at(fast=3.0, slow=1.0).shape   # doctest: +SKIP
+        (1340,)
+        >>> scan.get_spectrum_at(fast=3.0).shape             # doctest: +SKIP
+        (1340, 51)
+        """
+        selector = self._sweep_selector(
+            value, axis=axis, fast=fast, slow=slow, by_value=True,
+            what="get_spectrum_at()")
+        return _resolve_spectra(self, source, x_axis)[:, selector]
+
+    def get_spectrum_by_index(self, index: int = None, *,
+                              fast   : int = None,
+                              slow   : int = None,
+                              source : str = "best",
+                              x_axis : str = "energy") -> np.ndarray:
+        """
+        Spectra at integer sweep positions — :meth:`get_spectrum_at` by index.
+
+        Same arguments, same rank rules and same return contract, except that
+        the coordinates are positions rather than values, so nothing is searched
+        for and nothing is warned about.  Negative positions count from the end,
+        as elsewhere in Python.
+
+        Parameters
+        ----------
+        index : int, optional
+            Position on the sweep axis.  For a flat sweep only.
+        fast, slow : int, optional
+            Positions on the nest axes, ``0 <= i < n_fast`` / ``n_slow``.
+        source, x_axis
+            As :meth:`get_spectrum_at`.
+
+        Returns
+        -------
+        np.ndarray
+            ``(n_pixels,)`` with every axis pinned, else ``(n_pixels, n)``.
+            A view, as :meth:`get_spectrum_at`.
+
+        Raises
+        ------
+        IndexError
+            If a position is out of range for its axis.
+        """
+        selector = self._sweep_selector(
+            index, fast=fast, slow=slow, by_value=False,
+            what="get_spectrum_by_index()")
+        return _resolve_spectra(self, source, x_axis)[:, selector]
+
     # --- Dunder methods ----------------------------------------------------
 
     def _repr_axis_lines(self, w: int) -> list:
@@ -3021,6 +3798,8 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         sweep          : str   = None,
         sweep_label    : str   = None,
         sweep_unit     : str   = None,
+        fast_sweep     : str   = None,
+        slow_sweep     : str   = None,
         geometry       : DeviceGeometry = None,
         bg_region_ns   : tuple = None,
         gates          : dict  = None,
@@ -3044,6 +3823,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         self._validate_axis_and_signals(self.time, {"Exp": self.decays})
 
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
+        self._bind_nesting(fast_sweep, slow_sweep)
 
         # Pre-pulse baseline.  processing.subtract_background is generic in x, so
         # a time window needs no separate implementation from a spectral one.

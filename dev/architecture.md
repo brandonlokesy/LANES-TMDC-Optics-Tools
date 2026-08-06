@@ -434,7 +434,7 @@ Precedence is the same everywhere: **explicit argument > file metadata > default
 | `_resolve_aux_spectrum` | loaders | a background or reference onto this scan's grid | axis mismatch (never resamples) |
 | `_resolve_baseline` | fitting | `"constant"`/`"linear"`/`"none"` → model terms | unrecognised key |
 | `_resolve_x_axis` | plotting | `"energy"`/`"wavelength"` → `(array, label)` | anything else |
-| `_resolve_spectra` | plotting | `spectra_source=` → the actual array | source unavailable on this scan |
+| `_resolve_spectra` | loaders | `spectra_source=` / `source=` → the actual array | source unavailable on this scan |
 
 Two design habits visible in all of them:
 
@@ -749,7 +749,8 @@ and it is negative-going — a peak fit whose model decays to zero in the wings 
 give quietly meaningless numbers, and a PL colour bar would silently start meaning
 ΔR/R₀. Ask for `energy_contrast` explicitly.
 
-`plotting._resolve_spectra` mirrors this with `spectra_source=`, and `"best"` there
+`loaders._resolve_spectra` mirrors this with `spectra_source=` — the `source=` of
+`get_spectrum_at`, and what `plotting` imports — and `"best"` there
 follows the same rule.
 
 ## The three properties that must never raise
@@ -767,14 +768,58 @@ you ask for something specific, the repr tells you before you ask. Given that th
 failure mode is a plot that looks entirely normal, the intervention has to happen
 where you are already looking.
 
-## `sweep_grid()`
+## `sweep_grid()` and the declared nest
 
-Detects a 2-D raster flattened into one file (`n_inner × n_outer == n_sweeps`
-exactly) and reports the shape as a `SweepGrid` named tuple. It **detects and
-reports; it does not reshape** — the reshape plus map plotting is open work, and when
-it lands it gets an explicit `grid=("Scanner X", "Scanner Y")` declaration rather
-than a `_SWEEP_TYPES` entry. (A raster has two axes; `sweep_axis` returns exactly one
-array, so there is nothing single to return.)
+Two things, and the split between them is the same one `gate_mode` has with `gates=`:
+**detection reports, declaration decides.**
+
+`sweep_grid()` detects a 2-D raster flattened into one file (`n_fast × n_slow ==
+n_sweeps` exactly) and reports it as a `SweepGrid` named tuple. It searches the **raw
+parameter rows**, so a nest whose axis is a *derived* quantity is reported through the
+channels that carry it — and its candidate ordering comes from `varying_parameters()`,
+which A10 makes meaningless for a zero-mean row. It is a diagnostic that says what to
+declare, and nothing keys off it.
+
+The nest itself is declared at load with `fast_sweep=` / `slow_sweep=`, inner axis
+first *by name* rather than by tuple position:
+
+```python
+scan = AttoCubeSpectralSweep(path, spectra_type="RC",
+                             fast_sweep="Scanner X", slow_sweep="Scanner Y")
+scan.nesting          # SweepNesting: both coordinate axes, labels, units
+scan.is_nested        # the predicate as_grid() and the accessors need
+scan.as_grid(scan.spectra)     # (n_points, n_slow, n_fast) — a view
+```
+
+Both go through `_resolve_sweep`, the same resolver `sweep=` uses, so a
+`_SWEEP_TYPES` key works as well as a raw row: `fast_sweep="electric_field",
+slow_sweep="power"` is the case the design exists for, where both gates move together
+and no single row is the axis.
+
+**A nest is not a `_SWEEP_TYPES` entry, and `fast_sweep` is not an alias of `sweep`.**
+That registry answers *"which 1-D array of length `n_sweeps` is the sweep axis"*, and
+a raster has two. And "sweep" means the *flattened point* everywhere else in the
+package (`n_sweeps`, `sweep_index`, `sweep_axis`), so `sweep=` keeps answering "what
+labels each flat point" while the nest is a separate statement about structure. On a
+nested scan `sweep=` is normally omitted and `sweep_axis` is the flat index. Full
+argument in **E14**.
+
+`spectra` keeps shape `(n_points, n_sweeps)` either way — a declaration must not
+change the rank of an attribute.
+
+`axis=` is the fourth entry point onto the same resolver: it says which quantity a
+positional value is read against, so a sweep declared in one coordinate can be
+searched in another.
+
+```python
+scan.get_spectrum_at(15.0, axis="top_voltage")   # flat sweeps only
+scan.nearest_index(15.0, axis="top_voltage")
+```
+
+Flat sweeps only, because on a nest an arbitrary quantity matches `n_slow` points or
+one depending on how the scan was driven — the return rank would follow the data
+rather than the call. And because such a quantity need not be monotonic along the
+sweep, `nearest_index` warns when the value found occurs at more than one point.
 
 ---
 
@@ -1001,8 +1046,11 @@ A change that breaks one of these is a bug even if the tests pass.
    `v_bot` are rejected as `curated_labels` keys. One fact, one spelling.
 6. **`gate_mode` and `__repr__` never raise; `ef` returns `None` without a geometry.**
 7. **HDF5 stores nothing derivable and never replays a correction on read.**
-8. **An undeclared `sweep=` is the index**, never an auto-detected parameter.
-9. **Vectorise, but name the shapes.** Broadcasting and fancy indexing are wanted;
+8. **An undeclared `sweep=` is the index**, never an auto-detected parameter. Nor is
+   a nest ever inferred: `sweep_grid()` reports, `fast_sweep=`/`slow_sweep=` decides.
+9. **A declaration never changes the rank of an attribute.** `spectra` is
+   `(n_points, n_sweeps)` nested or flat; the grid is a view from `as_grid()`.
+10. **Vectorise, but name the shapes.** Broadcasting and fancy indexing are wanted;
    the condition is that a reader never has to re-derive the trick from the
    expression. Say what the operation does and over what:
 
@@ -1012,7 +1060,7 @@ A change that breaks one of these is a bug even if the tests pass.
    corrected = spectra - baseline[:, None]
    ```
 
-10. **New module → `docs/api/<module>.md` with a `:::` directive *and* a `nav` entry
+11. **New module → `docs/api/<module>.md` with a `:::` directive *and* a `nav` entry
     in `mkdocs.yml`.** `python -m mkdocs build --strict` must stay green.
 
 ---
@@ -1021,7 +1069,8 @@ A change that breaks one of these is a bug even if the tests pass.
 
 | You want to | Go to |
 |---|---|
-| add a new sweep axis | write the property, add a `_SWEEP_TYPES` row (+ `_SWEEP_REQUIRES` if it needs a specific row) |
+| add a new sweep axis | write the property, add a `_SWEEP_TYPES` row (+ `_SWEEP_REQUIRES` if it needs a specific row) — usable as `sweep=`, `fast_sweep=` and `slow_sweep=` at once, since all three share `_resolve_sweep` |
+| reshape a raster, or pick a spectrum out of one | declare `fast_sweep=`/`slow_sweep=`, then `as_grid()` / `get_spectrum_at()`; §`sweep_grid()` above |
 | add a new input format | write a decoder returning the §2.1 payload; add a suffix to the dispatch in `_decode` |
 | add a curated parameter | one row in `_AttoCubeSweep._CURATED`, plus a property |
 | understand a gate refusal | `dev/E7b-E7c-gates.md`, Part 8 (the refusal matrix) |
@@ -1062,7 +1111,7 @@ skeleton of the whole design:
 | `constants.SIGNAL_LABELS` | code → (axis name, unit) | its axis label |
 | `hdf5._AXIS_KIND_FOR_LAYOUT` | layout kind → dataset name/units/group | a new axis kind |
 | `hdf5._JSON_ATTRS` | which metadata keys are JSON-encoded | a new dict-valued metadata key |
-| `plotting._SPECTRA_SOURCES` | `spectra_source=` → attribute name | a new plottable array |
+| `loaders._SPECTRA_SOURCES` | `spectra_source=` / `source=` → attribute name | a new plottable array |
 
 The four derived gate names all come from `_GATE_ROLE_CURATED` on the lines below it,
 so they cannot drift. (`_GATE_CURATED` and `_ROLE_FOR_CURATED` currently hold the

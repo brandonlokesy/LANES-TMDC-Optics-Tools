@@ -114,6 +114,40 @@ def _resolve_x_axis(scan, x_axis: str) -> tuple:
         )
 
 
+def _signal_name_unit(obj, source: str = None) -> tuple:
+    """
+    Return ``(quantity_name, unit)`` for the signal an object measures.
+
+    *source* is a :data:`_SPECTRA_SOURCES` key.  A contrast source is a
+    different physical quantity from the raw signal, and a dimensionless one,
+    so it takes the contrast label and an empty unit.
+
+    Objects that declare no measurement type fall back to a neutral
+    "Intensity" / "counts" — a :class:`~tmdc_optics_tools.loaders.SingleSpectrum`
+    is a 2-row CSV as likely to be a bare-substrate reflectance reference as PL.
+    """
+    if source is not None and source.startswith("contrast"):
+        return getattr(obj, "contrast_label", r"$\Delta R/R_0$"), ""
+    return (getattr(obj, "signal_name", "Intensity"),
+            getattr(obj, "signal_unit", "counts"))
+
+
+def _signal_label(obj, normalized: bool = False, source: str = None) -> str:
+    """
+    Compose the y-axis or colour-bar label for a measured signal.
+
+    Only the calling plot function knows whether it rescaled the values, and a
+    rescaled array has no unit left — hence *normalized*, which substitutes
+    "norm." for whatever the native unit was.  A dimensionless quantity has no
+    unit to substitute and is left alone: a ratio such as ΔR/R₀ already reads as
+    normalised, so marking it again says the same thing twice.
+    """
+    name, unit = _signal_name_unit(obj, source)
+    if normalized and unit:
+        unit = "norm."
+    return f"{name} ({unit})" if unit else name
+
+
 # ---------------------------------------------------------------------------
 # 2-D map plots
 # ---------------------------------------------------------------------------
@@ -128,7 +162,7 @@ def plot_spectral_map(
     median_kernel  : int   = 3,
     clim           : tuple = None,
     colorbar       : bool  = True,
-    colorbar_label : str   = "PL intensity",
+    colorbar_label : str   = None,
     rescale_img    : bool  = False,
 ) -> tuple:
     """
@@ -162,10 +196,11 @@ def plot_spectral_map(
     clim : tuple of (vmin, vmax), optional
         Colour axis limits. Auto-scaled if ``None``.
     colorbar : bool
-    colorbar_label : str
-        Name of the plotted quantity, **without a unit**: ``" (norm.)"`` or
-        ``" (counts)"`` is appended according to *rescale_img*.  The default
-        assumes PL, so a reflectance or contrast map needs one passed.
+    colorbar_label : str, optional
+        Colour-bar label.  Derived from the scan's measurement type when
+        ``None`` — a reflectance sweep is labelled as reflectance, and a
+        dimensionless ratio gets no unit.  A string is used **verbatim**, so
+        include the unit.
     rescale_img : bool
         Default is `False`. If `True`, rescales intensity to [0, 1] before plotting.
 
@@ -206,9 +241,8 @@ def plot_spectral_map(
 
     if colorbar:
         cb = fig.colorbar(mesh, ax=ax, pad=0.02)
-        # colorbar_label names the quantity only; the unit follows from whether
-        # the data was rescaled, so pass it without one.
-        cb.set_label(colorbar_label + (" (norm.)" if rescale_img else " (counts)"))
+        cb.set_label(colorbar_label if colorbar_label is not None
+                     else _signal_label(scan, normalized=rescale_img))
 
     return fig, ax, mesh
 
@@ -248,10 +282,11 @@ def plot_spectrum(
     x_axis      : str  = "energy",
     normalize   : bool = False,
     label       : str  = None,
+    ylabel      : str  = None,
     **line_kwargs,
 ) -> tuple:
     """
-    Plot a single PL spectrum from a scan.
+    Plot one spectrum from a sweep.
 
     Parameters
     ----------
@@ -264,6 +299,10 @@ def plot_spectrum(
         Normalise spectrum to its peak value.
     label : str, optional
         Legend label. Defaults to the gate voltage / field value.
+    ylabel : str, optional
+        Y-axis label.  Derived from the scan's measurement type when ``None``,
+        so a reflectance sweep is not labelled as PL.  A string is used
+        **verbatim**, so include the unit.
     **line_kwargs
         Passed directly to ``ax.plot``.
 
@@ -298,7 +337,8 @@ def plot_spectrum(
 
     line, = ax.plot(x, y, label=label, **line_kwargs)
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("PL intensity (norm.)" if normalize else "PL intensity (counts)")
+    ax.set_ylabel(ylabel if ylabel is not None
+                  else _signal_label(scan, normalized=normalize))
 
     return fig, ax, line
 
@@ -311,10 +351,11 @@ def plot_single_spectrum(
     x_axis      : str   = "wavelength",
     normalize   : bool  = False,
     label       : str   = None,
+    ylabel      : str   = None,
     **line_kwargs,
 ) -> tuple:
     """
-    Plot a single PL spectrum from a
+    Plot a spectrum held in a
     :class:`~tmdc_optics_tools.loaders.SingleSpectrum`.
 
     Parameters
@@ -331,6 +372,11 @@ def plot_single_spectrum(
         Normalise the spectrum to its peak value.
     label : str, optional
         Legend label. A legend is shown only when a label is given.
+    ylabel : str, optional
+        Y-axis label.  A ``SingleSpectrum`` declares no measurement type, so
+        this falls back to a neutral "Intensity (counts)" when ``None`` — a
+        2-row CSV is as likely to be a bare-substrate reflectance reference as
+        PL.  A string is used **verbatim**, so include the unit.
     **line_kwargs
         Passed directly to ``ax.plot``.
 
@@ -351,7 +397,8 @@ def plot_single_spectrum(
 
     line, = ax.plot(x, y, label=label, **line_kwargs)
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("PL intensity (norm.)" if normalize else "PL intensity (counts)")
+    ax.set_ylabel(ylabel if ylabel is not None
+                  else _signal_label(spectrum, normalized=normalize))
     if label:
         ax.legend(frameon=False)
 
@@ -528,7 +575,7 @@ def plot_image(
     dpi            : int   = None,
     cmap           : str   = "vik",
     colorbar       : bool  = True,
-    colorbar_label : str   = "Intensity (counts)",
+    colorbar_label : str   = None,
     rescale_img    : bool  = False,
     clim           : tuple = None,
     xlabel         : str   = "x (px)",
@@ -550,8 +597,11 @@ def plot_image(
         Colormap name passed to :func:`get_cmap`.
     colorbar : bool
         Show a colorbar alongside the image.
-    colorbar_label : str
-        Colorbar label (overridden to "Intensity (norm.)" when *rescale_img*).
+    colorbar_label : str, optional
+        Colour-bar label.  Defaults to "Intensity (counts)", or
+        "Intensity (norm.)" when *rescale_img*; a plain 2-D array carries no
+        measurement type to derive anything better from.  A string is used
+        **verbatim**, so include the unit.
     rescale_img : bool
         Rescale intensity to [0, 1] before plotting.
     clim : tuple of (vmin, vmax), optional
@@ -586,7 +636,9 @@ def plot_image(
 
     if colorbar:
         cb = fig.colorbar(im, ax=ax, pad=0.02)
-        cb.set_label("Intensity (norm.)" if rescale_img else colorbar_label)
+        cb.set_label(colorbar_label if colorbar_label is not None
+                     else ("Intensity (norm.)" if rescale_img
+                           else "Intensity (counts)"))
 
     return fig, ax, im
 
@@ -991,8 +1043,10 @@ class SpectrumLinePanel(AnimationPanel):
         Format string with ``{label}``, ``{value}`` and ``{unit}`` fields.
     color : str, optional
         Line colour.  Matplotlib default when ``None``.
-    ylabel : str
-        Y-axis label.
+    ylabel : str, optional
+        Y-axis label.  Derived from the scan's measurement type when ``None``,
+        so a reflectance sweep is not labelled as PL.  A string is used
+        **verbatim**, so include the unit.
     """
 
     def __init__(
@@ -1005,7 +1059,7 @@ class SpectrumLinePanel(AnimationPanel):
         title_fmt        : str  = "{label} = {value:.3g} {unit}",
         show_sweep_title : bool = True,
         color            : str  = None,
-        ylabel           : str  = "Counts",
+        ylabel           : str  = None,
     ):
         self.scan             = scan
         self.x_axis           = x_axis
@@ -1036,7 +1090,8 @@ class SpectrumLinePanel(AnimationPanel):
         ax.set_xlim(x.min(), x.max())
         ax.set_ylim(self._y.min(), self._y.max())
         ax.set_xlabel(xlabel)
-        ax.set_ylabel(self.ylabel)
+        ax.set_ylabel(self.ylabel if self.ylabel is not None
+                      else _signal_label(self.scan))
 
         (self._line,) = ax.plot(x, self._y[:, 0], color=self.color)
         # show_sweep_title=True keeps the swept value in ax.set_title (useful
@@ -2277,9 +2332,10 @@ def plot_power_series(
     ----
     ylabel : str, optional
         Y-axis label.  ``None`` (default) takes it from the scan's
-        spectroscopy type, so a reflectance scan is not labelled as PL, and
-        marks the axis as offset and arbitrary when *spectrum_offset* is
-        non-zero.
+        spectroscopy type, so a reflectance scan is not labelled as PL; a
+        contrast *spectra_source* is labelled as the ratio it is, and the axis
+        is marked offset and arbitrary when *spectrum_offset* is non-zero.  A
+        string is used **verbatim**, so include the unit.
 
     Returns
     -------
@@ -2370,15 +2426,14 @@ def plot_power_series(
 
     # --- axes formatting --------------------------------------------------
     if ylabel is None:
+        # The source decides the quantity -- a contrast is ΔR/R₀, not counts.
+        name, unit = _signal_name_unit(scan, spectra_source)
         if spectrum_offset:
             # Stacking destroys the absolute scale, so the unit goes.  A
-            # dimensionless signal has none to drop -- signal_label then equals
-            # signal_name -- and is only marked as shifted.
-            has_unit = scan.signal_label != scan.signal_name
-            ylabel = (f"{scan.signal_name} (a.u., offset)" if has_unit
-                      else f"{scan.signal_name} (offset)")
-        else:
-            ylabel = scan.signal_label
+            # dimensionless signal has none to drop and is only marked as
+            # shifted.
+            unit = "a.u., offset" if unit else "offset"
+        ylabel = f"{name} ({unit})" if unit else name
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)

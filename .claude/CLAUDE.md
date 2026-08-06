@@ -357,6 +357,22 @@ What does earn a parameter:
   `animate_panels` takes a list of panel objects rather than a flag per panel type,
   so any subset, order, or combination works with no special-casing. That is the
   shape to aim for: one structural parameter absorbing a combinatorial space.
+- **Axis and colour-bar labels — semantics, not styling.** Settled 2026-08-06.
+  A label states what the numbers *are*, so a wrong one is a misread, not an
+  ugly figure — it falls under the boundary case below, not under
+  `artist.set_<thing>(value)`. **One contract, everywhere in `plotting`:
+  `None` derives the label from the scan; a string is used verbatim; nothing is
+  ever appended to a caller's string.** Derivation reads `signal_name` /
+  `signal_unit` / `contrast_label` via `_signal_name_unit`, so it follows
+  `spectra_type` and no plot hardcodes "PL". A `normalized` flag **substitutes**
+  the unit and never adds one — a ratio such as ΔR/R₀ already reads as
+  normalised, so `$\Delta R/R_0$ (norm.)` states it twice. The append is what the rule
+  forbids: composing `caller_string + " (counts)"` forces a "pass it without a
+  unit" convention that is undocumentable at the call site and has already
+  shipped `"PL intensity (norm.) (norm.)"` once. The signal side gets **no**
+  loader-level override — `spectra_type` is a closed validated vocabulary
+  (G1); the sweep side does, and declares it once via `sweep=` /
+  `sweep_label=` / `sweep_unit=`.
 
 Why this is a library rule and not a matter of taste: **every parameter is a
 promise.** It needs a docstring entry, it constrains refactoring, its default reads
@@ -640,10 +656,13 @@ decision; the argument for it is in the audit under the ID given.
 - README §5/§6 reference APIs that don't exist (`AttoCubePLScan`, `plot_pl_map`,
   `bg_region=` on `fit_scan_peak`). The `__init__.py` quick-start was corrected on
   2026-07-30 as part of the rename.
-- `plotting.py` hardcodes "PL intensity" in ~6 places and
-  `plot_pl_map_Vab_scan` / `plot_current(ef_axis=)` are named for the gate-sweep
-  era. Nothing breaks — `scan.signal_label` and `scan.sweep_axis` exist for them —
-  but a plotting pass is owed. See E12.
+- `plot_current(ef_axis=)` is still named for the gate-sweep era, as is
+  `plot_spectrum`'s hand-rolled `E_F` legend default and `SpectrumLinePanel`'s
+  `sweep_attr="scanner_y"` / `sweep_unit="V"`. Nothing breaks —
+  `scan.sweep_axis` / `sweep_axis_label` exist for them — but the rename half of
+  E12 is owed. The hardcoded-"PL intensity" half is **done** (2026-08-06); see
+  *parameters earn their place* for the label contract that replaced it, and
+  `dev/plan-E12.md` Step 3 for what remains.
 - **A declared 1-D sweep on a raster gives a sawtooth axis, silently** (A8).
   `sweep="piezo_x"` on the reflectance raster succeeds and returns `Scanner X`
   repeated 51 times, non-monotonic; `__repr__` prints only min and max so it looks

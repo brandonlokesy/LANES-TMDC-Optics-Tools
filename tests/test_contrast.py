@@ -248,7 +248,10 @@ def test_spectra_type_not_mutated_by_supplying_a_reference(csv_and_ref):
     csv, ref = csv_and_ref
     s = AttoCubeSpectralSweep(str(csv), spectra_type="R", reference=str(ref))
     assert s.spectra_type == "R"
-    assert s.signal_label == "Reflectance (counts)"
+    # The subject here is that spectra_type survives a reference=, not the
+    # wording: a CCD records counts whichever beam produced them, so the raw
+    # array is an intensity and only the derived contrast is a ratio.
+    assert s.signal_label == "Reflected intensity (counts)"
     assert s.contrast_label == r"$\Delta R/R_0$"
 
 

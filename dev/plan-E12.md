@@ -10,6 +10,12 @@ Status of the tree when this was written: the `plot_pl_map_Vab_scan` →
 `plot_spectral_map` rename **has** landed (with its `FutureWarning` shim and
 `tests/test_plotting_spectral_map.py`). Nothing below is applied.
 
+**Update 2026-08-06.** Steps 1 and 2 are now **landed**, with one design
+reversal: `colorbar_label` was kept rather than deleted, and generalised into a
+module-wide *`None` derives / a string is verbatim* contract. See *Why
+`colorbar_label` stays* below, which replaces the section that argued the
+opposite. Steps 3 and 4 remain unapplied.
+
 ---
 
 ## The problem, restated
@@ -30,6 +36,14 @@ labels the axis as an intensity.
 ---
 
 ## Step 1 — the vocabulary is wrong before any plotting change
+
+**[LANDED 2026-08-06.]** The `SIGNAL_LABELS` half had already gone in ahead of
+this file's other steps, but *without* its test update — leaving
+`test_contrast.py::test_spectra_type_not_mutated_by_supplying_a_reference` red
+on `main`, pinning the old `"Reflectance (counts)"`. Corrected with the rest of
+this step. `signal_unit` is added; a dead second `signal_label` property
+(a bare `return`, shadowed by the real one later in the same class body) was
+deleted from the curated-parameter section on the way past.
 
 `constants.SIGNAL_LABELS` has a physics error worth fixing on its own, and
 fixing it first means steps 2–3 have something correct to read.
@@ -107,7 +121,15 @@ name) and bundling it makes the pass harder to review.
 
 ---
 
-## Step 2 — two helpers, then the five label sites
+## Step 2 — two helpers, then the label sites
+
+**[LANDED 2026-08-06.]** The helpers as implemented differ from the sketch
+below: they split into `_signal_name_unit` (returns the `(name, unit)` pair) and
+`_signal_label` (composes it). `plot_power_series`'s `spectrum_offset` branch
+needs the pair, not a composed string, so it can swap the unit for
+`"a.u., offset"` — splitting the primitive out avoids a `normalized` × `offset`
+combinatorial parameter. Six sites, not five: `plot_image` came along because
+its `rescale_img` branch was silently discarding the caller's label.
 
 Both go next to `_resolve_x_axis` in `plotting.py`.
 
@@ -171,31 +193,60 @@ Two things that only became clear while writing them:
 
 ### The call sites
 
+As landed — every one takes the shape
+`label if label is not None else _signal_label(...)`:
+
 | Function | Change |
 |---|---|
-| `plot_spectral_map` | **delete** `colorbar_label`; `cb.set_label(_signal_label(scan, normalized=rescale_img))` |
-| `plot_spectrum` | ylabel `_signal_label(scan, normalized=normalize)`; legend default `_sweep_value_label(scan, sweep_index)` |
-| `plot_single_spectrum` | ylabel `_signal_label(spectrum, normalized=normalize)` |
-| `plot_power_series` | `ylabel=None` → `_signal_label(scan, source=spectra_source)` |
-| `SpectrumLinePanel` | `ylabel=None` → `_signal_label(scan)` |
+| `plot_spectral_map` | `colorbar_label=None`; the `" (counts)"` / `" (norm.)"` append is gone |
+| `plot_spectrum` | **new** `ylabel=None` → `_signal_label(scan, normalized=normalize)`. Legend default left alone — that is Step 3 |
+| `plot_single_spectrum` | **new** `ylabel=None` → `_signal_label(spectrum, normalized=normalize)`; hits the `getattr` fallback |
+| `plot_power_series` | `ylabel=None` rebuilt on `_signal_name_unit(scan, spectra_source)`, so a contrast source finally gets `contrast_label` |
+| `SpectrumLinePanel` | `ylabel="Counts"` → `None` → `_signal_label(scan)` |
+| `plot_image` | `colorbar_label=None`; **bug fix**, the argument was discarded whenever `rescale_img=True`. Untyped array, so it defaults to "Intensity (counts)" rather than calling `_signal_label` |
+
+`normalized` **substitutes** a unit and never adds one, so a dimensionless
+quantity is left alone: a ratio such as ΔR/R₀ already reads as normalised, and
+`$\Delta R/R_0$ (norm.)` says the same thing twice. Asked and settled
+2026-08-06. The residual case — `rescale_img=True` on a scan whose
+`spectra_type` is itself `"RC"`, where the values shown are a [0, 1] remap
+rather than the ratio — is what the verbatim override is for.
 
 `plot_power_series` passes no `normalized`: `bg_region` subtracts a pedestal but
 leaves the unit intact, so only the source decides the label there.
 
-### Why `colorbar_label` goes rather than defaulting to `None`
+### Why `colorbar_label` stays, defaulting to `None`
 
-*Parameters earn their place*: a parameter whose whole body is
-`artist.set_<thing>(value)` is a symptom of a broken return contract. The colour
-bar is already reachable from what the function returns —
-`mesh.colorbar.set_label(...)` — so the parameter has a working one-line
-alternative at the call site. Document that route in the `colorbar` docstring
-entry instead.
+**Reversed 2026-08-06, and landed.** This section previously argued for deleting
+`colorbar_label` and routing callers to `mesh.colorbar.set_label(...)`. Three
+things in the tree decided against it:
 
-The rejected alternative was `colorbar_label: str = None` meaning "derive from
-the scan", which keeps the escape hatch in the signature at the cost of keeping
-the append logic and therefore the "pass it without a unit" requirement that has
-to be documented and can be got wrong. (It *was* got wrong: the interim version
-of this line produced `"PL intensity (norm.) (norm.)"` from its own default.)
+- **The convention already shipped.** `plot_power_series(ylabel=None)` already
+  meant *`None` → derive from the scan; a string → verbatim*. Deleting the
+  equivalent on `plot_spectral_map` would not have left the module
+  parameter-free, only inconsistent.
+- **`colorbar_label` had three incompatible contracts**, which is the actual
+  defect: `plot_spectral_map` appended a unit, `plot_image` *discarded* the
+  argument whenever `rescale_img=True`, `plot_diffusion_cloud` used it verbatim.
+- **The `"PL intensity (norm.) (norm.)"` bug came from the append**, not from
+  the parameter existing. A verbatim contract makes it unrepresentable.
+
+*Parameters earn their place* also states the boundary that applies here: *"Ask
+whether the plot could be misread without the argument; if so, it is not
+trivial."* A colour bar reading "PL intensity (counts)" over a
+reflectance-contrast map is that misread — a label is semantics, not decoration.
+And the escape route relied on, `mesh.colorbar`, is an informal matplotlib
+back-reference that is `None` whenever `colorbar=False`.
+
+**The contract, now uniform across every signal-label parameter in the module:**
+`None` derives from the scan, a string is used exactly as given, and nothing is
+ever appended to a caller's string.
+
+```python
+plot_spectral_map(scan)                                   # "PL intensity (counts)"
+plot_spectral_map(scan, rescale_img=True)                 # "PL intensity (norm.)"
+plot_spectral_map(scan, colorbar_label=r"$\Delta R/R_0$") # exactly that
+```
 
 ---
 

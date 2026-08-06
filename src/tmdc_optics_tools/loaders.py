@@ -1329,13 +1329,6 @@ class _AttoCubeSweep:
         label = self._curated[name][0]
         return self._curated_value(name) if label in self.parameters else None
 
-    @property
-    def signal_label(self) -> str:
-        """
-        Returns the signal label as defined by the spectroscopy type. 
-        """
-        return 
-
     # --- Curated parameter properties (scaled views into self.parameters) ---
 
     @property
@@ -1633,6 +1626,17 @@ class _AttoCubeSweep:
     def signal_name(self) -> str:
         """Name of the measured signal, from :attr:`spectra_type`."""
         return SIGNAL_LABELS[self.spectra_type][0]
+
+    @property
+    def signal_unit(self) -> str:
+        """
+        Native unit of :attr:`signal_name`; empty for dimensionless ratios.
+
+        Exposed separately from :attr:`signal_label` so a caller that rescales
+        the data can substitute its own unit rather than parse one out of a
+        composed string.
+        """
+        return SIGNAL_LABELS[self.spectra_type][1]
 
     @property
     def signal_label(self) -> str:
@@ -2163,6 +2167,10 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Y-axis label for the measured signal, from :attr:`spectra_type` — e.g.
         ``"PL intensity (counts)"``, ``"$\\Delta R/R_0$"``.  Use this instead of
         hardcoding "PL" in a plot that may be handed reflectance.
+    signal_name : str
+        The quantity alone, without the unit — e.g. ``"PL intensity"``.
+    signal_unit : str
+        The unit alone, empty for a dimensionless ratio — e.g. ``"counts"``.
     gates : dict or None
         The declared electrode mapping, or ``None`` if the wiring was never
         stated.  Read-only property.
@@ -2751,8 +2759,9 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Y-axis label for :attr:`contrast` / :attr:`energy_contrast`.
 
         Independent of :attr:`signal_label`, because the contrast is a *derived*
-        quantity: a scan of ``spectra_type="R"`` keeps reporting "Reflectance
-        (counts)" for its raw spectra while its contrast is labelled ΔR/R₀.
+        quantity: a scan of ``spectra_type="R"`` keeps reporting "Reflected
+        intensity (counts)" for its raw spectra while its contrast is labelled
+        ΔR/R₀.
         """
         if self.contrast_mode == "ratio":
             return r"$R/R_0$"

@@ -653,6 +653,18 @@ decision; the argument for it is in the audit under the ID given.
 - **`carrier_density` returns a density *difference*, referenced to a gate
   voltage.** Absolute `n` needs a threshold no file records; don't default one.
   (E7c)
+- **Electrode currents are role-named (`i_top` / `i_bot` / `i_channel`) and come
+  from `gates=`.** Settled 2026-08-07. A and B are source-meter channels, so `V_A`
+  and `I_A` are one terminal and one declaration names both — the correspondence
+  lives in `_CHANNEL_SIBLING_CURRENT`, a format fact, while `gates=` keeps naming
+  **rows**. Don't re-propose `gates={"bottom": "A"}`: the row↔current pairing is
+  format-stable and the role↔channel wiring is per-session, so fusing them puts a
+  format convention into every notebook, and every other API (`sweep=`, `scan[…]`,
+  `varying_parameters()`, the undeclared-gates error) speaks rows. `Ich1`/`Ich2` are
+  **deleted**, not renamed to `i_a`/`i_b` — which electrode `I_A` flows into is the
+  undeclared fact, so the currents refuse without `gates=` exactly as the voltages
+  do. `scan["I_A"]` still works undeclared. A role declared `None` gives `v_*`
+  zeros but makes `i_*` **raise**: grounding fixes a potential, not a current. (E15)
 - **Cosmic-ray repair is a load-time `cosmic_rays=` dict, run first in the
   wavelength-space chain** — not a plotting argument and not a third flag with its
   own energy-space arrays. It feeds the background estimate, the contrast and the
@@ -715,11 +727,17 @@ decision; the argument for it is in the audit under the ID given.
   2026-07-30 as part of the rename.
 - `plot_current(ef_axis=)` is still named for the gate-sweep era, as is
   `plot_spectrum`'s hand-rolled `E_F` legend default and `SpectrumLinePanel`'s
-  `sweep_attr="scanner_y"` / `sweep_unit="V"`. Nothing breaks —
-  `scan.sweep_axis` / `sweep_axis_label` exist for them — but the rename half of
+  `sweep_attr="scanner_y"` / `sweep_unit="V"`. The rename half of
   E12 is owed. The hardcoded-"PL intensity" half is **done** (2026-08-06); see
   *parameters earn their place* for the label contract that replaced it, and
   `dev/plan-E12.md` Step 3 for what remains.
+
+  **Do the `plot_current` rename before the rest of E12.** E15 changed that
+  function on 2026-08-07 — `color_ich1` / `color_ich2` deleted, `lines` appended to
+  the return, and it now requires `gates=` — and Step 3 changes it again. Two
+  breaking changes to one function, so land them together. The other two renames
+  break nothing and can wait. Details and the corrected before-signature are in
+  `dev/plan-E12.md` Step 3.
 - **`_is_image_csv` accepts a two-row spectrum as an image** (A9), because it only
   tests whether the first line parses as floats — and a `SingleSpectrum`'s first row
   is its wavelength axis. A directory of single spectra therefore loads as 2×N

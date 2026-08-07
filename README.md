@@ -123,7 +123,8 @@ Key attributes after loading:
 | `scan.v_top`, `scan.v_bot` | Gate voltages (V) |
 | `scan.ef` | Displacement field (mV/nm), `None` if no geometry |
 | `scan.power` | Excitation power (µW) |
-| `scan.Ich1`, `scan.Ich2` | Leakage currents (nA) |
+| `scan.i_top`, `scan.i_bot` | Gate leakage currents (nA) |
+| `scan.i_channel` | Current into the TMDC contact (nA) — transport, not leakage |
 
 ---
 

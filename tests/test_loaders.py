@@ -191,8 +191,9 @@ def test_curated_attributes_unchanged(scan):
     assert np.allclose(scan.v_top, PARAMS["V_A"])           # raw
     assert np.allclose(scan.v_bot, PARAMS["V_B"])           # raw
     assert np.allclose(scan.power, PARAMS["Excitation Power"] * POWER_SCALE)
-    assert np.allclose(scan.Ich1, PARAMS["I_A"] * 1e9)      # -> nA
-    assert np.allclose(scan.Ich2, PARAMS["I_B"] * 1e9)      # -> nA
+    # GATES wires V_A to the top gate, so I_A is the top gate's current.
+    assert np.allclose(scan.i_top, PARAMS["I_A"] * 1e9)     # -> nA
+    assert np.allclose(scan.i_bot, PARAMS["I_B"] * 1e9)     # -> nA
 
 
 def test_curated_attrs_are_raw_views_of_parameters(scan):
@@ -261,7 +262,8 @@ def test_curated_parameters_registry(scan):
     reg = scan.curated_parameters
     assert reg["v_top"] == ("V_A", 1.0, "V")
     assert reg["power"] == ("Excitation Power", 0.303e6, "µW")
-    assert reg["Ich1"] == ("I_A", 1e9, "nA")
+    # The current's row is not a registry default — it is resolved from gates.
+    assert reg["i_top"] == ("I_A", 1e9, "nA")
     # The scanners are piezos; the rows carry drive voltage, not a distance.
     assert reg["scanner_x"] == ("Scanner X", 1.0, "V")
     assert reg["scanner_y"] == ("Scanner Y", 1.0, "V")
@@ -535,7 +537,7 @@ def test_non_gate_sweeps_are_unaffected(csv_path):
     assert np.allclose(s.sweep_axis, PARAMS["Excitation Power"] * POWER_SCALE)
 
 
-@pytest.mark.parametrize("attr", ["v_top", "v_bot"])
+@pytest.mark.parametrize("attr", ["v_top", "v_bot", "i_top", "i_bot", "i_channel"])
 def test_gate_properties_refuse_an_undeclared_wiring(unwired, attr):
     with pytest.raises(ValueError, match="not declared"):
         getattr(unwired, attr)
@@ -586,10 +588,68 @@ def test_gates_rejects_an_ambiguous_declaration(csv_path, bad, match):
 def test_gate_rows_cannot_be_set_through_curated_labels(csv_path):
     # One fact, one spelling: two mechanisms that could disagree about the wiring
     # is the confusion this whole contract removes.
-    for name in ("v_top", "v_bot"):
+    for name in ("v_top", "v_bot", "i_top", "i_bot", "i_channel"):
         with pytest.raises(ValueError, match="cannot be set through curated_labels"):
             AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
                                   curated_labels={name: "V_B"})
+
+
+# ---------------------------------------------------------------------------
+# Electrode currents: the source-meter channel's other row
+# ---------------------------------------------------------------------------
+
+
+def test_currents_follow_the_declared_wiring(csv_path):
+    # A source-meter channel's bias and current are one terminal, so transposing
+    # the wiring must transpose the currents with the voltages — this is the whole
+    # reason they are role-named rather than channel-named.
+    kw = dict(spectra_type="PL")
+    forward = AttoCubeSpectralSweep(str(csv_path), gates=GATES, **kw)
+    swapped = AttoCubeSpectralSweep(
+        str(csv_path), gates={"top": "V_B", "bottom": "V_A"}, **kw)
+    assert np.allclose(forward.i_top, PARAMS["I_A"] * 1e9)
+    assert np.allclose(swapped.i_top, PARAMS["I_B"] * 1e9)
+    assert np.allclose(forward.i_top, swapped.i_bot)
+
+
+def test_channel_current_is_the_contacts_own_row(csv_path):
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              gates={"bottom": "V_A", "channel": "V_B"})
+    assert np.allclose(s.i_bot, PARAMS["I_A"] * 1e9)
+    assert np.allclose(s.i_channel, PARAMS["I_B"] * 1e9)
+
+
+def test_grounded_electrode_has_a_voltage_but_no_current(csv_path):
+    # Grounding fixes the potential, which is why v_channel is zeros; it says
+    # nothing about the current, which still flows and simply was not recorded.
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=BOTTOM_ONLY)
+    assert np.allclose(s.v_channel, np.zeros(N_SWEEPS))
+    with pytest.raises(ValueError, match="not its current"):
+        s.i_channel
+
+
+def test_gate_on_a_non_source_meter_row_has_no_current(csv_path):
+    # The sibling row is looked up in a table of what the format's channels are,
+    # not guessed from the spelling of the declared row.
+    s = AttoCubeSpectralSweep(
+        str(csv_path), spectra_type="PL",
+        gates={"bottom": "Galvo_X", "channel": None})
+    assert np.allclose(s.v_bot, PARAMS["Galvo_X"])
+    with pytest.raises(ValueError, match="not a source-meter channel"):
+        s.i_bot
+
+
+def test_curated_scales_flips_a_current_with_its_voltage(csv_path):
+    # Reversed leads invert both rows at that terminal; each is stated separately
+    # because curated_scales is keyed by curated attribute.  The scale *replaces*
+    # the registry's, so flipping a current keeps its A -> nA factor: -1.0 here
+    # would silently return amps.
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              curated_scales={"v_top": -1.0, "i_top": -1e9})
+    assert np.allclose(s.v_top, -PARAMS["V_A"])
+    assert np.allclose(s.i_top, -PARAMS["I_A"] * 1e9)
+    # The raw rows are untouched by a curated scale.
+    assert np.allclose(s["I_A"], PARAMS["I_A"])
 
 
 # ---------------------------------------------------------------------------

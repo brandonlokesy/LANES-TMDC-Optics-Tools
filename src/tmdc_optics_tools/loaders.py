@@ -635,6 +635,24 @@ _GATE_ELECTRODES = tuple(_GATE_ROLE_CURATED)
 # and is what makes a single-gate declaration unambiguous.
 _GATE_ROLES = _GATE_ELECTRODES + ("channel",)
 
+# Voltage row -> the current row measured at the same terminal.  A source-meter
+# channel applies a bias and reports the current it sources, so both rows describe
+# one electrode and a declaration naming either names both.  This is a property of
+# the export, fixed across every file seen, whereas which electrode that channel
+# reached is per-session wiring — so it belongs here rather than in ``gates``.
+_CHANNEL_SIBLING_CURRENT = {"V_A": "I_A", "V_B": "I_B"}
+
+# Which curated entry carries each role's current.  Covers all three roles, unlike
+# the voltage map above: a current flows at the channel contact just as it does at a
+# gate, and only the *field* is restricted to the two gate electrodes.
+_ROLE_CURRENT_CURATED = {"top": "i_top", "bottom": "i_bot", "channel": "i_channel"}
+_CURRENT_CURATED      = tuple(_ROLE_CURRENT_CURATED.values())
+
+# Curated entries whose label comes from ``gates`` and nowhere else.  Rejected as
+# ``curated_labels`` keys, and dropped from an HDF5 file's curated dump on read, so
+# that a written label can never be mistaken for a declared mapping.
+_DECLARED_CURATED = _GATE_CURATED + _CURRENT_CURATED
+
 
 # ---------------------------------------------------------------------------
 # Spectra-source registry
@@ -1114,16 +1132,23 @@ class _AttoCubeSweep:
     # generic :attr:`parameters` store.  A row listed here that a given file does
     # not contain is not an error — the property raises only if accessed.
     #
-    # The two gate entries are the exception: their labels come from ``gates``
+    # The role-backed entries are the exception: their labels come from ``gates``
     # alone, and the rows below are never read without one.  They are listed here
     # so that the file's own candidate rows can be named in that error, and so
     # ``curated_scales`` still reaches them.
+    #
+    # The two voltages carry a default row because ``_gate_candidates`` and
+    # ``gate_mode`` both describe an *undeclared* scan and need somewhere to look;
+    # the currents have no such reader, so a default there would be a guess nothing
+    # consults.  Their label is filled in from ``gates`` via
+    # ``_CHANNEL_SIBLING_CURRENT``, and access is refused until it is.
     _CURATED = {
         "v_top":     ("V_A",              1.0,      "V"),
         "v_bot":     ("V_B",              1.0,      "V"),
         "power":     ("Excitation Power", 0.303e6,  "µW"),
-        "Ich1":      ("I_A",              1e9,      "nA"),
-        "Ich2":      ("I_B",              1e9,      "nA"),
+        "i_top":     (None,               1e9,      "nA"),
+        "i_bot":     (None,               1e9,      "nA"),
+        "i_channel": (None,               1e9,      "nA"),
         "scanner_x": ("Scanner X",        1.0,      "V"),
         "scanner_y": ("Scanner Y",        1.0,      "V"),
     }
@@ -1185,7 +1210,7 @@ class _AttoCubeSweep:
         meta_labels = {
             name: value
             for name, value in (meta.get("curated_labels") or {}).items()
-            if name not in _GATE_CURATED
+            if name not in _DECLARED_CURATED
         }
         # Curated config has format (label, scale, unit).  Only label (index 0) and scale (index 1) can be overwritten
         for store, idx in ((meta_labels,                0),
@@ -1198,13 +1223,15 @@ class _AttoCubeSweep:
                         f"'{name}' is not a curated parameter. "
                         f"Valid names: {sorted(self._CURATED)}."
                     )
-                if idx == 0 and name in _GATE_CURATED:
+                if idx == 0 and name in _DECLARED_CURATED:
                     raise ValueError(
                         f"'{name}' cannot be set through curated_labels. Which "
-                        f"acquisition channel drove which physical gate is "
+                        f"acquisition channel drove which physical electrode is "
                         f"per-session wiring, declared through gates= so that the "
                         f"mapping is recorded once and travels with the scan: "
-                        f"gates={{'top': '<row>', 'bottom': '<row>'}}."
+                        f"gates={{'top': '<row>', 'bottom': '<row>'}}. A declared "
+                        f"row names that electrode's current row too, so the "
+                        f"currents are not set separately either."
                     )
                 # If a curated parameter is not present in the file's metadata or the provided overrides, it retains its default value from _CURATED.
                 # If idx == 0, we are updating the label; if idx == 1, we are updating the scale. The value is converted to float for scales.
@@ -1219,6 +1246,15 @@ class _AttoCubeSweep:
             label = (self._gates or {}).get(role)
             if label is not None:
                 self._curated[attr][0] = label
+
+        # The same declaration also names each electrode's current row, because a
+        # source-meter channel's bias and current are one terminal.  A role declared
+        # on a row outside _CHANNEL_SIBLING_CURRENT leaves its current label None,
+        # and _role_current raises rather than guessing a sibling from the spelling.
+        for role, attr in _ROLE_CURRENT_CURATED.items():
+            label = (self._gates or {}).get(role)
+            if label is not None:
+                self._curated[attr][0] = _CHANNEL_SIBLING_CURRENT.get(label)
 
         # Conver to tuple - not mutable, so that the curated parameters cannot be changed after initialization.
         self._curated = {name: tuple(cfg) for name, cfg in self._curated.items()}
@@ -1784,6 +1820,36 @@ class _AttoCubeSweep:
         return (self._curated_value(attr) if attr is not None
                 else self.get_parameter(label))
 
+    def _role_current(self, role: str) -> np.ndarray:
+        """
+        The current at a declared electrode, in nA.
+
+        Unlike :meth:`_gate_value`, a role declared ``None`` raises: grounding an
+        electrode is what holds its potential at zero, but it says nothing about the
+        current flowing through it, which is merely unrecorded.
+        """
+        row = self._gates[role]
+        if row is None:
+            raise ValueError(
+                f"i_{role} needs a recorded current, but the {role!r} electrode was "
+                f"declared as tied to ground with no row for it. Grounding fixes "
+                f"that electrode's potential, not its current — the current still "
+                f"flows and simply was not measured, so there is no value to "
+                f"return. Declare the row that drove it if one exists: "
+                f"gates={{..., '{role}': '<row>'}}."
+            )
+        attr  = _ROLE_CURRENT_CURATED[role]
+        label = self._curated[attr][0]
+        if label is None:
+            raise ValueError(
+                f"i_{role} is not available: the {role!r} electrode is declared on "
+                f"row '{row}', which is not a source-meter channel, so no row "
+                f"records the current at that terminal. Channels carrying both a "
+                f"bias and a current in this format: "
+                f"{sorted(_CHANNEL_SIBLING_CURRENT)}. The voltage is unaffected."
+            )
+        return self._curated_value(attr)
+
     def _gate_candidates(self) -> list:
         """
         Rows that plausibly carry an electrode voltage, for the undeclared error.
@@ -1836,14 +1902,41 @@ class _AttoCubeSweep:
         return self._curated_value("power")
 
     @property
-    def Ich1(self) -> np.ndarray:
-        """Channel-1 current in nA (per sweep)."""
-        return self._curated_value("Ich1")
+    def i_top(self) -> np.ndarray:
+        """
+        Leakage current at the top gate in nA (per sweep).
+
+        Raises ``ValueError`` unless *gates* declared a top gate on a source-meter
+        channel; see :attr:`gates`.
+        """
+        self._require_role("top", "i_top")
+        return self._role_current("top")
 
     @property
-    def Ich2(self) -> np.ndarray:
-        """Channel-2 current in nA (per sweep)."""
-        return self._curated_value("Ich2")
+    def i_bot(self) -> np.ndarray:
+        """
+        Leakage current at the bottom gate in nA (per sweep).
+
+        Raises ``ValueError`` unless *gates* declared a bottom gate on a source-meter
+        channel; see :attr:`gates`.
+        """
+        self._require_role("bottom", "i_bot")
+        return self._role_current("bottom")
+
+    @property
+    def i_channel(self) -> np.ndarray:
+        """
+        Current sourced into the contact on the TMDC itself, in nA (per sweep).
+
+        Transport through the flake rather than leakage across a dielectric, which
+        is what distinguishes it from :attr:`i_top` / :attr:`i_bot`.
+
+        Raises ``ValueError`` unless *gates* declared a ``"channel"`` role on a
+        source-meter channel — including when the contact is declared grounded with
+        no row, since that fixes its potential but leaves its current unmeasured.
+        """
+        self._require_role("channel", "i_channel")
+        return self._role_current("channel")
 
     @property
     def scanner_x(self) -> np.ndarray:
@@ -2803,9 +2896,16 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         ``"channel"`` — one gate with a floating TMDC defines neither a field nor a
         density, so the declaration would be ambiguous rather than informative.
 
+        Naming a source-meter row declares that electrode's **current** as well as
+        its voltage: the instrument applies a bias and reports the current it
+        sources at the same terminal, so ``"bottom": "V_A"`` also makes ``I_A``
+        available as :attr:`i_bot`.  An electrode declared on a row that is not
+        such a channel keeps its voltage and has no current.
+
         The electrodes can be wired either way round and no export records which
         way, so this is per-session information the file cannot supply.  Without
-        it, :attr:`v_top`, :attr:`v_bot`, :attr:`v_channel`, :attr:`ef` and
+        it, :attr:`v_top`, :attr:`v_bot`, :attr:`v_channel`, :attr:`i_top`,
+        :attr:`i_bot`, :attr:`i_channel`, :attr:`ef` and
         ``sweep="electric_field"`` / ``"top_voltage"`` / ``"bottom_voltage"`` all
         raise rather than assume one: transposing two gates mirrors the field axis
         and flips the sign of any extracted dipole.  Work in channel terms with
@@ -2815,9 +2915,11 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         into exported HDF5.
     curated_labels : dict, optional
         Override which CSV row backs a curated attribute, e.g.
-        ``{"power": "Laser Power"}``.  Keys are :attr:`_CURATED` names; unknown
-        keys raise, as do ``"v_top"`` and ``"v_bot"`` — those are declared through
-        *gates*, so that one fact has one spelling.
+        ``{"power": "Laser Power"}``.  Keys are curated attribute names — the names
+        listed under *Attributes*, not CSV row labels.  Unknown keys raise, as do
+        the role-backed ones (``"v_top"``, ``"v_bot"``, ``"i_top"``, ``"i_bot"``,
+        ``"i_channel"``): those are declared through *gates*, so that one fact has
+        one spelling.
     curated_scales : dict, optional
         Override the scale factor of a curated attribute, e.g.
         ``{"power": 1.0}`` to keep raw power.  Same keys as *curated_labels*.
@@ -2911,8 +3013,14 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Read-only property.
     power : np.ndarray, shape (n_sweeps,)
         Excitation power in µW.  Read-only property (scaled view).
-    Ich1, Ich2 : np.ndarray, shape (n_sweeps,)
-        Gate-channel currents in nA.  Read-only properties (scaled views).
+    i_top, i_bot : np.ndarray, shape (n_sweeps,)
+        Leakage current at each gate in nA.  Raise unless *gates* declared that
+        electrode on a source-meter channel.  Read-only properties (scaled views).
+    i_channel : np.ndarray, shape (n_sweeps,)
+        Current sourced into the contact on the TMDC in nA — transport, not
+        leakage.  Raises unless *gates* declared a ``"channel"`` on a source-meter
+        channel; a contact declared grounded with no row has no current to report.
+        Read-only property (scaled view).
     scanner_x, scanner_y : np.ndarray, shape (n_sweeps,)
         Piezo scanner X / Y drive voltage in V — a drive level, not a distance.
         Converting to µm needs a per-stage µm/V calibration that is not in the
@@ -3694,8 +3802,6 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
         bot_gate_label  : str   = None,
         power_label     : str   = None,
         power_scale     : float = None,
-        ich1_label      : str   = None,
-        ich2_label      : str   = None,
         roi             : int   = 1,
     ):
         warnings.warn(
@@ -3708,7 +3814,6 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
 
         labels = {name: value for name, value in (
             ("power", power_label),
-            ("Ich1",  ich1_label),     ("Ich2",  ich2_label),
         ) if value is not None}
 
         # Both sweeps below resolve through a gate role, which the new API requires

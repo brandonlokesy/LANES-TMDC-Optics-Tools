@@ -421,13 +421,16 @@ def plot_current(
     figsize     : tuple = (6, 3.5),
     dpi         : int   = None,
     ef_axis     : bool = True,
-    color_ich1  : str  = "C0",
-    color_ich2  : str  = "C1",
     color_power : str  = "C2",
 ) -> tuple:
     """
-    Plot leakage currents and excitation power vs. electric field (or gate
+    Plot electrode currents and excitation power vs. electric field (or gate
     voltage) to check for dielectric breakdown.
+
+    One trace per electrode the scan declared and for which a current was
+    recorded, labelled by role: a dual-gated device gives the two gate leakage
+    currents, a contacted single-gated one gives its gate leakage and the
+    transport current into the TMDC.
 
     Parameters
     ----------
@@ -438,12 +441,20 @@ def plot_current(
         Use displacement field on the x-axis when the scan can supply one — it
         needs both a :class:`DeviceGeometry` and a declared channel-to-gate
         mapping.  Otherwise the scan's declared sweep axis is used.
-    color_ich1, color_ich2, color_power : str
-        Matplotlib colours for the respective traces.
+    color_power : str
+        Matplotlib colour for the power trace.
 
     Returns
     -------
-    fig, ax_left, ax_right
+    fig, ax_left, ax_right, lines
+        *lines* holds the current traces in role order, for restyling.
+
+    Raises
+    ------
+    ValueError
+        If the scan declared no electrode mapping, or none of its electrodes has
+        a recorded current.  Which electrode a current row belongs to is
+        per-session wiring; pass ``gates=`` at load time.
     """
     if ax is None:
         fig, ax_left = plt.subplots(figsize=figsize, dpi=dpi)
@@ -460,20 +471,44 @@ def plot_current(
     else:
         x, xlabel = scan.sweep_axis, scan.sweep_axis_label
 
-    l1, = ax_left.plot(x, scan.Ich1, color=color_ich1, label=r"$I_\mathrm{ch1}$")
-    l2, = ax_left.plot(x, scan.Ich2, color=color_ich2, label=r"$I_\mathrm{ch2}$")
+    # A declared electrode need not have a recorded current: it may be grounded
+    # with no row, or driven by something that is not a source-meter channel.  The
+    # scan already encodes those rules, so ask it and skip what it refuses rather
+    # than restating the conditions here.
+    lines = []
+    for attr, label in (("i_top",     r"$I_\mathrm{top}$"),
+                        ("i_bot",     r"$I_\mathrm{bot}$"),
+                        ("i_channel", r"$I_\mathrm{ch}$")):
+        try:
+            current = getattr(scan, attr)
+        except ValueError:
+            continue
+        line, = ax_left.plot(x, current, label=label)
+        lines.append(line)
+
+    if not lines:
+        raise ValueError(
+            f"plot_current has nothing to plot for '{scan.path}': no declared "
+            f"electrode has a recorded current. Which acquisition channel reached "
+            f"which electrode is per-session wiring, so pass it at load time — "
+            f"gates={{'top': '<row>', 'bottom': '<row>'}}. A gate declared on a "
+            f"row that is not a source-meter channel, or an electrode declared "
+            f"grounded with no row, records no current either."
+        )
+
     ax_left.axhline(0, color="k", linewidth=0.6, linestyle="--", alpha=0.4)
     ax_left.set_xlabel(xlabel)
     ax_left.set_ylabel("Current (nA)")
 
     ax_right = ax_left.twinx()
     ax_right.spines["right"].set_visible(True)
-    l3, = ax_right.plot(x, scan.power, color=color_power, linestyle="--", label="Power")
+    l_power, = ax_right.plot(x, scan.power, color=color_power, linestyle="--",
+                             label="Power")
     ax_right.set_ylabel("Power (µW)")
 
-    ax_left.legend(handles=[l1, l2, l3], loc="best", frameon=False)
+    ax_left.legend(handles=lines + [l_power], loc="best", frameon=False)
     fig.tight_layout()
-    return fig, ax_left, ax_right
+    return fig, ax_left, ax_right, lines
 
 
 # ---------------------------------------------------------------------------

@@ -252,11 +252,33 @@ plot_spectral_map(scan, colorbar_label=r"$\Delta R/R_0$") # exactly that
 
 ## Step 3 — the renames
 
+**Do the `plot_current` bullet first.** E15 (2026-08-07) already changed that
+function once — `color_ich1` / `color_ich2` deleted, `lines` appended to the return —
+and this step changes it again. Both are breaking; landing them apart breaks callers
+twice over one function.
+
 - **`plot_current(ef_axis=True)` → `sweep_axis=True`.** Body becomes
   `x, xlabel = scan.sweep_axis, scan.sweep_axis_label`, with
   `np.arange(scan.n_sweeps)` / `"Sweep index"` when `False`. The `False` branch
   is not dead weight: the index is the useful reading when the sweep is
   non-monotonic, e.g. a raster flattened into one file (cf. A8).
+
+  Current signature, after E15 — the `ef_axis` line is the only one this bullet
+  touches, and the `scan.ef` branch it names is the block the new body replaces:
+
+  ```python
+  def plot_current(scan, ax=None, figsize=(6, 3.5), dpi=None,
+                   ef_axis=True, color_power="C2") -> tuple:
+      ...
+      return fig, ax_left, ax_right, lines
+  ```
+
+  Two things E15 changed that this bullet must not undo. The current traces are
+  built by looping the declared roles (`i_top`, `i_bot`, `i_channel`) and skipping
+  those the scan refuses, then raising if none survived — that loop stays. And
+  **the function now requires `gates=`**, so any test fixture for it needs a
+  declared mapping; without one a current row cannot be attributed to an electrode
+  and every role raises. `color_power` survives here and is still owed to E11.
 - **`plot_spectrum`'s legend default** — drop the hand-rolled `E_F`/`V_top`
   branch for `_sweep_value_label`.
 - **`SpectrumLinePanel`** — `sweep_attr`, `sweep_label`, `sweep_unit`, `ylabel`

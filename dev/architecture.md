@@ -186,8 +186,9 @@ leakage current. Which axis was swept is the caller's to declare.
 
 ### Curated parameter / curated attribute / the curated registry
 
-Seven rows are **analysis-primary**, so they get promoted to first-class properties
-with a unit conversion attached. That promotion is the **curated registry**.
+A handful of rows are **analysis-primary**, so they get promoted to first-class
+properties with a unit conversion attached. That promotion is the **curated
+registry**.
 
 The class-level table `_AttoCubeSweep._CURATED` maps
 
@@ -200,15 +201,28 @@ _CURATED = {
     "v_top":     ("V_A",              1.0,      "V"),
     "v_bot":     ("V_B",              1.0,      "V"),
     "power":     ("Excitation Power", 0.303e6,  "µW"),
-    "Ich1":      ("I_A",              1e9,      "nA"),
-    "Ich2":      ("I_B",              1e9,      "nA"),
+    "i_top":     (None,               1e9,      "nA"),
+    "i_bot":     (None,               1e9,      "nA"),
+    "i_channel": (None,               1e9,      "nA"),
     "scanner_x": ("Scanner X",        1.0,      "V"),
     "scanner_y": ("Scanner Y",        1.0,      "V"),
 }
 ```
 
 So a **curated attribute** is the Python-side name (`power`), and the row label is
-the file-side name (`"Excitation Power"`). Reading one is:
+the file-side name (`"Excitation Power"`).
+
+A `None` label means the row is not a fixed property of the format but comes from
+the session's `gates=` declaration. The two voltages carry a default anyway, because
+`_gate_candidates()` and `gate_mode` both describe an *undeclared* scan and need
+somewhere to look; the three currents have no such reader, so a default there would
+be a guess nothing consults. Their labels are filled in from `gates` through
+`_CHANNEL_SIBLING_CURRENT`, which records that a source-meter channel's bias row and
+current row are one terminal — `{"bottom": "V_A"}` therefore also makes `I_A`
+reachable as `i_bot`. A gate declared on some other row keeps its voltage and has no
+current.
+
+Reading a curated entry is:
 
 ```python
 def _curated_value(self, name):
@@ -731,11 +745,12 @@ scan.best_energy_spectra             # _bg if available, else energy_spectra
 # — instrument state —
 scan.parameters, scan["V_A"], scan.get_parameter("V_A", scale)
 scan.varying_parameters()
-scan.power, scan.Ich1, scan.Ich2, scan.scanner_x, scan.scanner_y
+scan.power, scan.scanner_x, scan.scanner_y
 
 # — device —
 scan.gates, scan.is_dual_gated, scan.gate_mode
 scan.v_top, scan.v_bot, scan.v_channel, scan.ef, scan.carrier_density
+scan.i_top, scan.i_bot, scan.i_channel        # role-backed, need gates=
 
 # — axis for plotting —
 scan.sweep_type, scan.sweep_axis, scan.sweep_axis_label, scan.signal_label

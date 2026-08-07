@@ -21,6 +21,7 @@ from tmdc_optics_tools.loaders import (
     AttoCubeSpectralSweep,
     DeviceGeometry,
     StackLayer,
+    _axis_atol,
 )
 
 from test_loaders import make_spectral_csv
@@ -55,6 +56,23 @@ FIELD_SWEEP = {
     "V_A":              _COMMON - _FIELD / 2,       # top
     "V_B":              _COMMON + _FIELD / 2,       # bottom; V_B - V_A = field
     "Excitation Power": np.repeat(np.linspace(1e-6, 3e-6, N_SLOW), N_FAST),
+    "Scanner X":        np.full(N_SWEEPS, 5.0),
+    "Scanner Y":        np.full(N_SWEEPS, 7.0),
+}
+
+# A gate sweep nested inside a power sweep whose slow axis is *read back* at every
+# point rather than commanded, so each level has a width of its own.  The wobble
+# is a fixed fraction of the reading and the levels are decade-spaced, which
+# makes the top level wider than a tolerance scaled to the whole axis while every
+# step inside it stays far smaller than the distance between levels.
+_WOBBLE   = np.array([-9e-4, -3e-4, 3e-4, 9e-4])       # fraction of the reading
+_LEVELS   = np.array([1.0, 10.0, 100.0])               # µW
+_READBACK = np.repeat(_LEVELS, N_FAST) * (1 + np.tile(_WOBBLE, N_SLOW))
+
+POWER_SWEEP = {
+    "V_A":              np.full(N_SWEEPS, 1.0),
+    "V_B":              np.tile(np.array([-2.0, -1.0, 1.0, 2.0]), N_SLOW),
+    "Excitation Power": _READBACK / 0.303e6,           # undo the loader's µW scale
     "Scanner X":        np.full(N_SWEEPS, 5.0),
     "Scanner Y":        np.full(N_SWEEPS, 7.0),
 }
@@ -143,6 +161,39 @@ def test_derived_axis_nests_where_the_raw_rows_cannot(field_csv, geometry):
     with pytest.raises(ValueError, match="does not describe"):
         AttoCubeSpectralSweep(str(field_csv), spectra_type="PL",
                               fast_sweep="V_A", slow_sweep="power")
+
+
+def test_a_level_wider_than_the_axis_tolerance_still_nests(tmp_path):
+    """
+    A slow axis read back per point rather than commanded: levels have a width.
+
+    That width grows with the reading while a tolerance scaled to the axis's span
+    is fixed by the largest reading, so on a decade-spaced power sweep the top
+    level is wider than the tolerance while the levels stay cleanly apart.  What
+    the nest turns on is which level each point sits on, so it verifies.
+    """
+    path = tmp_path / "power.csv"
+    make_spectral_csv(path, params=POWER_SWEEP)
+    scan = AttoCubeSpectralSweep(str(path), spectra_type="PL",
+                                 fast_sweep="V_B", slow_sweep="power")
+
+    assert (scan.nesting.n_fast, scan.nesting.n_slow) == (N_FAST, N_SLOW)
+    np.testing.assert_allclose(scan.nesting.slow_axis, _LEVELS, rtol=1e-3)
+
+    # Pin that the fixture reaches the case: comparing readings against one of
+    # their own would reject this nest, so passing it is not free.
+    top = scan.power[-N_FAST:]
+    assert np.ptp(top) > _axis_atol(scan.power)
+
+
+def test_a_wobbling_level_still_names_the_swap(tmp_path):
+    """The inverted declaration must still be told apart from a genuine mismatch."""
+    path = tmp_path / "power.csv"
+    make_spectral_csv(path, params=POWER_SWEEP)
+    with pytest.raises(ValueError) as exc:
+        AttoCubeSpectralSweep(str(path), spectra_type="PL",
+                              fast_sweep="power", slow_sweep="V_B")
+    assert "Swapping them does" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------

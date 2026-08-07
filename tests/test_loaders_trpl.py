@@ -287,7 +287,7 @@ def test_irf_named_file_excluded_even_without_a_prefix(tmp_path):
     s = AttoCubeTRPLSweep(tmp_path)
 
     assert s.n_sweeps == 2
-    assert np.allclose(s.v_top, [1.0, 2.0])
+    assert np.allclose(s["V_A"], [1.0, 2.0])  # channel term -- no gate mapping declared
     assert s.irf_files == ["IRF_iter_2.csv"]
 
 

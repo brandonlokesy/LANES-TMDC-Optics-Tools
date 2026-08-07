@@ -1292,40 +1292,6 @@ class _AttoCubeSweep:
             sweep_label if sweep_label is not None else meta.get("sweep_label"),
             sweep_unit  if sweep_unit  is not None else meta.get("sweep_unit"),
         )
-        self._warn_if_sweep_axis_is_a_raster_row()
-
-    def _warn_if_sweep_axis_is_a_raster_row(self) -> None:
-        """
-        Warn when the declared sweep axis is non-monotonic and
-        :meth:`sweep_grid` shows this is actually a flattened 2-D raster.
-
-        ``sweep="Scanner X"`` on a raster succeeds and returns that row
-        unchanged — e.g. 0→80 µm repeated 51 times — because nothing
-        compares it against what :meth:`sweep_grid` already knows, and
-        ``__repr__`` only prints min/max so the result reads as innocent.
-        Not an error: taking one axis of a raster is a legitimate reason to
-        declare a 1-D sweep on it (e.g. to slice a single row), so this only
-        announces the shape rather than refusing the declaration.
-        """
-        if self.sweep_type == "index":
-            return
-        axis = self.sweep_axis
-        if axis.size < 2:
-            return
-        diffs = np.diff(axis)
-        if np.all(diffs >= 0) or np.all(diffs <= 0):
-            return
-        grid = self.sweep_grid()
-        if grid is not None:
-            warnings.warn(
-                f"sweep={self.sweep_type!r} gives a non-monotonic axis "
-                f"('{self._sweep_label}' does not increase or decrease across all "
-                f"{self.n_sweeps} points) because this is a flattened raster: {grid}. "
-                f"Any plot or fit against this axis will overplot every row. Call "
-                f"sweep_grid() to see the shape, or declare '{grid.outer_label}' "
-                f"instead if you meant the slow axis.",
-                UserWarning, stacklevel=4,
-            )
 
     def _bind_nesting(self, fast_sweep, slow_sweep) -> None:
         """

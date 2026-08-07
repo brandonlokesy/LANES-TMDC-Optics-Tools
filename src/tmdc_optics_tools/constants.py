@@ -14,8 +14,10 @@ E_CHARGE = e                   # C
 # loaders (where it is recorded per scan and written into exported HDF5) and by
 # the reference-data subpackage, which re-exports it — one vocabulary, so a tag
 # means the same thing in a lab file and in a digitised literature dataset.
-# Raman is out of scope: the group measures it on a separate instrument whose
-# export this package does not read.
+# Raman has no entry here because it is not tagged this way at all: it is
+# measured on a separate (LabRAM) instrument and read by its own loaders,
+# RamanSpectrum/RamanMap, rather than by an AttoCubeSpectralSweep carrying
+# spectra_type="Raman" — see RAMAN_MODES/RAMAN_LAYER_DISCRIMINATOR below.
 SPECTROSCOPY_TYPES = {
     "PL":   "Photoluminescence",
     "R":    "Reflectance",

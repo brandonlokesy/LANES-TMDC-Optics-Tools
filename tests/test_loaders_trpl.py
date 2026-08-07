@@ -226,6 +226,17 @@ def test_gap_in_iteration_sequence_warns(tmp_path):
     assert s.n_sweeps == 2
 
 
+def test_duplicate_iteration_index_warns(tmp_path):
+    # Two decays claiming iter_0. Both carry a temporal header, so classification
+    # keeps them and the collision reaches the sort — unlike the real companion,
+    # which is a spectral file and is separated out before it.
+    _synth_decay(tmp_path / "TRPL_iter_0.csv", params={"V_A": 0.0})
+    _synth_decay(tmp_path / "TRPL_rerun_iter_0.csv", params={"V_A": 5.0})
+    with pytest.warns(UserWarning, match="claimed by more than one file"):
+        s = AttoCubeTRPLSweep(tmp_path)
+    assert s.n_sweeps == 2
+
+
 def test_files_without_iter_suffix_warn(tmp_path):
     for name in ("a", "b"):
         _synth_decay(tmp_path / f"TRPL_{name}.csv",

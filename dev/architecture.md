@@ -939,7 +939,8 @@ Two consequences the assembly code exists for:
   puts `iter_10` before `iter_2`. The helper is module-level and shared with
   `AttoCubePLScanRealSpace`, which has the same problem over image frames; it takes a
   plain `list[Path]`, so this call site re-attaches each file's layout by dict lookup
-  after the sort. It warns on a missing suffix and on a gap, and repairs neither.
+  after the sort. It warns on a missing suffix, a gap, and an index claimed by more
+  than one file, and repairs none of them.
 
 The per-file time axes are not bit-identical (bin width varies in its seventh
 figure), so `_assemble` compares them with `time_rtol`, never for equality.

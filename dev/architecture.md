@@ -936,7 +936,10 @@ Two consequences the assembly code exists for:
   so classification is by content, not filename.** `_read_block_layout` reads one
   header line per file and sorts them.
 - **Order by the integer in `_iter_N`**, via `_order_by_iter`. Lexicographic order
-  puts `iter_10` before `iter_2`.
+  puts `iter_10` before `iter_2`. The helper is module-level and shared with
+  `AttoCubePLScanRealSpace`, which has the same problem over image frames; it takes a
+  plain `list[Path]`, so this call site re-attaches each file's layout by dict lookup
+  after the sort. It warns on a missing suffix and on a gap, and repairs neither.
 
 The per-file time axes are not bit-identical (bin width varies in its seventh
 figure), so `_assemble` compares them with `time_rtol`, never for equality.

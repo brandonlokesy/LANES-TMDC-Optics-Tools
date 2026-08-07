@@ -35,9 +35,14 @@
   11.57 MB → 0.069 MB TRPL result is a decent argument for having one.
 - AttoCubeRealSpace ...
     - Select the range of frames of interest -> work on a subset
-    - **File ordering is lexicographic** (A7): `iter_10` sorts before `iter_2`.
-      Escapes notice today only because the committed example is zero-padded.
-      Copy `AttoCubeTRPLSweep._order_by_iter`, gap warning included.
+    - ~~**File ordering is lexicographic** (A7)~~ **fixed 2026-08-07.**
+      `_order_by_iter` moved out of `AttoCubeTRPLSweep` to a module-level helper and
+      is now called by both loaders, gap warning included. Escaped notice only
+      because the committed exports are zero-padded — and the padding *width* varies
+      between them (4 digits in `position-scan/PL`, 6 in `position-scan/wl`), so it
+      was never something to rely on. **A9** (`_is_image_csv` takes a two-row
+      spectrum for an image) and **B1** (`bg_region` ignored in `load_frame`) are the
+      rest of this class's pass and are still open, in that order.
 - Position in scans (x,y).
     - ~~for x (..) for y (...) can be flipped to for y (...) for x (..)~~ **settled
       2026-07-31, built 2026-08-06 (E14).** The flip is settled *by statement*, not

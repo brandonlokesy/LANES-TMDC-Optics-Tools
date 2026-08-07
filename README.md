@@ -138,7 +138,7 @@ plotting.set_style("paper")   # or "talk", "poster". Optional
 fig, ax, mesh = plotting.plot_spectral_map(
     scan,
     x_axis        = "energy",      # or "wavelength"
-    cmap          = "vik",
+    cmap          = "magma",
     median_kernel = 3,             # 2D median filter; set to 1 to disable
 )
 ```

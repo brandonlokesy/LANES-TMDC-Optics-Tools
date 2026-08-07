@@ -20,7 +20,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-colormaps = ["cmcrameri"]
+# Extra colormap sources.  None is required: every default is a Matplotlib
+# colormap.  cmcrameri and cmocean register into Matplotlib under the prefixes
+# "cmc." and "cmo." once imported; seaborn supplies palettes and colormaps that
+# are passed as objects.
+colormaps = ["cmcrameri", "cmocean", "seaborn"]
 docs = [
     "mkdocs-material",
     "mkdocstrings[python]",

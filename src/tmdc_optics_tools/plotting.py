@@ -13,9 +13,12 @@ from __future__ import annotations
 import warnings
 from pathlib import Path
 
+from typing import Union
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.colors as mcolors
 import matplotlib.patches as patches
 import matplotlib.patheffects as path_effects
 from skimage.exposure import rescale_intensity
@@ -29,12 +32,20 @@ from .loaders import (
     _SPECTRA_SOURCES, _SPECTRA_SOURCE_LABELS, _resolve_spectra,
 )
 
-# Optional: cmcrameri diverging colormaps (pip install cmcrameri)
+# Optional colormap packages (pip install "tmdc_optics_tools[colormaps]").
+# Imported for their side effect alone: each registers its colormaps into
+# Matplotlib's registry under a prefix — "cmc.vik", "cmo.thermal" — which is how
+# get_cmap reaches them.  Nothing below refers to either package by name, so the
+# import is the whole point and must not be tidied away as unused.
 try:
-    from cmcrameri import cm as cmc
-    _HAS_CRAMERI = True
+    import cmcrameri            # noqa: F401  — registers the "cmc.*" names
 except ImportError:
-    _HAS_CRAMERI = False
+    pass
+
+try:
+    import cmocean              # noqa: F401  — registers the "cmo.*" names
+except ImportError:
+    pass
 
 # ---------------------------------------------------------------------------
 # Style
@@ -80,23 +91,95 @@ def set_style(context: str = "paper") -> None:
 # Colormaps
 # ---------------------------------------------------------------------------
 
-def get_cmap(name: str = "vik"):
+#: Anything accepted wherever this module takes a ``cmap``: a colormap name, a
+#: Matplotlib colormap, or a sequence of colours.  Resolved by :func:`get_cmap`.
+ColormapLike = Union[str, mcolors.Colormap, list, tuple, np.ndarray]
+
+
+def get_cmap(cmap: ColormapLike = "magma") -> mcolors.Colormap:
     """
-    Return a colormap by name, preferring cmcrameri if available.
+    Resolve a colormap specification to a Matplotlib colormap.
 
     Parameters
     ----------
-    name : str
-        Any cmcrameri map (e.g. ``"vik"``, ``"roma"``) or standard
-        Matplotlib map.
+    cmap : str, matplotlib.colors.Colormap, or sequence of colours
+        A **name** is resolved through Matplotlib's colormap registry, so any
+        Matplotlib name works (``"magma"``, ``"gray"``, …).  cmcrameri and
+        cmocean register into that same registry under a **prefix**, so their
+        names carry it: ``"cmc.vik"``, ``"cmo.thermal"``.  Bare ``"vik"`` and
+        ``"thermal"`` are not registered by either package and will not
+        resolve.
+
+        A **colormap** is returned unchanged, so anything producing one can be
+        passed directly — ``seaborn.color_palette(..., as_cmap=True)``,
+        ``cmocean.cm.thermal``, ``cmcrameri.cm.vik``, a hand-built
+        :class:`~matplotlib.colors.LinearSegmentedColormap`.
+
+        A **sequence of colours** — hex strings, named colours, RGB(A) tuples,
+        or an ``(n, 3)`` / ``(n, 4)`` array, as returned by
+        ``seaborn.color_palette(...)`` without ``as_cmap=True`` — is wrapped in
+        a :class:`~matplotlib.colors.ListedColormap`.
 
     Returns
     -------
     matplotlib.colors.Colormap
+
+    Raises
+    ------
+    TypeError
+        If *cmap* is neither a name, a colormap, nor a sequence of colours.
+    ValueError
+        If *cmap* names an unknown colormap, or is an empty sequence.
+
+    Notes
+    -----
+    A sequence of *n* colours becomes *n* discrete bands, not a continuous
+    ramp — the colours are used as given rather than interpolated between.  For
+    a smooth colormap from a seaborn palette, ask the palette for one with
+    ``as_cmap=True``.
+
+    A prefixed name only resolves once the package that owns it has been
+    imported, since registration is an import side effect.  Importing this
+    module imports cmcrameri and cmocean when they are installed, so the
+    prefixed names are available without importing them yourself.  Passing the
+    colormap object depends on no such ordering.
+
+    Examples
+    --------
+    >>> get_cmap("magma")                                    # doctest: +SKIP
+    >>> get_cmap("cmo.thermal")                              # doctest: +SKIP
+    >>> get_cmap(cmocean.cm.thermal)                         # doctest: +SKIP
+    >>> get_cmap(sns.color_palette("rocket", as_cmap=True))  # doctest: +SKIP
+    >>> get_cmap(sns.color_palette("rocket", 8))           # 8 bands  # doctest: +SKIP
+    >>> get_cmap(["#1b9e77", "#d95f02", "#7570b3"])        # 3 bands  # doctest: +SKIP
     """
-    if _HAS_CRAMERI and hasattr(cmc, name):
-        return getattr(cmc, name)
-    return plt.get_cmap(name)
+    if isinstance(cmap, mcolors.Colormap):
+        return cmap
+
+    if isinstance(cmap, str):
+        # One registry, so there is no precedence rule to get wrong.  Looking
+        # bare third-party names up here instead would silently shadow
+        # Matplotlib: cmocean and Matplotlib both define "gray", and cmcrameri
+        # and Matplotlib both define "berlin", "managua" and "vanimo".
+        return plt.get_cmap(cmap)
+
+    # Everything else is read as a sequence of colours.  to_rgba_array is the
+    # validator as well as the converter: it takes hex strings, named colours,
+    # RGB(A) tuples and (n, 3)/(n, 4) arrays alike, and rejects anything that is
+    # not one of those.
+    try:
+        colours = mcolors.to_rgba_array(cmap)
+    except (ValueError, TypeError) as exc:
+        raise TypeError(
+            f"cmap must be a colormap name, a matplotlib Colormap, or a sequence "
+            f"of colours.  Could not read {type(cmap).__name__} as a sequence of "
+            f"colours: {exc}"
+        ) from exc
+
+    if len(colours) == 0:
+        raise ValueError("cmap is an empty sequence of colours.")
+
+    return mcolors.ListedColormap(colours)
 
 
 # ---------------------------------------------------------------------------
@@ -164,7 +247,7 @@ def plot_spectral_map(
     figsize        : tuple = (6, 4),
     dpi            : int   = None,
     x_axis         : str   = "energy",
-    cmap           : str   = "vik",
+    cmap           : ColormapLike = "magma",
     median_kernel  : int   = 3,
     clim           : tuple = None,
     colorbar       : bool  = True,
@@ -195,8 +278,8 @@ def plot_spectral_map(
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
     x_axis : {"energy", "wavelength"}
-    cmap : str
-        Colormap name passed to :func:`get_cmap`.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.
     median_kernel : int
         2-D median filter size. Set to 1 to disable.
     clim : tuple of (vmin, vmax), optional
@@ -579,7 +662,7 @@ def plot_real_space_PL_map(
     idx    : int = 0,
     xlabel : str = "x-axis (pixels)",
     ylabel : str = "y-axis (pixels)",
-    cmap   : str = "cork"
+    cmap   : ColormapLike = "magma"
 ) -> tuple:
     """
     Plot a single real-space PL map from an
@@ -593,6 +676,8 @@ def plot_real_space_PL_map(
         Frame index to display.
     xlabel, ylabel : str
         Axis labels.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.
 
     Returns
     -------
@@ -614,7 +699,7 @@ def plot_image(
     ax             = None,
     figsize        : tuple = (6, 5),
     dpi            : int   = None,
-    cmap           : str   = "vik",
+    cmap           : ColormapLike = "magma",
     colorbar       : bool  = True,
     colorbar_label : str   = None,
     rescale_img    : bool  = False,
@@ -634,8 +719,8 @@ def plot_image(
         :class:`~tmdc_optics_tools.loaders.AttoCubeSampleImage`).
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
-    cmap : str
-        Colormap name passed to :func:`get_cmap`.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.
     colorbar : bool
         Show a colorbar alongside the image.
     colorbar_label : str, optional
@@ -736,7 +821,7 @@ def animate_real_space_PL_map(
     xlabel           : str  = "x-axis (um)",
     ylabel           : str  = "y-axis (um)",
     laser_annotation : bool = True,
-    cmap             : str  = "cork",
+    cmap             : ColormapLike = "magma",
 ) -> tuple:
     """
     Animate a sequence of real-space PL maps from an
@@ -771,6 +856,8 @@ def animate_real_space_PL_map(
         Axis labels.
     laser_annotation : bool
         Overlay the laser spot circle if ``scan.laser_ref`` is set.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.
 
     Returns
     -------
@@ -973,8 +1060,8 @@ class ImageSequencePanel(AnimationPanel):
     scan : AttoCubePLScanRealSpace
     title : str
         Per-panel heading.
-    cmap : str
-        Colormap name passed to :func:`get_cmap` via :func:`plot_real_space_PL_map`.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap` via :func:`plot_real_space_PL_map`.
     laser_annotation : bool
         Overlay the laser-spot circle when ``scan.laser_ref`` is set.
     laser_color : str
@@ -998,7 +1085,7 @@ class ImageSequencePanel(AnimationPanel):
         self,
         scan,
         title            : str   = "",
-        cmap             : str   = "vik",
+        cmap             : ColormapLike = "magma",
         laser_annotation : bool  = True,
         laser_color      : str   = "red",
         laser_linewidth  : float = 1.5,
@@ -1261,7 +1348,7 @@ def animate_panels(
     --------
     >>> panels = [
     ...     ImageSequencePanel(white_light_map, title="White light", cmap="gray"),
-    ...     ImageSequencePanel(real_space_PL_map, title="Real-space PL", cmap="lipari"),
+    ...     ImageSequencePanel(real_space_PL_map, title="Real-space PL", cmap="magma"),
     ...     SpectrumLinePanel(spectra_linescan, x_axis="energy"),
     ... ]
     >>> # suptitle shows e.g. "Frame 3/78  |  Power: 1.23 uW"
@@ -1376,8 +1463,8 @@ def animate_wl_pl_spectra(
     spectra          = None,
     laser_ref        = None,
     x_axis           : str = "energy",
-    wl_cmap          : str = "gray",
-    pl_cmap          : str = "lipari",
+    wl_cmap          : ColormapLike = "gray",
+    pl_cmap          : ColormapLike = "magma",
     wl_title         : str = "White light",
     pl_title         : str = "Real-space PL",
     sweep_attr       : str = "scanner_y",
@@ -1413,8 +1500,8 @@ def animate_wl_pl_spectra(
         (with *laser_ref_kwargs*).
     x_axis : {"energy", "wavelength"}
         Spectrum panel x-axis.
-    wl_cmap, pl_cmap : str
-        Colormaps for the two image panels.
+    wl_cmap, pl_cmap : str, Colormap, or sequence of colours
+        Colormaps for the two image panels, passed to :func:`get_cmap`.
     wl_title, pl_title : str
         Titles for the two image panels.
     sweep_attr, sweep_unit : str
@@ -1581,7 +1668,7 @@ def plot_diffusion_cloud(
     ax                 = None,
     figsize            : tuple = (4, 4),
     dpi                : int   = None,
-    cmap               : str   = "inferno",
+    cmap               : ColormapLike = "inferno",
     contour_color      : str   = "green",
     contour_lw         : float = 0.9,
     contour_ls         : str   = "--",
@@ -1631,8 +1718,8 @@ def plot_diffusion_cloud(
         When ``None`` the analysis is run here with the remaining kwargs.
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
-    cmap : str
-        Colormap for the image.
+    cmap : str, Colormap, or sequence of colours
+        Colormap for the image, passed to :func:`get_cmap`.
     contour_color, contour_lw, contour_ls : str / float / str
         Style of the boundary contour.
     centroid_color, centroid_marker, centroid_ms : str / str / float
@@ -1846,8 +1933,8 @@ class DiffusionCloudPanel(AnimationPanel):
         that point).
     title : str
         Panel heading.
-    cmap : str
-        Colormap for the image.
+    cmap : str, Colormap, or sequence of colours
+        Colormap for the image, passed to :func:`get_cmap`.
     contour_color, contour_lw, contour_ls : str / float / str
         Style of the per-frame boundary contour.
     centroid_color, centroid_marker, centroid_ms : str / str / float
@@ -1887,7 +1974,7 @@ class DiffusionCloudPanel(AnimationPanel):
         scan,
         seq_result        = None,
         title             : str   = "",
-        cmap              : str   = "inferno",
+        cmap              : ColormapLike = "inferno",
         contour_color     : str   = "cyan",
         contour_lw        : float = 0.9,
         contour_ls        : str   = "--",
@@ -2161,7 +2248,7 @@ def plot_power_series(
     sweep_step       : int    = 1,
     spectrum_offset  : float  = 0.0,
     # --- colour mapping ---
-    cmap             : str    = "viridis",
+    cmap             : ColormapLike = "viridis",
     power_scale      : str    = "linear",
     power_range      : tuple  = None,
     # --- line style ---
@@ -2253,8 +2340,8 @@ def plot_power_series(
 
     Colour mapping
     --------------
-    cmap : str
-        Matplotlib colormap name.  Default ``"viridis"``.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.  Default ``"viridis"``.
     power_scale : {"linear", "log"}
         Colormap normalisation.  Default ``"linear"``.
     power_range : tuple of (p_min, p_max), optional

@@ -96,6 +96,38 @@ def test_frames_without_iter_suffix_warn(tmp_path):
     assert [f.stem for f in scan.files] == ["pl_a", "pl_b"]
 
 
+def test_two_runs_in_one_directory_warn_on_collision(tmp_path):
+    # Two acquisitions dropped into one folder. Every file is a legitimate numeric
+    # grid, so nothing upstream rejects them and the indices collide pairwise.
+    for i in (0, 1, 2):
+        _frame(tmp_path, f"pl_iter_{i}.csv", i)
+        _frame(tmp_path, f"pl_run2_iter_{i}.csv", 100 + i)
+    with pytest.warns(UserWarning, match="claimed by more than one file") as caught:
+        scan = AttoCubePLScanRealSpace(tmp_path, prefix="pl_")
+
+    # Names the files, not just the count — that is what says two runs were merged.
+    assert "pl_run2_iter_0.csv" in str(caught[0].message)
+    # Nothing is dropped and no winner is picked, so the frame count exceeds the
+    # three distinct points and index i is not iteration i.
+    assert scan.n_frames == 6
+
+
+def test_collision_and_gap_both_warn(tmp_path):
+    # Independent conditions: the gap check compares against the set of indices,
+    # which a repeat leaves unchanged, so neither implies the other.
+    _frame(tmp_path, "pl_iter_0.csv", 0)
+    _frame(tmp_path, "pl_run2_iter_0.csv", 100)
+    _frame(tmp_path, "pl_iter_2.csv", 2)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        scan = AttoCubePLScanRealSpace(tmp_path, prefix="pl_")
+
+    messages = " | ".join(str(c.message) for c in caught)
+    assert "claimed by more than one file" in messages
+    assert "missing iteration(s) [1]" in messages
+    assert scan.n_frames == 3
+
+
 def test_warning_points_at_the_caller(tmp_path):
     # stacklevel=3 at the call site. Without it the warning blames a line inside
     # loaders.py, which tells a researcher nothing about which scan complained.

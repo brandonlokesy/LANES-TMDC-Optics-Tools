@@ -961,9 +961,11 @@ def _order_by_iter(files: list, path, *, stacklevel: int) -> list:
     Sort per-point export files by the integer in their ``_iter_N`` suffix.
 
     Lexicographic order places ``iter_10`` before ``iter_2``, pairing every point
-    with the wrong index.  A gap in the sequence is reported rather than closed
-    up: a missing point means an aborted or partly copied acquisition, and
-    shifting the rest would misalign the whole axis.
+    with the wrong index.  A gap in the sequence, and an index claimed by more than
+    one file, are both reported rather than repaired: a missing point means an
+    aborted or partly copied acquisition, a repeated one usually means two
+    acquisitions share a directory, and closing up or discarding either would
+    misalign the axis silently.
 
     Parameters
     ----------
@@ -979,14 +981,19 @@ def _order_by_iter(files: list, path, *, stacklevel: int) -> list:
     Returns
     -------
     list of Path
-        The same files, ordered by iteration index.  Nothing is dropped and a gap
-        is left as a gap, so index *i* is not necessarily iteration *i*.
+        The same files, ordered by iteration index.  Nothing is dropped, and
+        neither a gap nor a repeat is repaired, so index *i* is not necessarily
+        iteration *i*.
 
     Warns
     -----
     UserWarning
         If any file carries no ``_iter_N`` suffix.  Filename order is returned
         instead, which need not be acquisition order.
+    UserWarning
+        If more than one file claims the same index.  Both are kept, so the count
+        exceeds the number of distinct points and every point from the collision
+        onward is offset against a per-point variable array.
     UserWarning
         If iterations are missing between the lowest and highest present.
     """
@@ -1006,6 +1013,27 @@ def _order_by_iter(files: list, path, *, stacklevel: int) -> list:
         return [f for _, f in indexed]
 
     indexed.sort(key=lambda item: item[0])
+
+    # Grouped by index so the message can name the colliding files, which is what
+    # says whether two acquisitions were merged. The gap check below cannot see a
+    # repeat: it compares against the *set* of indices, which a repeat leaves
+    # unchanged.
+    by_index = {}
+    for idx, f in indexed:
+        by_index.setdefault(idx, []).append(f)
+    collisions = {idx: fs for idx, fs in by_index.items() if len(fs) > 1}
+    if collisions:
+        detail = "; ".join(f"iter_{idx}: {', '.join(f.name for f in fs)}"
+                           for idx, fs in sorted(collisions.items()))
+        warnings.warn(
+            f"'{path}' has {len(collisions)} iteration index(es) claimed by more "
+            f"than one file ({detail}). Index i is therefore not iteration i, and a "
+            f"per-point variable array will be mispaired from the first collision "
+            f"onward. Nothing is dropped — narrow the prefix if two acquisitions "
+            f"share a directory.",
+            UserWarning, stacklevel=stacklevel,
+        )
+
     seen    = [idx for idx, _ in indexed]
     missing = sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
     if missing:

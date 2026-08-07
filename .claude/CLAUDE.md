@@ -607,7 +607,8 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 `__repr__` and `optical_thickness` (A2), the `animate_real_space_PL_map` laser
 circle (A3), zero-filled blocks loaded as sweep points (A6), the silent sawtooth
 sweep axis on a raster (A8), the zero-mean overflow in `varying_parameters` (A10),
-the lexicographic frame order in `AttoCubePLScanRealSpace` (A7), the `_CURATED`
+the lexicographic frame order in `AttoCubePLScanRealSpace` (A7), duplicate
+iteration indices passing unreported (A12), the `_CURATED`
 fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), nested
 sweeps (E14), and the
 2026-07-30 rewrite — `AttoCubeSpectralSweep`, `hdf5.py`, `AttoCubeTRPLSweep`
@@ -721,11 +722,16 @@ decision; the argument for it is in the audit under the ID given.
 - **`_order_by_iter` is one module-level helper shared by both directory loaders,
   and it warns rather than repairs.** Frame and point order come from the integer in
   `_iter_N`, never from `sorted()` on filenames: exports are zero-padded but the
-  *width* varies between them, so alphabetical order is right only by luck. A missing
-  `_iter_N` suffix and a gap both warn, and a gap is never closed up, because
-  shifting the rest would silently restore the mispairing the helper exists to
-  catch. `stacklevel` is a required argument because the two callers sit at different
-  depths — see A11 before trusting any warning's line number. (A7)
+  *width* varies between them, so alphabetical order is right only by luck. Three
+  conditions warn and none is repaired — no `_iter_N` suffix, a gap, and an index
+  claimed by more than one file. A gap is never closed up and a duplicate never
+  resolved by picking a winner, because both would silently restore the mispairing
+  the helper exists to catch; the duplicate message **names the colliding files**,
+  since two acquisitions sharing a directory is the usual cause and a narrower
+  prefix the usual fix. Duplicates are reachable with every file legitimate, so
+  don't re-file this under A9. `stacklevel` is a required argument because the two
+  callers sit at different depths — see A11 before trusting any warning's line
+  number. (A7, A12)
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object

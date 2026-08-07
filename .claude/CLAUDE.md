@@ -608,7 +608,8 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 circle (A3), zero-filled blocks loaded as sweep points (A6), the silent sawtooth
 sweep axis on a raster (A8), the zero-mean overflow in `varying_parameters` (A10),
 the lexicographic frame order in `AttoCubePLScanRealSpace` (A7), duplicate
-iteration indices passing unreported (A12), the `_CURATED`
+iteration indices passing unreported (A12), a valid nest refused because a
+read-back level was wider than the axis tolerance (A13), the `_CURATED`
 fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), nested
 sweeps (E14), and the
 2026-07-30 rewrite — `AttoCubeSpectralSweep`, `hdf5.py`, `AttoCubeTRPLSweep`

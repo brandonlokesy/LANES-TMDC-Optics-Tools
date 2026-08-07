@@ -1071,11 +1071,11 @@ class SweepGrid(NamedTuple):
                 f"{self.n_fast * self.n_slow}")
 
 
-# Fraction of an axis's own span by which two values may differ and still count
-# as the same grid point.  Scaled to the span rather than to the value so that an
-# axis crossing zero — an anti-symmetric field sweep, say — is handled like any
-# other, and loose enough for a derived axis that is recomputed per sweep point
-# rather than read back as a repeated literal.
+# Fraction of an axis's own span by which two neighbouring readings may differ
+# and still fall on the same grid point.  Scaled to the span rather than to the
+# value so that an axis crossing zero — an anti-symmetric field sweep, say — is
+# handled like any other, and loose enough for a derived axis that is recomputed
+# per sweep point rather than read back as a repeated literal.
 _NEST_RTOL = 1e-3
 
 
@@ -1086,17 +1086,38 @@ def _axis_atol(values: np.ndarray, rtol: float = _NEST_RTOL) -> float:
     return max(rtol * span, np.finfo(float).tiny)
 
 
+def _level_labels(values: np.ndarray, atol: float) -> tuple:
+    """
+    Index the grid level each value sits on, and count the levels.
+
+    Two readings share a level when the gap between them, in sorted order, is at
+    most *atol* — so a level is a run of readings each within *atol* of its
+    neighbour, however far the ends of the run are from each other.  Non-finite
+    entries sit on no level and are labelled ``-1``.
+
+    Returns ``(labels, n_levels)``, *labels* shaped like *values*.
+    """
+    labels = np.full(values.shape, -1, dtype=int)
+    finite = np.flatnonzero(np.isfinite(values))
+    if finite.size == 0:
+        return labels, 0
+
+    # Sort the finite entries, cut the run wherever a consecutive gap exceeds
+    # atol, and scatter the running cut count back to where each value came
+    # from: one vectorised pass rather than a pairwise comparison.
+    order         = finite[np.argsort(values[finite], kind="stable")]
+    cuts          = np.diff(values[order]) > atol         # (n_finite - 1,)
+    labels[order] = np.concatenate(([0], np.cumsum(cuts)))
+    return labels, int(labels[order[-1]]) + 1
+
+
 def _count_distinct(values: np.ndarray, atol: float) -> int:
     """
     Number of distinct values in *values*, treating gaps ≤ *atol* as equal.
 
-    Sorting first turns "how many distinct" into "how many gaps exceed atol",
-    which is one vectorised pass rather than a pairwise comparison.
+    Non-finite entries are not counted.
     """
-    ordered = np.sort(values[np.isfinite(values)])
-    if ordered.size == 0:
-        return 0
-    return int(1 + np.count_nonzero(np.diff(ordered) > atol))
+    return _level_labels(values, atol)[1]
 
 
 def _render_indices(indices: np.ndarray, limit: int = 6) -> str:
@@ -1116,28 +1137,35 @@ def _nest_shape(fast: np.ndarray, slow: np.ndarray, n_sweeps: int) -> tuple:
     retries with the arguments swapped to tell a genuine mismatch from a
     reversed declaration.
     """
-    fast_atol = _axis_atol(fast)
-    slow_atol = _axis_atol(slow)
+    # Reduce both axes to level indices up front, so the structural test below is
+    # an exact comparison of integers and the tolerance is applied in one place.
+    # Testing the readings themselves instead would hold a level's own scatter to
+    # a tolerance set by the axis's *full span* — which a measured-back quantity
+    # such as excitation power exceeds on its topmost level long before its
+    # levels stop being separable, since the scatter grows with the reading while
+    # the tolerance is fixed by the largest one.
+    fast_labels, n_fast = _level_labels(fast, _axis_atol(fast))
+    slow_labels, _      = _level_labels(slow, _axis_atol(slow))
 
-    n_fast = _count_distinct(fast, fast_atol)
     if n_fast < 2 or n_sweeps % n_fast:
         return None
     n_slow = n_sweeps // n_fast
 
-    fast_grid = fast.reshape(n_slow, n_fast)
-    slow_grid = slow.reshape(n_slow, n_fast)
+    fast_grid = fast_labels.reshape(n_slow, n_fast)
+    slow_grid = slow_labels.reshape(n_slow, n_fast)
 
     # (n_fast,) broadcast down the rows: the fast axis must repeat the same run
-    # of values in every row.  (n_slow, 1) broadcast across the columns: the slow
+    # of levels in every row.  (n_slow, 1) broadcast across the columns: the slow
     # axis must hold still for the whole of each row.
-    if not np.allclose(fast_grid, fast_grid[0], rtol=0, atol=fast_atol,
-                       equal_nan=True):
+    if not (fast_grid == fast_grid[0]).all():
         return None
-    if not np.allclose(slow_grid, slow_grid[:, :1], rtol=0, atol=slow_atol,
-                       equal_nan=True):
+    if not (slow_grid == slow_grid[:, :1]).all():
         return None
-    # A slow axis that revisits a value would make a lookup by value ambiguous.
-    if _count_distinct(slow_grid[:, 0], slow_atol) != n_slow:
+    # A slow axis that revisits a level would make a lookup by value ambiguous,
+    # and one with no level at all (non-finite, labelled -1) has no coordinate to
+    # look up — so count the levels actually reached, ignoring those.
+    slow_levels = slow_grid[:, 0]
+    if np.unique(slow_levels[slow_levels >= 0]).size != n_slow:
         return None
     return n_fast, n_slow
 

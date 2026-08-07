@@ -945,6 +945,81 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, path) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Per-point file ordering
+# ---------------------------------------------------------------------------
+
+# The per-point index in a directory export's filenames, e.g. "..._iter_12.csv".
+# Ordering must be numeric on this: plain lexicographic sorting puts iter_10
+# before iter_2, which would silently pair every point with the wrong parameters.
+# Exports are usually zero-padded, but the width varies between them, so the
+# padding is not something to rely on.
+_ITER_INDEX = re.compile(r"_iter_(\d+)$", re.IGNORECASE)
+
+
+def _order_by_iter(files: list, path, *, stacklevel: int) -> list:
+    """
+    Sort per-point export files by the integer in their ``_iter_N`` suffix.
+
+    Lexicographic order places ``iter_10`` before ``iter_2``, pairing every point
+    with the wrong index.  A gap in the sequence is reported rather than closed
+    up: a missing point means an aborted or partly copied acquisition, and
+    shifting the rest would misalign the whole axis.
+
+    Parameters
+    ----------
+    files : list of Path
+        Per-point files, in any order.
+    path : str or Path
+        Directory they came from.  Used in messages only.
+    stacklevel : int
+        Stack level for the warnings below, counted from inside this function, so
+        ``2`` attributes them to the immediate caller.  A caller reached through
+        several private layers passes the depth that lands on its own entry point.
+
+    Returns
+    -------
+    list of Path
+        The same files, ordered by iteration index.  Nothing is dropped and a gap
+        is left as a gap, so index *i* is not necessarily iteration *i*.
+
+    Warns
+    -----
+    UserWarning
+        If any file carries no ``_iter_N`` suffix.  Filename order is returned
+        instead, which need not be acquisition order.
+    UserWarning
+        If iterations are missing between the lowest and highest present.
+    """
+    indexed = []
+    for f in files:
+        m = _ITER_INDEX.search(f.stem)
+        indexed.append((int(m.group(1)) if m else None, f))
+
+    if any(idx is None for idx, _ in indexed):
+        warnings.warn(
+            f"Some files in '{path}' carry no '_iter_N' suffix "
+            f"({', '.join(f.name for idx, f in indexed if idx is None)}); "
+            f"falling back to filename order, which may not be acquisition "
+            f"order.",
+            UserWarning, stacklevel=stacklevel,
+        )
+        return [f for _, f in indexed]
+
+    indexed.sort(key=lambda item: item[0])
+    seen    = [idx for idx, _ in indexed]
+    missing = sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
+    if missing:
+        warnings.warn(
+            f"'{path}' is missing iteration(s) {missing} between iter_"
+            f"{seen[0]} and iter_{seen[-1]} — an aborted or partly copied "
+            f"export. The {len(seen)} file(s) present are loaded in order, so "
+            f"index i is not iteration i.",
+            UserWarning, stacklevel=stacklevel,
+        )
+    return [f for _, f in indexed]
+
+
+# ---------------------------------------------------------------------------
 # _AttoCubeSweep — shared machinery
 # ---------------------------------------------------------------------------
 
@@ -3850,11 +3925,6 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
 # so the unit is a single edit if it is ever found to be otherwise.
 _TRPL_TIME_UNIT = "ns"
 
-# The per-point index in a TRPL sweep's filenames, e.g. "..._iter_12.csv".
-# Ordering must be numeric on this: plain lexicographic sorting puts iter_10
-# before iter_2, which would silently pair every decay with the wrong parameters.
-_ITER_INDEX = re.compile(r"_iter_(\d+)$", re.IGNORECASE)
-
 
 class AttoCubeTRPLSweep(_AttoCubeSweep):
     """
@@ -4098,50 +4168,17 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
                 f"A TRPL export has a [Par, Wavelength, Exp] block layout."
             )
 
-        data_files = self._order_by_iter(data_files, path)
+        # _order_by_iter speaks paths; the shared image-sequence loader has no
+        # layouts. dict is Path -> layout, so they re-attach by lookup after the
+        # sort. stacklevel 4 matches this call chain's existing depth.
+        layouts    = dict(data_files)
+        data_files = [(f, layouts[f]) for f in _order_by_iter(
+            [f for f, _ in data_files], path, stacklevel=4)]
         payload    = self._assemble(data_files, path)
 
         if companions:
             self._cross_check_companion(payload, companions, path)
         return payload
-
-    @staticmethod
-    def _order_by_iter(data_files: list, path) -> list:
-        """
-        Sort per-point files by the integer in their ``_iter_N`` suffix.
-
-        Lexicographic order would place ``iter_10`` before ``iter_2`` and pair
-        every decay with the wrong parameter values.  A gap in the sequence is
-        reported rather than closed silently: a missing point means an aborted
-        sweep, and shifting the rest would misalign the whole axis.
-        """
-        indexed = []
-        for f, layout in data_files:
-            m = _ITER_INDEX.search(f.stem)
-            indexed.append((int(m.group(1)) if m else None, f, layout))
-
-        if any(idx is None for idx, _, _ in indexed):
-            warnings.warn(
-                f"Some files in '{path}' carry no '_iter_N' suffix "
-                f"({', '.join(f.name for idx, f, _ in indexed if idx is None)}); "
-                f"falling back to filename order, which may not be acquisition "
-                f"order.",
-                UserWarning, stacklevel=4,
-            )
-            return [(f, layout) for _, f, layout in indexed]
-
-        indexed.sort(key=lambda item: item[0])
-        seen    = [idx for idx, _, _ in indexed]
-        missing = sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
-        if missing:
-            warnings.warn(
-                f"'{path}' is missing iteration(s) {missing} between iter_"
-                f"{seen[0]} and iter_{seen[-1]} — an aborted or partly copied "
-                f"sweep. The {len(seen)} file(s) present are loaded in order; "
-                f"sweep index i is not iteration i.",
-                UserWarning, stacklevel=4,
-            )
-        return [(f, layout) for _, f, layout in indexed]
 
     def _assemble(self, data_files: list, path) -> dict:
         """
@@ -4480,6 +4517,11 @@ class AttoCubePLScanRealSpace:
     ``{prefix}*.csv`` in *path*. Files that contain a text header (e.g. a
     spectral scan file) are automatically excluded.
 
+    Frames are ordered by the integer in their ``_iter_N`` filename suffix, so
+    ``iter_10`` follows ``iter_2`` rather than preceding it.  A file with no such
+    suffix, and a gap in the sequence, are both warned about; a gap is never
+    closed up, so ``load_frame(i)`` is not necessarily iteration ``i``.
+
     Parameters
     ----------
     path : str or Path
@@ -4509,14 +4551,20 @@ class AttoCubePLScanRealSpace:
         self.bg_stat   = bg_stat
 
         candidates = sorted(Path(path).glob(f"{prefix}*.csv"))
-        files = [f for f in candidates if self._is_image_csv(f)]
-        if not files:
+        images     = [f for f in candidates if self._is_image_csv(f)]
+        if not images:
             raise ValueError(
                 f"No real-space image CSV files found with prefix '{prefix}' in '{path}'. "
                 f"Found {len(candidates)} candidate(s) but none passed the numeric-grid check "
                 f"(spectral scan files with header rows are excluded automatically)."
             )
-        self.files = files
+        # Acquisition order, read from `_iter_N` — not the glob's lexicographic
+        # order, which puts iter_10 before iter_2 on any export whose padding is
+        # absent or narrower than the frame count. Every frame would then carry
+        # the wrong index into animations and into
+        # analyse_diffusion_sequence(var_array=…).
+        # stacklevel 3: the helper, this __init__, the caller's line.
+        self.files = _order_by_iter(images, path, stacklevel=3)
 
     @staticmethod
     def _is_image_csv(path: Path) -> bool:

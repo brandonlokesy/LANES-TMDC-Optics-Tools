@@ -607,7 +607,7 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 `__repr__` and `optical_thickness` (A2), the `animate_real_space_PL_map` laser
 circle (A3), zero-filled blocks loaded as sweep points (A6), the silent sawtooth
 sweep axis on a raster (A8), the zero-mean overflow in `varying_parameters` (A10),
-the `_CURATED`
+the lexicographic frame order in `AttoCubePLScanRealSpace` (A7), the `_CURATED`
 fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), nested
 sweeps (E14), and the
 2026-07-30 rewrite — `AttoCubeSpectralSweep`, `hdf5.py`, `AttoCubeTRPLSweep`
@@ -718,6 +718,14 @@ decision; the argument for it is in the audit under the ID given.
   × power nest, so a guarded check would be silent on exactly the case E14 exists
   for. Deliberate repeat measurements warn too — their map collapses the same way.
   (A8, E14)
+- **`_order_by_iter` is one module-level helper shared by both directory loaders,
+  and it warns rather than repairs.** Frame and point order come from the integer in
+  `_iter_N`, never from `sorted()` on filenames: exports are zero-padded but the
+  *width* varies between them, so alphabetical order is right only by luck. A missing
+  `_iter_N` suffix and a gap both warn, and a gap is never closed up, because
+  shifting the rest would silently restore the mispairing the helper exists to
+  catch. `stacklevel` is a required argument because the two callers sit at different
+  depths — see A11 before trusting any warning's line number. (A7)
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
@@ -742,7 +750,17 @@ decision; the argument for it is in the audit under the ID given.
   tests whether the first line parses as floats — and a `SingleSpectrum`'s first row
   is its wavelength axis. A directory of single spectra therefore loads as 2×N
   "images". `_read_block_layout` already draws this distinction correctly (two rows →
-  `SingleSpectrum`, more → image sequence); copy that rule. Same pass as A7.
+  `SingleSpectrum`, more → image sequence); copy that rule. Now the whole of the
+  `AttoCubePLScanRealSpace` pass, since A7 landed without it; take **B1**
+  (`bg_region`/`bg_stat` ignored in `load_frame`) with it, and second.
+- **Every `stacklevel` in `loaders.py` is unverified** (A11) — 15 `warnings.warn`
+  calls, values 2 through 5, no test pinning where any of them points. The TRPL chain
+  is confirmed wrong: it needs 6 and passes 4, so those warnings blame
+  `loaders.py:1176` instead of the researcher's line. That also **suppresses
+  repeats**, because Python's default filter shows a warning once per location, so
+  many scans warning from one library line print one message. Its own pass, not a
+  character changed while passing through — A7 deliberately left TRPL's 4 alone so
+  its existing tests stay honest.
 
 **Decided but not yet implemented:**
 - `plot_pl_map_Vab_scan`'s `median_kernel` should default to `1` (off). The current

@@ -68,6 +68,14 @@ class DiffusionResult:
         one per closed region.  Typically a single contour enclosing the cloud.
     mask : np.ndarray of bool, shape (H, W)
         Binary mask: ``True`` where the image exceeds the threshold.
+    image : np.ndarray, shape (H, W)
+        The full-frame image actually analysed: background-subtracted when
+        *bg_region* was supplied, but before the ROI mask and smoothing
+        applied internally for thresholding. This is what a caller should
+        display alongside :attr:`mask` / :attr:`contours` — re-deriving the
+        image from whatever was originally passed to
+        :func:`analyse_diffusion_cloud` risks re-applying a background
+        subtraction that already happened here.
     threshold : float
         Threshold value that was actually applied (after Otsu / manual
         fraction conversion).
@@ -86,6 +94,7 @@ class DiffusionResult:
     area_real  : float | None
     contours   : list
     mask       : np.ndarray
+    image      : np.ndarray
     threshold  : float
     pixel_scale: float | None = None
     origin     : str          = "corner"
@@ -345,6 +354,7 @@ def analyse_diffusion_cloud(
         area_real  = area_real,
         contours   = contours,
         mask       = mask,
+        image      = img,
         threshold  = threshold,
         pixel_scale= pixel_scale,
         origin     = origin,

@@ -43,6 +43,33 @@ def normalise_peak(spectra: np.ndarray, axis: int = 0) -> np.ndarray:
     return spectra / peak
 
 
+def normalise_minmax(spectra: np.ndarray, axis: int = 0) -> np.ndarray:
+    """
+    Normalise each spectrum to its own [0, 1] range.
+
+    Unlike :func:`normalise_peak`, this also shifts the floor to zero —
+    the right choice when a flat offset (e.g. a dark-count pedestal within
+    the plotted or fitted window) should not carry through as a nonzero
+    baseline after normalisation.
+
+    Parameters
+    ----------
+    spectra : np.ndarray, shape (n_pixels, n_sweeps) or (n_pixels,)
+    axis : int
+        Axis along which the spectra run. Default 0 (pixels along rows).
+
+    Returns
+    -------
+    np.ndarray
+        Normalised spectra. Sweeps with zero range (max == min) are left as-is.
+    """
+    spectra = np.asarray(spectra, float)
+    lo = spectra.min(axis=axis, keepdims=True)
+    span = spectra.max(axis=axis, keepdims=True) - lo
+    span[span == 0] = 1.0
+    return (spectra - lo) / span
+
+
 def normalise_area(
     spectra : np.ndarray,
     x       : np.ndarray = None,

@@ -265,3 +265,44 @@ def test_prefix_filters_the_directory(tmp_path):
     s = AttoCubeTRPLSweep(tmp_path, prefix="TRPL_")
     assert s.n_sweeps == 1
     assert np.allclose(s.v_top, [1.0])
+
+
+# ---------------------------------------------------------------------------
+# IRF references are excluded from a directory sweep by name, not content
+# ---------------------------------------------------------------------------
+# An IRF file has the identical [Par, Wavelength, Exp] shape as a real decay,
+# so nothing in its content distinguishes it -- without this, a directory
+# scan with no prefix folds it in as a spurious extra sweep point.
+
+
+def test_irf_named_file_excluded_even_without_a_prefix(tmp_path):
+    _synth_decay(tmp_path / "TRPL_iter_0.csv", params={"V_A": 1.0})
+    _synth_decay(tmp_path / "TRPL_iter_1.csv", params={"V_A": 2.0})
+    _synth_decay(tmp_path / "IRF_iter_2.csv", params={"V_A": 999.0})
+
+    s = AttoCubeTRPLSweep(tmp_path)
+
+    assert s.n_sweeps == 2
+    assert np.allclose(s.v_top, [1.0, 2.0])
+    assert s.irf_files == ["IRF_iter_2.csv"]
+
+
+def test_irf_match_is_case_insensitive_and_by_stem_not_just_prefix(tmp_path):
+    _synth_decay(tmp_path / "TRPL_iter_0.csv", params={"V_A": 1.0})
+    _synth_decay(tmp_path / "reference_irf_iter_1.csv", params={"V_A": 999.0})
+
+    s = AttoCubeTRPLSweep(tmp_path)
+
+    assert s.n_sweeps == 1
+    assert s.irf_files == ["reference_irf_iter_1.csv"]
+
+
+def test_single_file_load_has_no_irf_files(tmp_path):
+    d = AttoCubeTRPLSweep(ONE_DECAY)
+    assert d.irf_files == []
+
+
+def test_all_candidates_irf_raises_with_a_clear_message(tmp_path):
+    _synth_decay(tmp_path / "IRF_iter_0.csv", params={"V_A": 1.0})
+    with pytest.raises(ValueError, match="IRF reference"):
+        AttoCubeTRPLSweep(tmp_path)

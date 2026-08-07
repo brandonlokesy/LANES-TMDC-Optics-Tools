@@ -17,7 +17,7 @@ import matplotlib.patches as patches
 import matplotlib.patheffects as path_effects
 from skimage.exposure import rescale_intensity
 
-from . import processing
+from . import fitting, processing
 from . import diffusion as _diffusion
 
 # Optional: cmcrameri diverging colormaps (pip install cmcrameri)
@@ -225,7 +225,7 @@ def plot_spectrum(
     ax : matplotlib.axes.Axes, optional
     x_axis : {"energy", "wavelength"}
     normalize : bool
-        Normalise spectrum to its peak value.
+        Normalise spectrum to its own [0, 1] range.
     label : str, optional
         Legend label. Defaults to the gate voltage / field value.
     **line_kwargs
@@ -246,7 +246,7 @@ def plot_spectrum(
     else:
         y = scan.spectra[:, sweep_index].astype(float)
     if normalize:
-        y = y / y.max()
+        y = processing.normalise_minmax(y)
 
     if label is None:
         label = (
@@ -287,7 +287,7 @@ def plot_single_spectrum(
     x_axis : {"wavelength", "energy"}
         Axis to plot against. Default ``"wavelength"`` (the native axis).
     normalize : bool
-        Normalise the spectrum to its peak value.
+        Normalise the spectrum to its own [0, 1] range.
     label : str, optional
         Legend label. A legend is shown only when a label is given.
     **line_kwargs
@@ -306,7 +306,7 @@ def plot_single_spectrum(
     y = (spectrum.best_energy_spectra if x_axis == "energy"
          else spectrum.best_spectra).astype(float)
     if normalize:
-        y = y / y.max()
+        y = processing.normalise_minmax(y)
 
     line, = ax.plot(x, y, label=label, **line_kwargs)
     ax.set_xlabel(xlabel)
@@ -487,6 +487,8 @@ def plot_image(
     xlabel         : str   = "x (px)",
     ylabel         : str   = "y (px)",
     show_axes      : bool  = True,
+    extent         : tuple = None,
+    origin         : str   = "upper",
 ) -> tuple:
     """
     Plot a single 2-D image with a colormap and an optional colorbar.
@@ -497,6 +499,11 @@ def plot_image(
         A 2-D array, or any object exposing a 2-D ``img`` attribute
         (e.g. :class:`~tmdc_optics_tools.loaders.SingleImage`,
         :class:`~tmdc_optics_tools.loaders.AttoCubeSampleImage`).
+        ``NaN`` entries are masked (drawn as nothing) rather than colored at
+        the scale's low end, so "not computed here" stays visually distinct
+        from "computed and found to be small" — e.g. a
+        :class:`~tmdc_optics_tools.loaders.RamanMap` mode fit only over part
+        of the grid.
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
     cmap : str
@@ -513,12 +520,22 @@ def plot_image(
         Axis labels (ignored when *show_axes* is ``False``).
     show_axes : bool
         Show axis ticks/labels. Set ``False`` to hide them entirely.
+    extent : tuple of (left, right, bottom, top), optional
+        Physical-coordinate extent for the array's edges, e.g.
+        ``(x.min(), x.max(), y.min(), y.max())`` for a real-space map in µm
+        — the array itself carries no unit, only pixel indices, so this is
+        the caller's to supply. ``None`` (default) leaves the axes in
+        pixel-index units, unchanged from before this parameter existed.
+    origin : {"upper", "lower"}
+        Row 0's position: "upper" (default, unchanged prior behaviour) for
+        a camera/CCD frame read top row first; "lower" for a physical map
+        whose Y should increase upward, matching a normal Cartesian axis.
 
     Returns
     -------
     fig, ax, im
     """
-    img = image.img if hasattr(image, "img") else np.asarray(image)
+    img = image.img if hasattr(image, "img") else np.asarray(image, dtype=float)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -528,8 +545,10 @@ def plot_image(
     if rescale_img:
         img = rescale_intensity(img, in_range="image", out_range=(0, 1))
 
+    img = np.ma.masked_invalid(img)
     vmin, vmax = clim if clim is not None else (None, None)
-    im = ax.imshow(img, cmap=get_cmap(cmap), vmin=vmin, vmax=vmax)
+    im = ax.imshow(img, cmap=get_cmap(cmap), vmin=vmin, vmax=vmax,
+                    extent=extent, origin=origin)
 
     if show_axes:
         ax.set_xlabel(xlabel)
@@ -542,6 +561,161 @@ def plot_image(
         cb.set_label("Intensity (norm.)" if rescale_img else colorbar_label)
 
     return fig, ax, im
+
+
+_VOIGT_PARAM_KEYS = ["center", "amp", "fwhm_g", "fwhm_l"]
+
+
+def plot_multi_voigt_overlay(fit_results: dict, fit_windows: dict,
+                              mode_names: list = None, ncols: int = 3,
+                              xlabel: str = None, ylabel: str = None, x_unit: str = ""):
+    """
+    Data-vs-fit overlay for several :func:`fitting.fit_multi_voigt` results.
+
+    Draws the fitted sum curve plus each individual Voigt component,
+    reconstructed via :func:`fitting.voigt_approx` from that component's
+    own ``amp``/``center``/``fwhm_g``/``fwhm_l``, so what is drawn is
+    exactly what the fit says rather than a re-derived approximation of
+    it. One panel per entry in *fit_results*, arranged in a grid — not a
+    single row — once there are more than *ncols* of them.
+
+    Parameters
+    ----------
+    fit_results : dict of {name: FitResult}
+        Results from :func:`fitting.fit_multi_voigt` or a wrapper built on
+        it (e.g. :func:`fitting.fit_raman_modes`).
+    fit_windows : dict of {name: (x, y)}
+        The exact windowed data each fit was run on, for the "data"
+        scatter — not re-derived from ``result.residuals + result.y_fit``,
+        since a caller with the original array on hand should not be made
+        to reconstruct it.
+    mode_names : list of str, optional
+        Label for each peak index in the legend, e.g. ``["E2g/A1g",
+        "2LA(M)", "B2g"]``. A result with more peaks than *mode_names* has
+        falls back to ``"peak i"`` for the extra ones rather than raising.
+    ncols : int
+        Panels per row.
+    xlabel, ylabel : str, optional
+        Axis labels, set on every panel. Left blank by default: this
+        function has no way to know what domain the fit's x-axis is in
+        (Raman shift, energy, wavelength, ...) or what the y-axis units
+        are.
+    x_unit : str, optional
+        Appended after each peak's fitted center in the legend, e.g.
+        ``" cm$^{-1}$"`` — again left blank rather than assumed.
+
+    Returns
+    -------
+    fig, axes
+        The full grid, including any unused trailing slots (hidden, not
+        removed, so the grid shape stays rectangular) — index by
+        ``axes[row, col]`` to restyle a panel.
+    """
+    mode_names = mode_names or []
+    names = list(fit_results.keys())
+    ncols = min(ncols, len(names))
+    nrows = -(-len(names) // ncols)  # ceil division -- a partial last row is fine
+    fig, axes = plt.subplots(nrows, ncols, squeeze=False,
+                              figsize=(5.0 * ncols, 4.0 * nrows))
+    axes_flat = axes.flatten()
+
+    for ax, name in zip(axes_flat, names):
+        result = fit_results[name]
+        x, y = fit_windows[name]
+        offset = result.params.get("offset", 0.0)
+
+        ax.plot(x, y, ".", ms=4, alpha=0.4, color="0.4", label="data")
+        ax.plot(x, result.y_fit, "-", color="C0", label="fit (sum)")
+
+        n_peaks = sum(1 for k in result.params if k.startswith("center_"))
+        for i in range(n_peaks):
+            amp, cen, fg, fl = (result.params[f"amp_{i}"], result.params[f"center_{i}"],
+                                 result.params[f"fwhm_g_{i}"], result.params[f"fwhm_l_{i}"])
+            peak_curve = fitting.voigt_approx(x, amp, cen, fg, fl) + offset
+            mode = mode_names[i] if i < len(mode_names) else f"peak {i}"
+            ax.plot(x, peak_curve, "--", lw=1.3, label=f"{mode} ({cen:.1f}{x_unit})")
+
+        ax.set_title(name, fontsize=11)
+        if xlabel:
+            ax.set_xlabel(xlabel)
+        if ylabel:
+            ax.set_ylabel(ylabel)
+        ax.legend(fontsize=7)
+
+    for ax in axes_flat[len(names):]:
+        ax.set_visible(False)  # unused grid slots when len(names) isn't a multiple of ncols
+
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_fit_param_comparison(fit_results: dict, mode_names: list, param_labels: dict = None):
+    """
+    Compare :func:`fitting.fit_multi_voigt` parameters across several fits.
+
+    One grid figure — rows are peak indices (from *mode_names*), columns
+    are the four Voigt parameter types — rather than one figure per
+    (peak, parameter) combination, so the whole comparison fits on screen
+    at once. Not every result needs every peak: a sample missing a given
+    mode's params (e.g. no B₂g on a monolayer fit) simply leaves a gap at
+    that sample's x-position in that panel, rather than raising or
+    silently shifting the other samples over.
+
+    Parameters
+    ----------
+    fit_results : dict of {name: FitResult}
+        Results from :func:`fitting.fit_multi_voigt` or a wrapper built on
+        it.
+    mode_names : list of str
+        One label per peak index, e.g. ``["E2g/A1g", "2LA(M)", "B2g"]`` —
+        also sets how many peak rows are considered; a row is only drawn
+        if at least one result actually has that peak.
+    param_labels : dict of {"center"|"amp"|"fwhm_g"|"fwhm_l": str}, optional
+        Axis label for each parameter type — pass this to add units, e.g.
+        ``{"center": "Center (cm$^{-1}$)"}`` for a Raman shift, ``"Center
+        (eV)"`` for a PL peak. Falls back to the bare, unitless key name
+        when not given: this function has no way to know what domain the
+        fit's x-axis is in.
+
+    Returns
+    -------
+    fig, axes
+        The grid (rows = active peaks, columns = the 4 Voigt parameters)
+        — index by ``axes[row, col]`` to restyle a panel.
+    """
+    param_labels = param_labels or {}
+    sample_names = list(fit_results.keys())
+    sample_colors = {name: f"C{i}" for i, name in enumerate(sample_names)}
+    x = np.arange(len(sample_names))
+
+    active_peaks = [
+        peak_i for peak_i in range(len(mode_names))
+        if any(f"center_{peak_i}" in fit_results[name].params for name in sample_names)
+    ]
+    n_rows, n_cols = len(active_peaks), len(_VOIGT_PARAM_KEYS)
+    fig, axes = plt.subplots(n_rows, n_cols, squeeze=False,
+                              figsize=(3.2 * n_cols, 2.6 * n_rows))
+
+    for row, peak_i in enumerate(active_peaks):
+        for col, param in enumerate(_VOIGT_PARAM_KEYS):
+            ax = axes[row, col]
+            key = f"{param}_{peak_i}"
+            for j, name in enumerate(sample_names):
+                result = fit_results[name]
+                if key not in result.params:
+                    continue
+                ax.errorbar(j, result.params[key], yerr=result.errors[key],
+                            fmt="o", ms=7, capsize=4, color=sample_colors[name])
+            ax.set_xticks(x)
+            ax.set_xticklabels(sample_names, rotation=25, ha="right", fontsize=8)
+            ax.grid(alpha=0.25)
+            if row == 0:
+                ax.set_title(param_labels.get(param, param), fontsize=10)
+            if col == 0:
+                ax.set_ylabel(mode_names[peak_i], fontsize=10)
+
+    fig.tight_layout()
+    return fig, axes
 
 
 def _format_frame_title(
@@ -762,6 +936,70 @@ def plot_stark_shift(
     ax.set_ylabel("Peak energy (eV)")
     ax.legend(frameon=False, fontsize=7)
     return fig, ax
+
+
+def plot_rise_time_vs_distance(
+    distances,
+    rise_times,
+    rise_time_errs = None,
+    labels         = None,
+    ax             = None,
+    figsize        : tuple = (5, 3.5),
+    dpi            : int   = None,
+    **errorbar_kwargs,
+) -> tuple:
+    """
+    Plot fitted rise time vs. distance from the excitation spot.
+
+    One point per measurement location, e.g. the ``tau_rise`` of a
+    :class:`~tmdc_optics_tools.fitting.SparseLifetimeResult` against that
+    spot's distance from the excitation laser.
+
+    Parameters
+    ----------
+    distances : array-like
+        Distance of each spot from the excitation laser (µm).
+    rise_times : array-like
+        Fitted rise time for each spot (ns).
+    rise_time_errs : array-like, optional
+        Per-spot rise time uncertainty, drawn as error bars.
+    labels : sequence of str, optional
+        Per-point legend label (e.g. spot name).
+    ax : matplotlib.axes.Axes, optional
+    **errorbar_kwargs
+        Forwarded to every ``ax.errorbar`` call, e.g. ``fmt``, ``capsize``,
+        ``color``.
+
+    Returns
+    -------
+    fig, ax, artists
+        *artists* is the list of ``ErrorbarContainer`` objects, one per
+        point, in *distances* order — restyle or re-label individual points
+        through these rather than re-plotting.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.get_figure()
+
+    distances  = np.asarray(distances, dtype=float)
+    rise_times = np.asarray(rise_times, dtype=float)
+    errs   = np.zeros_like(distances) if rise_time_errs is None else np.asarray(rise_time_errs, dtype=float)
+    labels = [None] * len(distances) if labels is None else list(labels)
+
+    errorbar_kwargs.setdefault("fmt", "o")
+    errorbar_kwargs.setdefault("capsize", 3)
+
+    artists = [
+        ax.errorbar(d, t, yerr=e, label=lbl, **errorbar_kwargs)
+        for d, t, e, lbl in zip(distances, rise_times, errs, labels)
+    ]
+
+    ax.set_xlabel("Distance from excitation spot (µm)")
+    ax.set_ylabel("Rise time (ns)")
+    if any(labels):
+        ax.legend(frameon=False, fontsize=8)
+    return fig, ax, artists
 
 
 # ---------------------------------------------------------------------------
@@ -1481,8 +1719,13 @@ def plot_diffusion_cloud(
 
     Parameters
     ----------
-    image : np.ndarray or object with ``.img``
-        Raw 2-D PL image.
+    image : np.ndarray, str, pathlib.Path, or _AttoCubeImage
+        2-D PL image, forwarded as-is to
+        :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_cloud` when
+        *result* is ``None`` (same accepted types — see that function).
+        Ignored when *result* is supplied: display then uses
+        :attr:`~tmdc_optics_tools.diffusion.DiffusionResult.image` from
+        *result* itself, so the two never disagree about what was analysed.
     result : DiffusionResult, optional
         Pre-computed result from :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_cloud`.
         When ``None`` the analysis is run here with the remaining kwargs.
@@ -1528,11 +1771,13 @@ def plot_diffusion_cloud(
     """
     from . import diffusion as _diffusion
 
-    img = image.img if hasattr(image, "img") else np.asarray(image, float)
-
     if result is None:
+        # Pass the image object/path/array straight through -- _load_image
+        # already knows to use an _AttoCubeImage's *raw* array so that the
+        # bg_region below is the only subtraction that happens. Handing it
+        # an already-corrected `.img` here would subtract twice.
         result = _diffusion.analyse_diffusion_cloud(
-            img,
+            image,
             threshold    = threshold,
             smooth_sigma = smooth_sigma,
             keep_largest = keep_largest,
@@ -1548,7 +1793,7 @@ def plot_diffusion_cloud(
     else:
         fig = ax.get_figure()
 
-    im = ax.imshow(img, cmap=get_cmap(cmap), origin="upper")
+    im = ax.imshow(result.image, cmap=get_cmap(cmap), origin="upper")
 
     for contour in result.contours:
         ax.plot(contour[:, 1], contour[:, 0], color=contour_color,

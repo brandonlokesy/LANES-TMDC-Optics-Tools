@@ -12,15 +12,19 @@ one.
 
 **Measurements the group makes:** photoluminescence, micro-PL, reflectance /
 differential reflectance, absorption, real-space PL imaging (exciton diffusion
-clouds), back-focal-plane measurements (k-space dispersion) as real images on CCDs.
+clouds), back-focal-plane measurements (k-space dispersion) as real images on CCDs,
+Raman spectroscopy.
 
-**Measurements this package currently supports (as of 2026-07-30):** PL,
-reflectance / reflectance contrast, time-resolved PL, and real-space imaging.
-Absorption, cavity, and BFP/k-space data are measured in the lab but have no
-loader. Don't propose speculative multi-modality abstractions unasked — but do
-flag where a PL assumption will resist a future loader (the hardcoded "PL
-intensity" strings in `plotting.py` are the live example; `scan.signal_label` and
-`scan.contrast_label` exist for them — see E12).
+**Measurements this package currently supports (as of 2026-08-06):** PL,
+reflectance / reflectance contrast, time-resolved PL, real-space imaging, and
+Raman — both single-spectrum (`RamanSpectrum`) and 2-D spatial maps
+(`RamanMap`), both LabRAM `.txt` exports with different row shapes — see
+`examples/example-Raman.ipynb`. Absorption, cavity, and BFP/k-space data are
+measured in the lab but have no loader. Don't propose speculative
+multi-modality abstractions unasked
+— but do flag where a PL assumption will resist a future loader (the hardcoded
+"PL intensity" strings in `plotting.py` are the live example; `scan.signal_label`
+and `scan.contrast_label` exist for them — see E12).
 
 ## The AttoCube export format
 
@@ -215,6 +219,53 @@ TODO — provenance not yet recorded, ask before documenting or changing:
   *channel-to-argument* mapping, not the physical wiring: the default remains
   `V_A`→top, `V_B`→bottom, which is a convention no file confirms. Ask per
   session; don't add a sign to the physics.
+
+**Raman — WSe₂ bilayer and monolayer example modes.** `examples/data/Raman/*.txt`
+(LabRAM export, loaded by `RamanSpectrum`) is WSe₂, bilayer or monolayer per the
+filename (`*bilayer*` / `*monolayer*`) and per session identification — the file
+headers carry no material or layer-count field, so neither is independently
+checkable from the data alone. Fitting the six example spectra
+(`unstrained_bilayer`, `strained_bilayer1`, `strained_bilayer2`,
+`unstrained_monolayer`, `strained_monolayer1`, `strained_monolayer2`) with
+`fitting.fit_raman_modes(..., material="WSe2", n_layers=2)` /
+`fit_raman_modes(..., n_layers=1)` (see `examples/example-Raman.ipynb`)
+consistently finds modes matching Pan et al. 2022 (*"Signature of lattice
+dynamics in twisted 2D homo/hetero-bilayers"*, 2D Materials 9, 045018,
+doi:10.1088/2053-1583/ac83d4). The mode identities, seed positions, and fit
+tolerances behind that call live in `constants.RAMAN_MODES["WSe2"]` (per
+layer count) rather than being hardcoded in the fitting function — the
+values there are what to change for a different material or layer count,
+not `fitting.py` itself; `constants.RAMAN_LAYER_DISCRIMINATOR["WSe2"]`
+holds the matching data for `fitting.classify_raman_layer`, used on the
+map below where the layer count is not known ahead of time:
+
+| Fitted here (bilayer) | Fitted here (monolayer) | Literature | Assignment |
+|---|---|---|---|
+| ≈250.5–250.6 cm⁻¹ | ≈250.1 cm⁻¹ | ≈250 cm⁻¹ | E₂g/A₁g, nearly degenerate |
+| ≈258.6–258.8 cm⁻¹ | ≈260.3–260.5 cm⁻¹ | ≈260 cm⁻¹ | 2LA(M), second-order double-resonance |
+| ≈309–309.3 cm⁻¹ | **absent** | ≈309 cm⁻¹ | B₂g |
+
+E₂g and A₁g being *nearly* degenerate is exactly why they don't split into two
+resolvable peaks here — treating ≈250 cm⁻¹ as a splittable doublet (an
+assumption tried and rejected during fitting, not sourced from this paper) was
+the wrong model going in. The weak shoulder is not "the other half of a
+doublet" either: 2LA(M) is second-order (double-resonance), a different
+scattering mechanism from the first-order E₂g/A₁g and B₂g modes, which is why
+it is ~10× weaker and why every attempt to seed it near ≈250–253 cm⁻¹ (as if
+it were doublet-adjacent) either pinned at a fit bound or failed to converge —
+only seeding near its actual position converges cleanly. That position was
+found from data first in both materials (the residual of a main-peak-only fit,
+via `fitting.locate_residual_peak`), and matches this paper's ≈260 cm⁻¹ 2LA(M)
+value after the fact — it is not assumed equal between bilayer and monolayer
+just because the mode has the same name in both (≈258.7 vs. ≈260.4 cm⁻¹, a real
+difference, not fit noise).
+
+B₂g is absent in every monolayer spectrum checked — flat baseline at ≈309 cm⁻¹,
+not a small/unresolved peak — consistent with B₂g requiring interlayer coupling
+that a single layer does not have.
+`constants.RAMAN_MODES["WSe2"][1]["modes"]` therefore genuinely lists only two
+modes; do not "fix" it to include B₂g and expect `fitting.fit_raman_modes` to
+drop it — see that function's docstring.
 
 ## Design principle — corrections are opt-in
 

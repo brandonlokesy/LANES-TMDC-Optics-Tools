@@ -14,6 +14,10 @@ AttoCubePLVabScan
     Deprecated pre-rename name for the above, fixed to PL gate sweeps.
 SingleSpectrum
     Single spectrum from a 2-row CSV.
+RamanSpectrum
+    Single Raman spectrum from a LabRAM-style ``.txt`` export.
+RamanMap
+    2-D spatial Raman map from a LabRAM-style ``.txt`` export.
 AttoCubePLScanRealSpace
     Loads a sequence of real-space PL image CSVs swept over gate voltage.
 _AttoCubeImage
@@ -834,6 +838,40 @@ class _AttoCubeSweep:
             sweep_label if sweep_label is not None else meta.get("sweep_label"),
             sweep_unit  if sweep_unit  is not None else meta.get("sweep_unit"),
         )
+        self._warn_if_sweep_axis_is_a_raster_row()
+
+    def _warn_if_sweep_axis_is_a_raster_row(self) -> None:
+        """
+        Warn when the declared sweep axis is non-monotonic and
+        :meth:`sweep_grid` shows this is actually a flattened 2-D raster.
+
+        ``sweep="Scanner X"`` on a raster succeeds and returns that row
+        unchanged — e.g. 0→80 µm repeated 51 times — because nothing
+        compares it against what :meth:`sweep_grid` already knows, and
+        ``__repr__`` only prints min/max so the result reads as innocent.
+        Not an error: taking one axis of a raster is a legitimate reason to
+        declare a 1-D sweep on it (e.g. to slice a single row), so this only
+        announces the shape rather than refusing the declaration.
+        """
+        if self.sweep_type == "index":
+            return
+        axis = self.sweep_axis
+        if axis.size < 2:
+            return
+        diffs = np.diff(axis)
+        if np.all(diffs >= 0) or np.all(diffs <= 0):
+            return
+        grid = self.sweep_grid()
+        if grid is not None:
+            warnings.warn(
+                f"sweep={self.sweep_type!r} gives a non-monotonic axis "
+                f"('{self._sweep_label}' does not increase or decrease across all "
+                f"{self.n_sweeps} points) because this is a flattened raster: {grid}. "
+                f"Any plot or fit against this axis will overplot every row. Call "
+                f"sweep_grid() to see the shape, or declare '{grid.outer_label}' "
+                f"instead if you meant the slow axis.",
+                UserWarning, stacklevel=4,
+            )
 
     def _validate_axis_and_signals(self, axis, signals: dict) -> None:
         """
@@ -2249,6 +2287,11 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         The per-point data files, in sweep order.  A single-file load gives one.
     metadata_file : Path or None
         The companion parameter table, when the directory contained one.
+    irf_files : list of str
+        Names of candidate files excluded from the sweep because "irf"
+        appears in their filename — never a data point or companion, load
+        one on its own via a separate ``AttoCubeTRPLSweep(irf_path)``. Empty
+        for a single-file load.
     declared_parameters : dict or None
         The companion's own parameter table, one value per declared sweep point.
         Provided for comparison against :attr:`parameters`; the two are
@@ -2323,6 +2366,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         self.files              = payload.get("files", [Path(self.path)])
         self.metadata_file      = payload.get("metadata_file")
         self.declared_parameters = payload.get("declared_parameters")
+        self.irf_files          = payload.get("irf_files", [])
         self._validate_axis_and_signals(self.time, {"Exp": self.decays})
 
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
@@ -2389,12 +2433,21 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         Assemble a sweep from a directory of per-point files.
 
         Files are classified by **header alone**, so the 11 MB metadata companion
-        is never parsed just to discover what it is.
+        is never parsed just to discover what it is. An instrument-response
+        reference is the one exception content cannot settle: an IRF file has
+        the identical ``[Par, Wavelength, Exp]`` shape as a real decay, so only
+        its **name** says it is not a sweep point. Any candidate with "irf" in
+        its filename (case-insensitive) is therefore excluded here regardless
+        of *prefix* — it is never a data point or a companion, only ever an
+        IRF, loaded on its own via a separate ``AttoCubeTRPLSweep(irf_path)``.
         """
         pattern    = f"{self._prefix or ''}*.csv"
         candidates = sorted(Path(path).glob(pattern))
-        data_files, companions, skipped = [], [], []
+        data_files, companions, skipped, irf_files = [], [], [], []
         for f in candidates:
+            if "irf" in f.stem.lower():
+                irf_files.append(f.name)
+                continue
             try:
                 layout = _read_block_layout(f)
             except ValueError:
@@ -2414,12 +2467,14 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
                 f"No TRPL data files found in '{path}' matching '{pattern}'. "
                 f"Looked at {len(candidates)} .csv file(s): "
                 f"{len(companions)} metadata companion(s), "
+                f"{len(irf_files)} IRF reference(s) (excluded by name), "
                 f"{len(skipped)} unrecognised ({', '.join(skipped[:5])}). "
                 f"A TRPL export has a [Par, Wavelength, Exp] block layout."
             )
 
         data_files = self._order_by_iter(data_files, path)
         payload    = self._assemble(data_files, path)
+        payload["irf_files"] = irf_files
 
         if companions:
             self._cross_check_companion(payload, companions, path)
@@ -2773,8 +2828,215 @@ class SingleSpectrum:
 
 
 # ---------------------------------------------------------------------------
+# RamanSpectrum
+# ---------------------------------------------------------------------------
+
+class RamanSpectrum:
+    """
+    Single Raman spectrum loaded from a LabRAM-style ``.txt`` export.
+
+    The file is a block of ``#``-prefixed metadata lines (acquisition
+    settings, instrument, stage position, ...) of no fixed length, followed
+    by two whitespace-separated data columns:
+
+    * **Column 0** : Raman shift, in cm⁻¹ (ascending).
+    * **Column 1** : counts (intensity).
+
+    The header is skipped by content — any line starting with ``#`` — not by
+    a fixed row count: it varies between files (e.g. extra ``#Peaks:Edit=``
+    lines appear only on acquisitions someone has annotated in the vendor
+    software), so counting rows would silently misalign the data on a file
+    with a differently-sized header.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the ``.txt`` file.
+
+    Attributes
+    ----------
+    shift : np.ndarray, shape (n_points,)
+        Raman shift axis in cm⁻¹, in whatever order the file stores it
+        (ascending in every file seen so far).
+    counts : np.ndarray, shape (n_points,)
+        Raw intensity. Never modified after loading.
+    path : str
+
+    Notes
+    -----
+    Header fields (acquisition time, laser, grating, stage X/Y/Z, ...) are
+    not parsed — nothing downstream uses them yet. Open the file directly if
+    you need one.
+
+    Reads a single spectrum only. A spatial Raman map (one file, many
+    (X, Y, spectrum) rows) is a different export shape and needs
+    :class:`RamanMap`; this class raises rather than misreading one as a
+    lone spectrum.
+    """
+
+    def __init__(self, path: str):
+        self.path = str(path)
+
+        arr = np.loadtxt(path, comments="#", encoding="latin-1")
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            raise ValueError(
+                f"Expected 2 columns (Raman shift, counts), got array of "
+                f"shape {arr.shape} from '{path}'. A wider array is likely a "
+                f"spatial-map export (X, Y, then one counts column per "
+                f"shift) -- use RamanMap for that shape."
+            )
+
+        self.shift  = arr[:, 0]
+        self.counts = arr[:, 1]
+
+    def __repr__(self) -> str:
+        return (
+            f"RamanSpectrum — {self.shift.size} points\n"
+            f"  File  : {self.path}\n"
+            f"  Shift : {self.shift.min():.1f} – {self.shift.max():.1f} cm⁻¹\n"
+        )
+
+
+# ---------------------------------------------------------------------------
+# RamanMap
+# ---------------------------------------------------------------------------
+
+class RamanMap:
+    """
+    2-D spatial Raman map loaded from a LabRAM-style ``.txt`` export.
+
+    Same ``#``-prefixed header block as :class:`RamanSpectrum`, but followed
+    by a different body:
+
+    * **Row 0** : two empty leading fields, then the Raman shift axis in
+      cm⁻¹ (ascending) — shared by every spectrum in the map.
+    * **Row 1, 2, ...** : one row per scan position,
+      ``[X, Y, counts_0, counts_1, ..., counts_{n-1}]``, X/Y in µm (per the
+      file's own ``#AxisUnit[2]``/``[3]`` fields).
+
+    ``Y`` is the fast (inner) axis and ``X`` the slow (outer) one in the
+    reference export (a full Y sweep at each X before X steps) — read off
+    the row order and each row's own (X, Y), not assumed from a fixed
+    convention, so a differently-ordered file with the same shape still
+    loads correctly.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the ``.txt`` file.
+
+    Attributes
+    ----------
+    shift : np.ndarray, shape (n_shift,)
+        Raman shift axis in cm⁻¹, ascending.
+    x : np.ndarray, shape (n_x,)
+        Scan X positions in µm, ascending.
+    y : np.ndarray, shape (n_y,)
+        Scan Y positions in µm, ascending.
+    counts : np.ndarray, shape (n_y, n_x, n_shift)
+        Raw intensity, reshaped onto the (Y, X) grid. Never modified after
+        loading.
+    path : str
+
+    Raises
+    ------
+    ValueError
+        If the number of spectra rows does not equal ``len(x) * len(y)``
+        exactly — an aborted or ragged scan, which this class does not try
+        to reshape partially.
+    """
+
+    def __init__(self, path: str):
+        self.path = str(path)
+
+        with open(path, encoding="latin-1") as fh:
+            lines = fh.readlines()
+        data_lines = [line for line in lines if not line.startswith("#") and line.strip()]
+        if len(data_lines) < 2:
+            raise ValueError(
+                f"'{path}' has no data rows after its header — expected a "
+                f"shift-axis row followed by at least one (X, Y, counts...) row."
+            )
+
+        shift_fields = data_lines[0].rstrip("\n").split("\t")
+        self.shift = np.array([float(v) for v in shift_fields[2:] if v.strip() != ""])
+        n_shift = self.shift.size
+
+        rows = [line.rstrip("\n").split("\t") for line in data_lines[1:]]
+        xy     = np.array([[float(r[0]), float(r[1])] for r in rows])
+        counts_flat = np.array([[float(v) for v in r[2:2 + n_shift]] for r in rows])
+
+        self.x = np.unique(xy[:, 0])
+        self.y = np.unique(xy[:, 1])
+        n_x, n_y = self.x.size, self.y.size
+        if n_x * n_y != len(rows):
+            raise ValueError(
+                f"'{path}' has {len(rows)} spectra row(s), but {n_x} unique X "
+                f"x {n_y} unique Y = {n_x * n_y} -- not a complete grid. An "
+                f"aborted or partly copied scan is not reshaped partially; "
+                f"read the file's own rows directly if you need them."
+            )
+
+        # Index each row by its own (X, Y) rather than assuming file order,
+        # so a differently-ordered file with the same shape still loads
+        # correctly.
+        ix = np.searchsorted(self.x, xy[:, 0])
+        iy = np.searchsorted(self.y, xy[:, 1])
+        self.counts = np.empty((n_y, n_x, n_shift))
+        self.counts[iy, ix, :] = counts_flat
+
+    @property
+    def n_x(self) -> int:
+        """Number of X positions."""
+        return self.x.size
+
+    @property
+    def n_y(self) -> int:
+        """Number of Y positions."""
+        return self.y.size
+
+    def spectrum_at(self, ix: int, iy: int) -> np.ndarray:
+        """Counts at grid position ``(ix, iy)``, shape ``(n_shift,)``."""
+        return self.counts[iy, ix, :]
+
+    def nearest_index(self, x: float, y: float) -> tuple:
+        """
+        Grid indices ``(ix, iy)`` of the scan position nearest ``(x, y)``, in µm.
+
+        For picking a point off a plotted map (whose axes are in µm) rather
+        than an exact grid coordinate — snaps to the nearest actual scan
+        position instead of raising when the two don't match exactly.
+
+        Returns
+        -------
+        ix, iy : int
+        """
+        ix = int(np.argmin(np.abs(self.x - x)))
+        iy = int(np.argmin(np.abs(self.y - y)))
+        return ix, iy
+
+    def __repr__(self) -> str:
+        return (
+            f"RamanMap — {self.n_x} x {self.n_y} = {self.n_x * self.n_y} points\n"
+            f"  File  : {self.path}\n"
+            f"  X     : {self.x.min():.2f} – {self.x.max():.2f} µm\n"
+            f"  Y     : {self.y.min():.2f} – {self.y.max():.2f} µm\n"
+            f"  Shift : {self.shift.min():.1f} – {self.shift.max():.1f} cm⁻¹\n"
+        )
+
+
+# ---------------------------------------------------------------------------
 # AttoCubePLScanRealSpace
 # ---------------------------------------------------------------------------
+
+# The trailing frame number in a real-space sequence's filenames, e.g.
+# "PLdualgatesweep_iter_12.csv" -> 12. Unlike AttoCubeTRPLSweep's _ITER_INDEX,
+# this does not require the literal "_iter_" text, since `prefix` is caller-
+# supplied and only the trailing digit run is guaranteed.
+_TRAILING_INT = re.compile(r"(\d+)$")
+
 
 class AttoCubePLScanRealSpace:
     """
@@ -2814,28 +3076,86 @@ class AttoCubePLScanRealSpace:
         self.bg_stat   = bg_stat
 
         candidates = sorted(Path(path).glob(f"{prefix}*.csv"))
-        files = [f for f in candidates if self._is_image_csv(f)]
+        files, skipped = [], []
+        for f in candidates:
+            (files if self._is_image_csv(f) else skipped).append(f)
         if not files:
             raise ValueError(
                 f"No real-space image CSV files found with prefix '{prefix}' in '{path}'. "
                 f"Found {len(candidates)} candidate(s) but none passed the numeric-grid check "
-                f"(spectral scan files with header rows are excluded automatically)."
+                f"(spectral scan files with a header row, and two-row SingleSpectrum files, "
+                f"are excluded automatically)."
             )
-        self.files = files
+        if skipped:
+            warnings.warn(
+                f"Skipped {len(skipped)} of {len(candidates)} candidate file(s) in '{path}' "
+                f"that are not real-space images (a header row, or exactly two rows — a "
+                f"SingleSpectrum's wavelength/counts shape): "
+                f"{', '.join(f.name for f in skipped)}.",
+                UserWarning, stacklevel=2,
+            )
+        self.files = self._order_by_index(files, path)
 
     @staticmethod
     def _is_image_csv(path: Path) -> bool:
         """
-        Return True if the first line of *path* is parseable as floats.
-        Spectral scan files begin with a text header and return False.
+        Return True if *path* is a bare numeric grid of at least three rows.
+
+        The first line must parse as floats — a text header (e.g. a
+        spectral scan file) fails this and returns False. Exactly two
+        numeric rows is a `SingleSpectrum` (row 0 the wavelength axis, row 1
+        counts), not an image, so that shape returns False too — the same
+        row-count distinction :func:`_read_block_layout` already draws for
+        headerless CSVs.
         """
         try:
             with open(path, "r") as fh:
                 first_line = fh.readline()
-            float(first_line.strip().split(",")[0])
-            return True
+                float(first_line.strip().split(",")[0])
+                n_more_rows = sum(1 for _, line in zip(range(2), fh) if line.strip())
         except (ValueError, OSError):
             return False
+        return n_more_rows >= 2
+
+    @staticmethod
+    def _order_by_index(files: list, path) -> list:
+        """
+        Sort files by the trailing integer in their filename.
+
+        Lexicographic order places frame 10 before frame 2 once a sequence
+        passes 9 frames, pairing every image with the wrong index —
+        animations play out of order and
+        ``analyse_diffusion_sequence(var_array=...)`` mislabels each frame's
+        variable. Mirrors :meth:`AttoCubeTRPLSweep._order_by_iter`: a gap in
+        the sequence is reported rather than closed silently, since a
+        missing frame means an aborted acquisition, and shifting the rest
+        would misalign whatever external variable the frames are paired with.
+        """
+        indexed = []
+        for f in files:
+            m = _TRAILING_INT.search(f.stem)
+            indexed.append((int(m.group(1)) if m else None, f))
+
+        if any(idx is None for idx, _ in indexed):
+            warnings.warn(
+                f"Some files in '{path}' carry no trailing index number "
+                f"({', '.join(f.name for idx, f in indexed if idx is None)}); "
+                f"falling back to filename order, which may not be acquisition order.",
+                UserWarning, stacklevel=3,
+            )
+            return [f for _, f in indexed]
+
+        indexed.sort(key=lambda item: item[0])
+        seen    = [idx for idx, _ in indexed]
+        missing = sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
+        if missing:
+            warnings.warn(
+                f"'{path}' is missing frame index(es) {missing} between {seen[0]} and "
+                f"{seen[-1]} — an aborted or partly copied sequence. The {len(seen)} "
+                f"file(s) present are loaded in order; frame i is not necessarily index i.",
+                UserWarning, stacklevel=3,
+            )
+        return [f for _, f in indexed]
 
     def load_frame(self, idx: int) -> np.ndarray:
         """Load and return a single frame as a 2-D NumPy array."""

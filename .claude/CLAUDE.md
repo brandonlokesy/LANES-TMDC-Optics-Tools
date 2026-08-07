@@ -122,7 +122,7 @@ failure, so there is no traceback, and it lands on whichever test reaches BLAS f
 i.e. a different one each run. Nothing is wrong with the environment when this
 happens.
 
-`pytest` **is installed** in `viz-sci-plot` (9.1.1; the whole suite runs — 334 tests
+`pytest` **is installed** in `viz-sci-plot` (9.1.1; the whole suite runs — 336 tests
 passing as of 2026-08-06) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
 the dependency exists only in this one environment. Tests are local-only by
 deliberate choice — do not add a test job to CI. CI
@@ -606,7 +606,8 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 **Fixed — don't re-report.** `remove_cosmic_rays` (A1), `DeviceGeometry.eps_hs` /
 `__repr__` and `optical_thickness` (A2), the `animate_real_space_PL_map` laser
 circle (A3), zero-filled blocks loaded as sweep points (A6), the silent sawtooth
-sweep axis on a raster (A8), the `_CURATED`
+sweep axis on a raster (A8), the zero-mean overflow in `varying_parameters` (A10),
+the `_CURATED`
 fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), nested
 sweeps (E14), and the
 2026-07-30 rewrite — `AttoCubeSpectralSweep`, `hdf5.py`, `AttoCubeTRPLSweep`
@@ -672,7 +673,11 @@ decision; the argument for it is in the audit under the ID given.
   to sweep the field, each gate row takes a different value at every point, so no
   row can be the axis while `electric_field` takes exactly `n_fast`.
   `sweep_grid()` still detects on raw rows only and so reports the channels — it
-  says what to declare, as `gate_mode` does for `gates=`. (E14, A10)
+  says what to declare, as `gate_mode` does for `gates=`. It also returns the
+  *first* pair that verifies, and on a raster taken during an anti-symmetric gate
+  sweep two pairs verify equally well, so it may name the gates rather than the
+  scanners. Not a defect to chase: nothing in the rows says which pair the
+  experiment was about. (E14, A10)
 - **`spectra` keeps shape `(n_points, n_sweeps)` whether or not a nest is
   declared**; the grid is a view from `as_grid(array)`. A declaration must not
   change the rank of an attribute — `n_sweeps` is `spectra.shape[1]`, and every
@@ -715,16 +720,6 @@ decision; the argument for it is in the audit under the ID given.
   E12 is owed. The hardcoded-"PL intensity" half is **done** (2026-08-06); see
   *parameters earn their place* for the label contract that replaced it, and
   `dev/plan-E12.md` Step 3 for what remains.
-- **`varying_parameters` overflows on a zero-mean row** (A10) — which is what an
-  anti-symmetric gate sweep is, so this is the routine case. `scale =
-  max(abs(mean), tiny)` divides by ~2.2e-308 rather than by zero, so the rank comes
-  back `inf` (with a numpy `RuntimeWarning`) for an exactly-zero mean and ~1e16 for
-  float dust. The ordering then cannot separate the two gates or rank anything
-  against them, and `sweep_grid()` inherits it — it returns the first verifying
-  pair in that order, so it names a gate row where the scanner pair nests equally
-  well. Not fatal now that a nest is declared rather than detected; scale by
-  something that cannot vanish, and keep the `rtol * scale` threshold on the line
-  above using the same scale.
 - **`_is_image_csv` accepts a two-row spectrum as an image** (A9), because it only
   tests whether the first line parses as floats — and a `SingleSpectrum`'s first row
   is its wavelength axis. A directory of single spectra therefore loads as 2×N

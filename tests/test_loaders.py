@@ -405,6 +405,54 @@ def test_varying_parameters_excludes_static_rows(scan):
     assert varying["V_A"] == (0.0, 1.0, 1.0)   # (min, max, span)
 
 
+def test_varying_parameters_ranks_a_row_straddling_zero(tmp_path):
+    """
+    An anti-symmetric gate pair has a mean of zero and a magnitude that is not.
+
+    Scaling the span by the mean divided by ~2.2e-308 and returned ``inf``, so the
+    two gates tied with each other and outranked every row that really did move
+    most.  Scaling by RMS keeps the rank finite and ordered.
+    """
+    n = 12
+    v = np.tile(np.linspace(-3.0, 3.0, 4), 3)
+    assert float(np.mean(v)) == 0.0            # the case, exactly
+
+    params = {
+        "V_A":              v,
+        "V_B":              -v,
+        "Excitation Power": np.full(n, 2e-6),
+        "Scanner X":        np.tile(np.arange(4.0) * 2, 3),
+        "Scanner Y":        np.repeat(np.arange(3.0) * 5, 4),
+    }
+    path = tmp_path / "antisymmetric.csv"
+    make_spectral_csv(path, params=params)
+    s = AttoCubeSpectralSweep(str(path), spectra_type="PL")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")         # a numpy overflow would raise here
+        varying = s.varying_parameters()
+
+    assert set(varying) == {"V_A", "V_B", "Scanner X", "Scanner Y"}
+    assert varying["V_A"] == (-3.0, 3.0, 6.0)
+    # Finite and ordered, rather than two rows tied at inf ahead of everything.
+    assert list(varying).index("Scanner X") > list(varying).index("V_A")
+
+
+def test_varying_parameters_still_separates_jitter_from_a_sweep(tmp_path):
+    """The distinction the scale exists to make, unchanged by using RMS."""
+    params = {
+        "V_A":              np.array([10.000, 10.001, 10.000]),   # wobble on 10 V
+        "V_B":              np.array([0.002, 0.003, 0.002]),      # same, on 2 mV
+        "Excitation Power": np.full(3, 2e-6),
+    }
+    path = tmp_path / "jitter.csv"
+    make_spectral_csv(path, params=params)
+    varying = AttoCubeSpectralSweep(str(path), spectra_type="PL").varying_parameters()
+
+    assert "V_A" not in varying                # 1e-4 of its magnitude: noise
+    assert "V_B" in varying                    # 0.4 of its magnitude: a sweep
+
+
 def test_gate_mode_detects_antisymmetric_sweep(scan):
     # V_A goes 0 -> +1 while V_B goes 0 -> -1: a field-like sweep.
     assert scan.gate_mode == "dual-gate, anti-correlated (field-like)"

@@ -178,9 +178,11 @@ scan.parameter_labels           # the list of available names
 `"Scanner X"`, `"Excitation Power"`. It is the instrument's word, not ours.
 
 `varying_parameters()` reports which rows actually moved, ranked by span relative to
-their own magnitude. It is **evidence, not a detector** — it does not tell you what
-was swept, and its top entry is often a near-zero-mean leakage current. Which axis
-was swept is the caller's to declare.
+their own **RMS** magnitude — RMS rather than mean, so a row straddling zero is
+measured by how large it is rather than by how nearly it cancels (A10). It is
+**evidence, not a detector**: a small channel swinging across its whole range
+outranks a large one stepped through part of its, so the top entry is often a
+leakage current. Which axis was swept is the caller's to declare.
 
 ### Curated parameter / curated attribute / the curated registry
 
@@ -777,8 +779,10 @@ Two things, and the split between them is the same one `gate_mode` has with `gat
 n_sweeps` exactly) and reports it as a `SweepGrid` named tuple. It searches the **raw
 parameter rows**, so a nest whose axis is a *derived* quantity is reported through the
 channels that carry it — and its candidate ordering comes from `varying_parameters()`,
-which A10 makes meaningless for a zero-mean row. It is a diagnostic that says what to
-declare, and nothing keys off it.
+so where two pairs verify equally well it returns whichever `varying_parameters()`
+ranked first — on a raster taken during an anti-symmetric gate sweep, that may be
+the gates rather than the scanners. It is a diagnostic that says what to declare,
+and nothing keys off it.
 
 The nest itself is declared at load with `fast_sweep=` / `slow_sweep=`, inner axis
 first *by name* rather than by tuple position:

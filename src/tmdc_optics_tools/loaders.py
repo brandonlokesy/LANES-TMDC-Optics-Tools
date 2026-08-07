@@ -2353,9 +2353,11 @@ class _AttoCubeSweep:
         Report which parameter rows actually changed across the sweep.
 
         Evidence for choosing a *sweep*, and the check for "was only one gate
-        driven?".  A row counts as varying when its span exceeds *rtol* times
-        its own mean magnitude, so instrument read-back jitter on a nominally
-        static channel does not register.
+        driven?".  A row counts as varying when its span exceeds *rtol* times its
+        own RMS magnitude, so instrument read-back jitter on a nominally static
+        channel does not register.  RMS rather than mean, so that a row straddling
+        zero — an anti-symmetric gate pair, say — is measured by how large it is
+        rather than by how nearly it cancels.
 
         Parameters
         ----------
@@ -2365,18 +2367,18 @@ class _AttoCubeSweep:
         Returns
         -------
         dict
-            ``label -> (min, max, span)``, ordered by *relative* span,
+            ``label -> (min, max, span)``, ordered by span relative to RMS,
             largest first.
 
         Notes
         -----
         The ordering ranks how much a channel moved relative to its own
         magnitude; it does **not** identify the swept quantity, and should not be
-        read as doing so. A near-zero-mean channel outranks the real sweep axis
-        for exactly that reason — on the example reflectance raster the leakage
-        currents ``I_A``/``I_B`` (means ~1e-13 A) come above ``Scanner X``/``Y``.
-        This returns the evidence; which axis was swept is the caller's to
-        declare via ``sweep=``.
+        read as doing so.  A small channel that swings across its whole range —
+        a leakage current, or a gate driven symmetrically about zero — outranks a
+        large one stepped through part of its range, however clearly the second
+        is the axis of the experiment.  This returns the evidence; which axis was
+        swept is the caller's to declare via ``sweep=``.
 
         Examples
         --------
@@ -2391,8 +2393,17 @@ class _AttoCubeSweep:
             span  = float(np.ptp(finite))
             # Relative to the row's own magnitude: a 1 mV wobble on a 10 V gate
             # is noise, the same wobble on a 2 mV channel is a sweep.
-            # np.finfo(float).tiny is the smallest positive normal float, ~2.2e-308, so that a zero-mean channel does not divide by zero.
-            scale = max(abs(float(np.mean(finite))), np.finfo(float).tiny)
+            #
+            # RMS rather than |mean|, because a row can sit astride zero — an
+            # anti-symmetric gate pair sweeping the field does, and is routine —
+            # and its mean is then no measure of how large it is.  Flooring a
+            # vanishing mean at finfo.tiny turned the division by zero into a
+            # division by 2.2e-308, i.e. into inf.  RMS cannot vanish unless the
+            # row is identically zero, which a zero span already excludes; the
+            # floor below is belt and braces.  The threshold uses the same scale
+            # as the ranking, so the two cannot disagree about what is noise.
+            scale = max(float(np.sqrt(np.mean(finite ** 2))),
+                        np.finfo(float).tiny)
             # Checks if span of the data is bigger than the defined jitter threshold
             if span > rtol * scale:
                 found.append((span / scale, label,

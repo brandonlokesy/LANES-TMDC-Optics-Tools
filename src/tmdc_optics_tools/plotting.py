@@ -2,12 +2,15 @@
 """
 Plotting helpers for TMD spectroscopy.
 
-Provides a consistent Matplotlib style and convenience functions for
-the most common plot types encountered in gate-dependent PL experiments.
+Provides a consistent Matplotlib style and convenience functions for the most
+common plot types encountered when spectra are swept over a parameter — gate
+voltage, displacement field, excitation power, or piezo position — together with
+real-space image and diffusion-cloud plots.
 """
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +22,12 @@ from skimage.exposure import rescale_intensity
 
 from . import fitting, processing
 from . import diffusion as _diffusion
+# The spectra-source registry names attributes on the loader classes, so it lives
+# with them; imported here under its own name because this is where callers of
+# ``spectra_source=`` are.
+from .loaders import (
+    _SPECTRA_SOURCES, _SPECTRA_SOURCE_LABELS, _resolve_spectra,
+)
 
 # Optional: cmcrameri diverging colormaps (pip install cmcrameri)
 try:
@@ -111,11 +120,45 @@ def _resolve_x_axis(scan, x_axis: str) -> tuple:
         )
 
 
+def _signal_name_unit(obj, source: str = None) -> tuple:
+    """
+    Return ``(quantity_name, unit)`` for the signal an object measures.
+
+    *source* is a :data:`_SPECTRA_SOURCES` key.  A contrast source is a
+    different physical quantity from the raw signal, and a dimensionless one,
+    so it takes the contrast label and an empty unit.
+
+    Objects that declare no measurement type fall back to a neutral
+    "Intensity" / "counts" — a :class:`~tmdc_optics_tools.loaders.SingleSpectrum`
+    is a 2-row CSV as likely to be a bare-substrate reflectance reference as PL.
+    """
+    if source is not None and source.startswith("contrast"):
+        return getattr(obj, "contrast_label", r"$\Delta R/R_0$"), ""
+    return (getattr(obj, "signal_name", "Intensity"),
+            getattr(obj, "signal_unit", "counts"))
+
+
+def _signal_label(obj, normalized: bool = False, source: str = None) -> str:
+    """
+    Compose the y-axis or colour-bar label for a measured signal.
+
+    Only the calling plot function knows whether it rescaled the values, and a
+    rescaled array has no unit left — hence *normalized*, which substitutes
+    "norm." for whatever the native unit was.  A dimensionless quantity has no
+    unit to substitute and is left alone: a ratio such as ΔR/R₀ already reads as
+    normalised, so marking it again says the same thing twice.
+    """
+    name, unit = _signal_name_unit(obj, source)
+    if normalized and unit:
+        unit = "norm."
+    return f"{name} ({unit})" if unit else name
+
+
 # ---------------------------------------------------------------------------
 # 2-D map plots
 # ---------------------------------------------------------------------------
 
-def plot_pl_map_Vab_scan(
+def plot_spectral_map(
     scan,
     ax             = None,
     figsize        : tuple = (6, 4),
@@ -125,12 +168,19 @@ def plot_pl_map_Vab_scan(
     median_kernel  : int   = 3,
     clim           : tuple = None,
     colorbar       : bool  = True,
-    colorbar_label : str   = "PL intensity (norm.)",
-    rescale_img    : bool  = True,
+    colorbar_label : str   = None,
+    rescale_img    : bool  = False,
 ) -> tuple:
     """
-    Plot a gate-dependent PL map from an
-    :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep`.
+    Plot every spectrum of a sweep as a 2-D map: spectral axis against sweep axis.
+
+    Works for any sweep an
+    :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` can hold — gate
+    voltage, displacement field, excitation power, piezo position, or the bare
+    sweep index.  The y-axis and its label come from
+    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.sweep_axis` and
+    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.sweep_axis_label`,
+    so whatever was declared as ``sweep=`` at load time is what is plotted.
 
     Background subtraction and Jacobian correction are configured at
     load time on the scan object (via ``bg_region_nm``, ``bg_region_eV``,
@@ -152,9 +202,13 @@ def plot_pl_map_Vab_scan(
     clim : tuple of (vmin, vmax), optional
         Colour axis limits. Auto-scaled if ``None``.
     colorbar : bool
-    colorbar_label : str
+    colorbar_label : str, optional
+        Colour-bar label.  Derived from the scan's measurement type when
+        ``None`` — a reflectance sweep is labelled as reflectance, and a
+        dimensionless ratio gets no unit.  A string is used **verbatim**, so
+        include the unit.
     rescale_img : bool
-        Rescale intensity to [0, 1] before plotting.
+        Default is `False`. If `True`, rescales intensity to [0, 1] before plotting.
 
     Returns
     -------
@@ -166,7 +220,7 @@ def plot_pl_map_Vab_scan(
         fig = ax.get_figure()
 
     x, xlabel = _resolve_x_axis(scan, x_axis)
-    y, ylabel  = scan.gate_axis, scan.gate_axis_label
+    y, ylabel  = scan.sweep_axis, scan.sweep_axis_label
 
     x_m = np.tile(x[:, np.newaxis], (1, scan.n_sweeps))
     y_m = np.tile(y[np.newaxis, :], (scan.n_pixels, 1))
@@ -193,10 +247,32 @@ def plot_pl_map_Vab_scan(
 
     if colorbar:
         cb = fig.colorbar(mesh, ax=ax, pad=0.02)
-        # cb.set_label(colorbar_label)
-        cb.set_label("PL intensity (norm.)" if rescale_img else "PL intensity (counts)")
+        cb.set_label(colorbar_label if colorbar_label is not None
+                     else _signal_label(scan, normalized=rescale_img))
 
     return fig, ax, mesh
+
+
+def plot_pl_map_Vab_scan(*args, **kwargs) -> tuple:
+    """
+    Deprecated alias for :func:`plot_spectral_map`.
+
+    Accepts and returns exactly what :func:`plot_spectral_map` does, and emits a
+    ``FutureWarning``.  Use :func:`plot_spectral_map`: the map is not specific to
+    a two-gate voltage sweep, nor to PL.
+
+    .. deprecated::
+       Call :func:`plot_spectral_map` instead.
+    """
+    # No explicit signature: the arguments are unchanged by the rename, so
+    # forwarding cannot drift out of step with the function it delegates to.
+    warnings.warn(
+        "plot_pl_map_Vab_scan is deprecated; use plot_spectral_map, which takes "
+        "the same arguments. The map is not specific to a V_a/V_b gate sweep — "
+        "the y-axis is whatever was declared as sweep= at load time.",
+        FutureWarning, stacklevel=2,
+    )
+    return plot_spectral_map(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -212,10 +288,11 @@ def plot_spectrum(
     x_axis      : str  = "energy",
     normalize   : bool = False,
     label       : str  = None,
+    ylabel      : str  = None,
     **line_kwargs,
 ) -> tuple:
     """
-    Plot a single PL spectrum from a scan.
+    Plot one spectrum from a sweep.
 
     Parameters
     ----------
@@ -228,6 +305,10 @@ def plot_spectrum(
         Normalise spectrum to its own [0, 1] range.
     label : str, optional
         Legend label. Defaults to the gate voltage / field value.
+    ylabel : str, optional
+        Y-axis label.  Derived from the scan's measurement type when ``None``,
+        so a reflectance sweep is not labelled as PL.  A string is used
+        **verbatim**, so include the unit.
     **line_kwargs
         Passed directly to ``ax.plot``.
 
@@ -249,15 +330,21 @@ def plot_spectrum(
         y = processing.normalise_minmax(y)
 
     if label is None:
-        label = (
-            f"$E_F$ = {scan.ef[sweep_index]:.1f} mV/nm"
-            if scan.ef is not None
-            else f"$V_{{top}}$ = {scan.v_top[sweep_index]:.2f} V"
-        )
+        # Fall back to whatever the scan says it swept rather than to a gate
+        # voltage: a gate role needs a declared wiring, and the sweep axis is
+        # already the scan's own answer to "what varied", labelled and in its own
+        # units.  A field needs a geometry and two declared gates, so check the
+        # device first — reading scan.ef without them raises.
+        if scan.is_dual_gated and scan.ef is not None:
+            label = f"$E_F$ = {scan.ef[sweep_index]:.1f} mV/nm"
+        else:
+            label = (f"{scan.sweep_axis_label} = "
+                     f"{scan.sweep_axis[sweep_index]:.4g}")
 
     line, = ax.plot(x, y, label=label, **line_kwargs)
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("PL intensity (norm.)" if normalize else "PL intensity (counts)")
+    ax.set_ylabel(ylabel if ylabel is not None
+                  else _signal_label(scan, normalized=normalize))
 
     return fig, ax, line
 
@@ -270,10 +357,11 @@ def plot_single_spectrum(
     x_axis      : str   = "wavelength",
     normalize   : bool  = False,
     label       : str   = None,
+    ylabel      : str   = None,
     **line_kwargs,
 ) -> tuple:
     """
-    Plot a single PL spectrum from a
+    Plot a spectrum held in a
     :class:`~tmdc_optics_tools.loaders.SingleSpectrum`.
 
     Parameters
@@ -290,6 +378,11 @@ def plot_single_spectrum(
         Normalise the spectrum to its own [0, 1] range.
     label : str, optional
         Legend label. A legend is shown only when a label is given.
+    ylabel : str, optional
+        Y-axis label.  A ``SingleSpectrum`` declares no measurement type, so
+        this falls back to a neutral "Intensity (counts)" when ``None`` — a
+        2-row CSV is as likely to be a bare-substrate reflectance reference as
+        PL.  A string is used **verbatim**, so include the unit.
     **line_kwargs
         Passed directly to ``ax.plot``.
 
@@ -310,7 +403,8 @@ def plot_single_spectrum(
 
     line, = ax.plot(x, y, label=label, **line_kwargs)
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("PL intensity (norm.)" if normalize else "PL intensity (counts)")
+    ax.set_ylabel(ylabel if ylabel is not None
+                  else _signal_label(spectrum, normalized=normalize))
     if label:
         ax.legend(frameon=False)
 
@@ -341,7 +435,9 @@ def plot_current(
     ax : matplotlib.axes.Axes, optional
         Must be a standard (non-twin) axes.
     ef_axis : bool
-        Use displacement field on the x-axis if available.
+        Use displacement field on the x-axis when the scan can supply one — it
+        needs both a :class:`DeviceGeometry` and a declared channel-to-gate
+        mapping.  Otherwise the scan's declared sweep axis is used.
     color_ich1, color_ich2, color_power : str
         Matplotlib colours for the respective traces.
 
@@ -355,10 +451,14 @@ def plot_current(
         fig     = ax.get_figure()
         ax_left = ax
 
-    if ef_axis and scan.ef is not None:
+    # A field needs a geometry *and* two declared gate electrodes, so check the
+    # device first — reading scan.ef without them raises.  Otherwise use the scan's
+    # own sweep axis: labelling this "$V_top$" would assert a wiring the scan may
+    # not have been told, or a gate the device may not have.
+    if ef_axis and scan.is_dual_gated and scan.ef is not None:
         x, xlabel = scan.ef, r"$E_F$ (mV/nm)"
     else:
-        x, xlabel = scan.v_top, r"$V_\mathrm{top}$ (V)"
+        x, xlabel = scan.sweep_axis, scan.sweep_axis_label
 
     l1, = ax_left.plot(x, scan.Ich1, color=color_ich1, label=r"$I_\mathrm{ch1}$")
     l2, = ax_left.plot(x, scan.Ich2, color=color_ich2, label=r"$I_\mathrm{ch2}$")
@@ -481,7 +581,7 @@ def plot_image(
     dpi            : int   = None,
     cmap           : str   = "vik",
     colorbar       : bool  = True,
-    colorbar_label : str   = "Intensity (counts)",
+    colorbar_label : str   = None,
     rescale_img    : bool  = False,
     clim           : tuple = None,
     xlabel         : str   = "x (px)",
@@ -510,8 +610,11 @@ def plot_image(
         Colormap name passed to :func:`get_cmap`.
     colorbar : bool
         Show a colorbar alongside the image.
-    colorbar_label : str
-        Colorbar label (overridden to "Intensity (norm.)" when *rescale_img*).
+    colorbar_label : str, optional
+        Colour-bar label.  Defaults to "Intensity (counts)", or
+        "Intensity (norm.)" when *rescale_img*; a plain 2-D array carries no
+        measurement type to derive anything better from.  A string is used
+        **verbatim**, so include the unit.
     rescale_img : bool
         Rescale intensity to [0, 1] before plotting.
     clim : tuple of (vmin, vmax), optional
@@ -558,7 +661,9 @@ def plot_image(
 
     if colorbar:
         cb = fig.colorbar(im, ax=ax, pad=0.02)
-        cb.set_label("Intensity (norm.)" if rescale_img else colorbar_label)
+        cb.set_label(colorbar_label if colorbar_label is not None
+                     else ("Intensity (norm.)" if rescale_img
+                           else "Intensity (counts)"))
 
     return fig, ax, im
 
@@ -1182,8 +1287,10 @@ class SpectrumLinePanel(AnimationPanel):
         Format string with ``{label}``, ``{value}`` and ``{unit}`` fields.
     color : str, optional
         Line colour.  Matplotlib default when ``None``.
-    ylabel : str
-        Y-axis label.
+    ylabel : str, optional
+        Y-axis label.  Derived from the scan's measurement type when ``None``,
+        so a reflectance sweep is not labelled as PL.  A string is used
+        **verbatim**, so include the unit.
     """
 
     def __init__(
@@ -1196,7 +1303,7 @@ class SpectrumLinePanel(AnimationPanel):
         title_fmt        : str  = "{label} = {value:.3g} {unit}",
         show_sweep_title : bool = True,
         color            : str  = None,
-        ylabel           : str  = "Counts",
+        ylabel           : str  = None,
     ):
         self.scan             = scan
         self.x_axis           = x_axis
@@ -1227,7 +1334,8 @@ class SpectrumLinePanel(AnimationPanel):
         ax.set_xlim(x.min(), x.max())
         ax.set_ylim(self._y.min(), self._y.max())
         ax.set_xlabel(xlabel)
-        ax.set_ylabel(self.ylabel)
+        ax.set_ylabel(self.ylabel if self.ylabel is not None
+                      else _signal_label(self.scan))
 
         (self._line,) = ax.plot(x, self._y[:, 0], color=self.color)
         # show_sweep_title=True keeps the swept value in ax.set_title (useful
@@ -2246,76 +2354,6 @@ from matplotlib.colors import Normalize, LogNorm, BoundaryNorm
 from matplotlib.cm import ScalarMappable
 
 
-# Mapping of string names → spectra array attribute on AttoCubeSpectralSweep.
-# The sentinel value None means "wavelength-space spectra" — these are
-# served on the wavelength axis regardless of x_axis.
-_SPECTRA_SOURCES = {
-    "best"                      : None,   # resolved at call time
-    "raw"                       : "spectra",
-    "energy"                    : "energy_spectra",
-    "energy_bg"                 : "energy_spectra_bg",
-    "energy_pre_jacobian"       : "energy_spectra_pre_jacobian",
-    # Contrast is opt-in by name: "best" never returns it, because ΔR/R₀ is a
-    # different physical quantity from the counts, not a better-corrected version
-    # of them.  See AttoCubeSpectralSweep.best_energy_spectra.
-    "contrast"                  : "energy_contrast",
-    "contrast_wavelength"       : "contrast",
-}
-
-_SPECTRA_SOURCE_LABELS = {
-    "best"                      : "best available (bg-corrected if set)",
-    "raw"                       : "raw counts, wavelength space",
-    "energy"                    : "energy axis (Jacobian if configured)",
-    "energy_bg"                 : "energy axis, bg-subtracted",
-    "energy_pre_jacobian"       : "energy axis, no Jacobian",
-    "contrast"                  : "contrast vs reference, energy axis",
-    "contrast_wavelength"       : "contrast vs reference, wavelength space",
-}
-
-
-def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
-    """
-    Return the ``(n_pixels, n_sweeps)`` array for *spectra_source*.
-
-    Raises ``ValueError`` when the requested source is unavailable (e.g.
-    ``"energy_bg"`` but no ``bg_region`` was set) or incompatible with the
-    chosen *x_axis* (e.g. wavelength-space source with ``x_axis="energy"``).
-    """
-    src = spectra_source.lower()
-    if src not in _SPECTRA_SOURCES:
-        raise ValueError(
-            f"spectra_source {src!r} is not recognised. "
-            f"Choose from: {list(_SPECTRA_SOURCES)}."
-        )
-
-    if src == "best":
-        arr = scan.best_energy_spectra if x_axis == "energy" else scan.spectra
-    elif src == "raw":
-        arr = scan.spectra
-    else:
-        attr = _SPECTRA_SOURCES[src]
-        arr = getattr(scan, attr, None)
-        if arr is None:
-            needs = ("a reference= spectrum" if src.startswith("contrast")
-                     else "bg_region and/or apply_jacobian")
-            raise ValueError(
-                f"spectra_source={src!r} is not available on this scan.  "
-                f"Check that {needs} was set at load time."
-            )
-
-    # Warn if wavelength-space data is being plotted on energy axis.
-    if src == "raw" and x_axis == "energy":
-        import warnings
-        warnings.warn(
-            "spectra_source='raw' uses the wavelength-space array which has "
-            "descending energy order and unequal pixel spacing.  "
-            "Consider 'energy' or 'best' for an energy-axis plot.",
-            UserWarning, stacklevel=3,
-        )
-
-    return np.asarray(arr, dtype=float)
-
-
 def plot_power_series(
     scan,
     ax               = None,
@@ -2329,6 +2367,9 @@ def plot_power_series(
     spectra_source   : str    = "best",
     # --- background subtraction (post-load, in addition to loader bg) ---
     bg_region        : tuple  = None,
+    # --- sweep selection and stacking ---
+    sweep_step       : int    = 1,
+    spectrum_offset  : float  = 0.0,
     # --- colour mapping ---
     cmap             : str    = "viridis",
     power_scale      : str    = "linear",
@@ -2348,7 +2389,7 @@ def plot_power_series(
     peak_marker_lw   : float  = 1.0,
     peak_marker_ls   : str    = "--",
     # --- axes labels ---
-    ylabel           : str    = "PL intensity (counts)",
+    ylabel           : str    = None,
 ) -> tuple:
     """
     Plot a power-series of PL spectra with each line coloured by optical power.
@@ -2399,6 +2440,26 @@ def plot_power_series(
         Additional background region subtracted *after* loading (same units
         as *x_axis*).  Applied on top of any background already baked into
         *spectra_source*.  ``None`` (default) skips this step.
+    sweep_step : int
+        Plot every *sweep_step*-th sweep, starting from the first.  ``1``
+        (default) plots all of them, ``2`` every other one, and so on.  Must
+        be a positive integer.  Thinning the lines does not change the
+        colorbar, which always spans the whole scan's power range.
+    spectrum_offset : float
+        Stack the plotted spectra by adding a cumulative vertical shift, in
+        the units of the plotted array: the first drawn spectrum is shifted by
+        ``0``, the second by ``spectrum_offset``, the *j*-th by
+        ``j * spectrum_offset``.  Negative values stack downward.  ``0.0``
+        (default) draws them overlapping on a shared baseline.
+
+        The shift counts drawn spectra, not sweep indices, so it closes the
+        gaps a *sweep_step* leaves rather than stacking blank space.  It is
+        absolute, so a value that separates one scan will not suit another
+        whose counts differ by orders of magnitude — read a spectrum's peak
+        height off an unstacked plot first.  The y tick *values* are no longer
+        absolute signal once a shift is applied, which *ylabel* reflects; the
+        spacing between them still is.  Hide them with
+        ``ax.set_yticks([])`` if the numbers distract.
 
     Colour mapping
     --------------
@@ -2442,8 +2503,12 @@ def plot_power_series(
 
     Axes
     ----
-    ylabel : str
-        Y-axis label.  Default ``"PL intensity (counts)"``.
+    ylabel : str, optional
+        Y-axis label.  ``None`` (default) takes it from the scan's
+        spectroscopy type, so a reflectance scan is not labelled as PL; a
+        contrast *spectra_source* is labelled as the ratio it is, and the axis
+        is marked offset and arbitrary when *spectrum_offset* is non-zero.  A
+        string is used **verbatim**, so include the unit.
 
     Returns
     -------
@@ -2453,9 +2518,22 @@ def plot_power_series(
     cb : matplotlib.colorbar.Colorbar or None
         Colorbar object, or ``None`` when *colorbar* is ``False``.
     lines : list of matplotlib.lines.Line2D
-        One Line2D per sweep, in sweep order (same order as ``scan.power``).
+        One Line2D per *drawn* sweep, in sweep order — so ``lines[j]`` is the
+        spectrum taken at ``scan.power[::sweep_step][j]``.  Their y data
+        includes any *spectrum_offset*.
+
+    Raises
+    ------
+    ValueError
+        If *sweep_step* is not a positive integer.
     """
     from .constants import HC_EV_NM  # local import to avoid circular at module level
+
+    if not isinstance(sweep_step, (int, np.integer)) or sweep_step < 1:
+        raise ValueError(
+            f"sweep_step must be a positive integer, got {sweep_step!r}.  "
+            f"Use 1 to plot every sweep, 2 for every other one, and so on."
+        )
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -2494,16 +2572,22 @@ def plot_power_series(
     power_norm_linear = (power - p_min) / max(p_max - p_min, 1e-12)
 
     # --- draw lines --------------------------------------------------------
+    # Two counters, and they differ once sweep_step > 1: i indexes the scan, so
+    # colour and alpha keep tracking each line's own power, while j counts drawn
+    # lines, so the offsets stack contiguously instead of leaving gaps where a
+    # skipped sweep would have been.
     lines = []
-    for i, p in enumerate(power):
-        colour = sm.to_rgba(p)
+    for j, i in enumerate(range(0, len(power), sweep_step)):
+        colour = sm.to_rgba(power[i])
         a = float(alpha_min + (1.0 - alpha_min) * power_norm_linear[i]) \
             if alpha_by_power else float(alpha)
-        y = data[:, i]
+        y = data[:, i] + j * spectrum_offset
         (line,) = ax.plot(x, y, color=colour, lw=lw, alpha=a)
         lines.append(line)
 
         if peak_marker:
+            # argmax is invariant to the additive offset, so the un-shifted
+            # spectrum would give the same position.
             x_peak = x[np.argmax(y)]
             ax.axvline(
                 x_peak,
@@ -2514,6 +2598,16 @@ def plot_power_series(
             )
 
     # --- axes formatting --------------------------------------------------
+    if ylabel is None:
+        # The source decides the quantity -- a contrast is ΔR/R₀, not counts.
+        name, unit = _signal_name_unit(scan, spectra_source)
+        if spectrum_offset:
+            # Stacking destroys the absolute scale, so the unit goes.  A
+            # dimensionless signal has none to drop and is only marked as
+            # shifted.
+            unit = "a.u., offset" if unit else "offset"
+        ylabel = f"{name} ({unit})" if unit else name
+
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
 

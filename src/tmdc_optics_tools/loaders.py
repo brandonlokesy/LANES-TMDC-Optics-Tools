@@ -31,6 +31,7 @@ AttoCubeLaserReferenceImage
 
 from __future__ import annotations
 
+import inspect
 import re
 import warnings
 from pathlib import Path
@@ -48,6 +49,8 @@ from scipy.optimize import curve_fit
 import matplotlib.patches as patches
 
 from .constants import (
+    E_CHARGE,
+    EPS_0,
     EPS_HBN,
     EPS_TMDC,
     HC_EV_NM,
@@ -437,10 +440,11 @@ class DeviceGeometry:
         above is the one to keep.
 
         The sign convention depends on which physical gate each voltage came
-        from, which is per-session wiring and is not yet recorded per scan.
-        Callers are responsible for mapping their source channels to *v_top* and
-        *v_bot* correctly; transposing them mirrors the field axis and flips the
-        sign of any extracted dipole.
+        from, which is per-session wiring that no instrument file records.
+        Mapping the source channels onto *v_top* and *v_bot* is the caller's
+        responsibility; transposing them mirrors the field axis and flips the
+        sign of any extracted dipole.  The loaders take that mapping as their
+        ``gates`` argument and refuse to guess one.
         """
         if self.d_hbn_top is None and self.d_hbn_bottom is None:
             raise ValueError(
@@ -451,6 +455,112 @@ class DeviceGeometry:
         # eps_2d * E_2d = eps_stack * E_stack, with E_stack = vdiff / d_TOT the
         # uniform field of the equivalent homogeneous slab. 1000 -> mV/nm.
         return 1000.0 * (vdiff / self.d_stack) * (self.eps_stack / self.eps_2d)
+
+    def gate_capacitance(self, gate: str = "bottom") -> float:
+        r"""
+        Geometric capacitance per unit area between a gate and the TMDC, in F/m².
+
+        .. math :: C = \epsilon_0 \epsilon_{hBN} / d_{hBN}
+
+        The TMDC is the counter-electrode of this capacitor, not a slab inside it,
+        so only that gate's hBN enters — neither the TMDC thickness nor
+        :attr:`eps_stack` appears.  Purely geometric: the quantum capacitance of
+        the TMDC and any interface-trap capacitance are in series with this and
+        make the effective value smaller, so a density derived from it is an upper
+        bound.
+
+        Parameters
+        ----------
+        gate : {"bottom", "top"}
+            Which gate. Default ``"bottom"``.
+
+        Returns
+        -------
+        float
+            Capacitance per unit area in F/m².
+
+        Raises
+        ------
+        ValueError
+            If *gate* is not a recognised gate, or if that gate's hBN thickness is
+            ``None`` — there is then no dielectric to define a capacitance.
+
+        See Also
+        --------
+        carrier_density : the same capacitance turned into a sheet density.
+        """
+        thickness = {"top": self.d_hbn_top, "bottom": self.d_hbn_bottom}
+        if gate not in thickness:
+            raise ValueError(
+                f"gate must be one of {sorted(thickness)}, got {gate!r}."
+            )
+        d_nm = thickness[gate]
+        if d_nm is None:
+            raise ValueError(
+                f"Cannot compute the {gate} gate capacitance: d_hbn_{gate} is "
+                f"None, so that gate has no dielectric. Supply its thickness."
+            )
+        return EPS_0 * self.eps_hbn / (d_nm * 1e-9)
+
+    def carrier_density(
+        self, v_top: np.ndarray = None, v_bot: np.ndarray = None,
+        v_ref: float = 0.0,
+    ) -> np.ndarray:
+        r"""
+        Sheet carrier density induced by the gates, in cm⁻².
+
+        .. math :: \Delta n = \frac{1}{e}\sum_i C_i (V_i - V_{ref})
+
+        summed over whichever gates are supplied, since each gate injects charge
+        through its own capacitance.  Signed: positive is electron accumulation
+        for a positive gate voltage.
+
+        **This is a density difference, not an absolute density.** *v_ref* is a
+        gate voltage, not a threshold, so the result is the density induced
+        relative to that gate voltage.  Absolute density needs the threshold at
+        which the channel starts to populate, which comes from a transfer curve or
+        the PL charging step and is in no instrument file — pass it as *v_ref* if
+        you have measured it, and read the result as absolute.
+
+        Parameters
+        ----------
+        v_top, v_bot : array-like, optional
+            Gate voltages in V.  Supply the gates the device has; omitting one
+            leaves it out of the sum rather than treating it as zero.
+        v_ref : float
+            Reference gate voltage in V, subtracted from every supplied gate.
+            Default ``0.0``.
+
+        Returns
+        -------
+        np.ndarray
+            Sheet density in cm⁻², broadcast over the supplied voltages.
+
+        Raises
+        ------
+        ValueError
+            If no gate voltage is supplied, or if a supplied gate has no hBN
+            thickness (see :meth:`gate_capacitance`).
+
+        Notes
+        -----
+        Density and field are independent quantities only in a dual-gated device,
+        where an anti-symmetric sweep tunes the field at fixed density and a
+        symmetric one the reverse.  A single gate is one degree of freedom and
+        moves both together.
+        """
+        supplied = {"top": v_top, "bottom": v_bot}
+        supplied = {gate: v for gate, v in supplied.items() if v is not None}
+        if not supplied:
+            raise ValueError(
+                "carrier_density needs at least one gate voltage — pass v_top, "
+                "v_bot, or both."
+            )
+        # Each gate contributes C_i·(V_i − V_ref) of charge per unit area; summed
+        # and divided by e this is a sheet number density in m^-2, then 1e-4 -> cm^-2.
+        sigma = sum(self.gate_capacitance(gate) * (np.asarray(v, float) - v_ref)
+                    for gate, v in supplied.items())
+        return sigma / E_CHARGE * 1e-4
 
     # --- Dunder methods ----------------------------------------------------
 
@@ -486,11 +596,15 @@ class DeviceGeometry:
 _SWEEP_TYPES = {
     "index"          : (None,        "Sweep index",        ""),
     "electric_field" : ("ef",        r"$E_F$",             "mV/nm"),
+    "carrier_density": ("carrier_density", r"$\Delta n$",  r"cm$^{-2}$"),
     "top_voltage"    : ("v_top",     r"$V_\mathrm{top}$",  "V"),
     "bottom_voltage" : ("v_bot",     r"$V_\mathrm{bot}$",  "V"),
     "power"          : ("power",     "Power",              "µW"),
-    "position_x"     : ("scanner_x", r"$x$",               "µm"),
-    "position_y"     : ("scanner_y", r"$y$",               "µm"),
+    # The scanners are piezos and the rows carry their drive voltage, so these
+    # two axes are in V.  Converting to a distance needs a per-stage µm/V
+    # calibration the file does not contain; pass one via ``curated_scales``.
+    "piezo_x"        : ("scanner_x", r"Piezo $x$",         "V"),
+    "piezo_y"        : ("scanner_y", r"Piezo $y$",         "V"),
 }
 
 # Which curated rows each sweep type depends on.  Checked at load time so a
@@ -501,9 +615,116 @@ _SWEEP_REQUIRES = {
     "top_voltage"    : ("v_top",),
     "bottom_voltage" : ("v_bot",),
     "power"          : ("power",),
-    "position_x"     : ("scanner_x",),
-    "position_y"     : ("scanner_y",),
+    "piezo_x"        : ("scanner_x",),
+    "piezo_y"        : ("scanner_y",),
 }
+
+# Which electrode each gate-backed curated entry belongs to.  Which acquisition
+# channel reached which electrode is per-session wiring that no export records, so
+# these are declared through ``gates=`` and nowhere else; any sweep type requiring
+# one of them therefore needs that declaration too, which _resolve_sweep derives
+# from this table rather than relisting.
+_GATE_ROLE_CURATED = {"top": "v_top", "bottom": "v_bot"}
+_GATE_CURATED      = tuple(_GATE_ROLE_CURATED.values())
+_ROLE_FOR_CURATED  = {attr: role for role, attr in _GATE_ROLE_CURATED.items()}
+
+# Electrodes that gate the TMDC across a dielectric.  A potential *difference*
+# between the two is what defines a displacement field, so a field needs both.
+_GATE_ELECTRODES = tuple(_GATE_ROLE_CURATED)
+
+# Every role a ``gates`` mapping may name.  ``"channel"`` is a contact to the TMDC
+# itself — the ground reference of a doping measurement — not a gate: it sits
+# inside the stack rather than across a dielectric from it, so it carries no
+# thickness and enters no field.  Naming it records that the device is contacted
+# and is what makes a single-gate declaration unambiguous.
+_GATE_ROLES = _GATE_ELECTRODES + ("channel",)
+
+
+# ---------------------------------------------------------------------------
+# Spectra-source registry
+# ---------------------------------------------------------------------------
+
+# Mapping of string names → spectra array attribute on AttoCubeSpectralSweep.
+# The sentinel value None means "wavelength-space spectra" — these are
+# served on the wavelength axis regardless of x_axis.
+_SPECTRA_SOURCES = {
+    "best"                      : None,   # resolved at call time
+    "raw"                       : "spectra",
+    "energy"                    : "energy_spectra",
+    "energy_bg"                 : "energy_spectra_bg",
+    "energy_pre_jacobian"       : "energy_spectra_pre_jacobian",
+    # Contrast is opt-in by name: "best" never returns it, because ΔR/R₀ is a
+    # different physical quantity from the counts, not a better-corrected version
+    # of them.  See AttoCubeSpectralSweep.best_energy_spectra.
+    "contrast"                  : "energy_contrast",
+    "contrast_wavelength"       : "contrast",
+}
+
+_SPECTRA_SOURCE_LABELS = {
+    "best"                      : "best available (repaired, bg-corrected if set)",
+    "raw"                       : "raw counts, wavelength space",
+    "energy"                    : "energy axis (Jacobian if configured)",
+    "energy_bg"                 : "energy axis, bg-subtracted",
+    "energy_pre_jacobian"       : "energy axis, no Jacobian",
+    "contrast"                  : "contrast vs reference, energy axis",
+    "contrast_wavelength"       : "contrast vs reference, wavelength space",
+}
+
+
+def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
+    """
+    Return the ``(n_pixels, n_sweeps)`` array for *spectra_source*.
+
+    Reads *scan* by attribute name, so it serves anything mirroring
+    :class:`AttoCubeSpectralSweep`.  :class:`SingleSpectrum` carries only a subset
+    of the arrays; a source it lacks degrades to the nearest available one where
+    there is one, and raises otherwise.
+
+    Raises ``ValueError`` when the requested source is unavailable (e.g.
+    ``"energy_bg"`` but no ``bg_region`` was set) or incompatible with the
+    chosen *x_axis* (e.g. wavelength-space source with ``x_axis="energy"``).
+    """
+    src = spectra_source.lower()
+    if src not in _SPECTRA_SOURCES:
+        raise ValueError(
+            f"spectra_source {src!r} is not recognised. "
+            f"Choose from: {list(_SPECTRA_SOURCES)}."
+        )
+
+    if src == "best":
+        if x_axis == "energy":
+            arr = scan.best_energy_spectra
+        else:
+            # Wavelength space has no background-corrected array to offer, but a
+            # cosmic-ray repair does live here — and "best" ignoring a declared
+            # one would put spikes on the plot that no other source shows.
+            arr = getattr(scan, "spectra_cr", None)
+            if arr is None:
+                arr = scan.spectra
+    elif src == "raw":
+        arr = scan.spectra
+    else:
+        attr = _SPECTRA_SOURCES[src]
+        arr = getattr(scan, attr, None)
+        if arr is None:
+            needs = ("a reference= spectrum" if src.startswith("contrast")
+                     else "bg_region and/or apply_jacobian")
+            raise ValueError(
+                f"spectra_source={src!r} is not available on this scan.  "
+                f"Check that {needs} was set at load time."
+            )
+
+    # Warn if wavelength-space data is being plotted on energy axis.
+    if src == "raw" and x_axis == "energy":
+        warnings.warn(
+            "spectra_source='raw' uses the wavelength-space array which has "
+            "descending energy order and unequal pixel spacing.  "
+            "Consider 'energy' or 'best' for an energy-axis plot.",
+            UserWarning, stacklevel=3,
+        )
+
+    return np.asarray(arr, dtype=float)
+
 
 # Recognised input formats, dispatched on the file suffix.
 _CSV_SUFFIXES  = (".csv",)
@@ -580,12 +801,12 @@ def _read_block_layout(path) -> dict:
         names match no known layout.
     """
     with open(path, "r") as fh:
-        header = fh.readline()
+        header = fh.readline() # Reads the header
         # Only whether a third row exists matters, and bounding the read keeps this
         # cheap on a 300 MB export.  The count is therefore not the file's row
         # count and must not be reported as one.
-        two_rows_only = sum(1 for _, line in zip(range(2), fh) if line.strip()) < 2
-    names = [name.strip() for name in header.split(",")]
+        two_rows_only = sum(1 for _, line in zip(range(2), fh) if line.strip()) < 2 # Reads the next two rows -> returns number of non-empty rows
+    names = [name.strip() for name in header.split(",")] # Splits into the column names
 
     # Every block starts with a Par column, so the Par positions give both the
     # block count and the stride — no arithmetic on the total column count.
@@ -613,12 +834,14 @@ def _read_block_layout(path) -> dict:
         )
 
     block_width = (par_at[1] - par_at[0]) if len(par_at) > 1 else (
-        # A single-block file: the block runs to the last non-empty field.
+        # A single-block file: the block runs to the last non-empty field -> gets number of columns after the first block start match
         sum(1 for name in names[par_at[0]:] if name) )
 
+    # Get the column header format for matching with known types
     roles = tuple(
-        _BLOCK_FIELD_INDEX.sub("", name)
-        for name in names[par_at[0]:par_at[0] + block_width]
+        # Iterates over the entries in one block. .sub() removes the underscore (if any) + numeric suffix from the column name.
+        _BLOCK_FIELD_INDEX.sub("", name) 
+        for name in names[par_at[0]:par_at[0] + block_width] 
     )
     if roles not in _BLOCK_LAYOUTS:
         raise ValueError(
@@ -635,7 +858,7 @@ def _read_block_layout(path) -> dict:
     }
 
 
-def _drop_unwritten_blocks(axis_col: np.ndarray, blocks: dict, path) -> tuple:
+def _drop_unwritten_blocks(axis_col: np.ndarray, path) -> tuple:
     """
     Strip blocks the exporter declared and zero-filled but never wrote.
 
@@ -654,15 +877,14 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, blocks: dict, path) -> tuple:
     ----------
     axis_col : np.ndarray, shape (n_axis, n_blocks)
         The Wavelength column of every block.
-    blocks : dict
-        Mapping of field role -> ``(n_axis, n_blocks)`` array, sliced in place.
     path : str or Path
         Used in messages only.
 
     Returns
     -------
     keep : np.ndarray of bool, shape (n_blocks,)
-        Blocks to retain.
+        Blocks to retain. Nothing is modified here; the caller applies this
+        mask to its own arrays.
     n_declared : int
     axis_block : int
         Index of the first block holding a real axis.  Returned separately from
@@ -682,15 +904,16 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, blocks: dict, path) -> tuple:
     # A block counts as written if its axis column holds any real non-zero value.
     # The finiteness test is not decoration: exports carry a trailing NaN row, and
     # `NaN != 0` is True, so a bare `!= 0` marks every block as written.
-    written = np.any(np.isfinite(axis_col) & (axis_col != 0), axis=0)  # (n_blocks,)
+    written = np.any(np.isfinite(axis_col) & (axis_col != 0), axis=0)  # (n_blocks,). Finds truly written blocks by checking if any value in the axis column is finite and non-zero.
     axis_block = int(np.flatnonzero(written)[0]) if written.any() else 0
 
-    if written.all():
+    if written.all(): # Simple case: all written columns are real columns. Keep all.
         return written, n_declared, axis_block
 
     # Strictly trailing means: once written stops, it never resumes.
     n_written = int(written.sum())
-    if not written[:n_written].all():
+    if not written[:n_written].all(): # Finds the first n_written blocks, checks if all of them are true.
+        # If condition not true: something is strange about how the file is written
         warnings.warn(
             f"'{path}' has {n_declared - n_written} zero-filled block(s) "
             f"*interleaved* with real ones (first unwritten at index "
@@ -703,6 +926,7 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, blocks: dict, path) -> tuple:
         )
         return np.ones(n_declared, dtype=bool), n_declared, axis_block
 
+    # If yes, then the real blocks are all at the front and the unwritten ones are strictly trailing.
     return written, n_declared, axis_block
 
 
@@ -711,16 +935,145 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, blocks: dict, path) -> tuple:
 # ---------------------------------------------------------------------------
 
 class SweepGrid(NamedTuple):
-    """A detected 2-D raster: the inner (fast) axis and the outer (slow) one."""
-    inner_label : str
-    n_inner     : int
-    outer_label : str
-    n_outer     : int
+    """
+    A 2-D raster detected in the parameter rows: its fast axis and its slow one.
+
+    What :meth:`_AttoCubeSweep.sweep_grid` reports.  Names the same two axes a
+    nest is declared with, so a detection reads directly as the ``fast_sweep=`` /
+    ``slow_sweep=`` to pass — but it is a row-level guess, and a nest whose axis
+    is a derived quantity will be reported through the rows that carry it.
+    """
+    fast_label : str
+    n_fast     : int
+    slow_label : str
+    n_slow     : int
 
     def __str__(self) -> str:
-        return (f"{self.inner_label} ({self.n_inner}) × "
-                f"{self.outer_label} ({self.n_outer}) = "
-                f"{self.n_inner * self.n_outer}")
+        return (f"{self.fast_label} ({self.n_fast}) × "
+                f"{self.slow_label} ({self.n_slow}) = "
+                f"{self.n_fast * self.n_slow}")
+
+
+# Fraction of an axis's own span by which two values may differ and still count
+# as the same grid point.  Scaled to the span rather than to the value so that an
+# axis crossing zero — an anti-symmetric field sweep, say — is handled like any
+# other, and loose enough for a derived axis that is recomputed per sweep point
+# rather than read back as a repeated literal.
+_NEST_RTOL = 1e-3
+
+
+def _axis_atol(values: np.ndarray, rtol: float = _NEST_RTOL) -> float:
+    """Absolute tolerance for *values*, scaled to their span."""
+    finite = values[np.isfinite(values)]
+    span   = float(np.ptp(finite)) if finite.size else 0.0
+    return max(rtol * span, np.finfo(float).tiny)
+
+
+def _count_distinct(values: np.ndarray, atol: float) -> int:
+    """
+    Number of distinct values in *values*, treating gaps ≤ *atol* as equal.
+
+    Sorting first turns "how many distinct" into "how many gaps exceed atol",
+    which is one vectorised pass rather than a pairwise comparison.
+    """
+    ordered = np.sort(values[np.isfinite(values)])
+    if ordered.size == 0:
+        return 0
+    return int(1 + np.count_nonzero(np.diff(ordered) > atol))
+
+
+def _render_indices(indices: np.ndarray, limit: int = 6) -> str:
+    """Render matched sweep positions for a message, capped so it stays readable."""
+    shown = ", ".join(str(i) for i in indices[:limit])
+    if indices.size > limit:
+        return f"{indices.size} sweep points (indices {shown}, …)"
+    return f"{indices.size} sweep points (indices {shown})"
+
+
+def _nest_shape(fast: np.ndarray, slow: np.ndarray, n_sweeps: int) -> tuple:
+    """
+    Return ``(n_fast, n_slow)`` if *fast* runs to completion inside *slow*.
+
+    Both arrays are the flattened ``(n_sweeps,)`` readings of the two declared
+    axes.  ``None`` when they do not form a nest in that order — the caller
+    retries with the arguments swapped to tell a genuine mismatch from a
+    reversed declaration.
+    """
+    fast_atol = _axis_atol(fast)
+    slow_atol = _axis_atol(slow)
+
+    n_fast = _count_distinct(fast, fast_atol)
+    if n_fast < 2 or n_sweeps % n_fast:
+        return None
+    n_slow = n_sweeps // n_fast
+
+    fast_grid = fast.reshape(n_slow, n_fast)
+    slow_grid = slow.reshape(n_slow, n_fast)
+
+    # (n_fast,) broadcast down the rows: the fast axis must repeat the same run
+    # of values in every row.  (n_slow, 1) broadcast across the columns: the slow
+    # axis must hold still for the whole of each row.
+    if not np.allclose(fast_grid, fast_grid[0], rtol=0, atol=fast_atol,
+                       equal_nan=True):
+        return None
+    if not np.allclose(slow_grid, slow_grid[:, :1], rtol=0, atol=slow_atol,
+                       equal_nan=True):
+        return None
+    # A slow axis that revisits a value would make a lookup by value ambiguous.
+    if _count_distinct(slow_grid[:, 0], slow_atol) != n_slow:
+        return None
+    return n_fast, n_slow
+
+
+@_dataclass(frozen=True, eq=False)
+class SweepNesting:
+    """
+    A declared 2-D sweep: a fast (inner) axis run to completion inside a slow one.
+
+    Held by :attr:`_AttoCubeSweep.nesting`.  The two coordinate arrays are the
+    distinct values of each axis in acquisition order, so a descending sweep stays
+    descending; they are *not* sorted.
+    """
+    fast_type  : str
+    fast_label : str
+    fast_unit  : str
+    fast_axis  : np.ndarray
+    slow_type  : str
+    slow_label : str
+    slow_unit  : str
+    slow_axis  : np.ndarray
+
+    @property
+    def n_fast(self) -> int:
+        """Points along the fast axis."""
+        return int(self.fast_axis.size)
+
+    @property
+    def n_slow(self) -> int:
+        """Points along the slow axis."""
+        return int(self.slow_axis.size)
+
+    @property
+    def shape(self) -> tuple:
+        """``(n_slow, n_fast)`` — the grid shape a flat sweep reshapes to."""
+        return (self.n_slow, self.n_fast)
+
+    @property
+    def fast_axis_label(self) -> str:
+        """Label for :attr:`fast_axis`, with its unit when one is known."""
+        return f"{self.fast_label} ({self.fast_unit})" if self.fast_unit \
+            else self.fast_label
+
+    @property
+    def slow_axis_label(self) -> str:
+        """Label for :attr:`slow_axis`, with its unit when one is known."""
+        return f"{self.slow_label} ({self.slow_unit})" if self.slow_unit \
+            else self.slow_label
+
+    def __str__(self) -> str:
+        return (f"{self.fast_type} ({self.n_fast}, fast) × "
+                f"{self.slow_type} ({self.n_slow}, slow) = "
+                f"{self.n_fast * self.n_slow}")
 
 
 class _AttoCubeSweep:
@@ -741,6 +1094,7 @@ class _AttoCubeSweep:
         payload = self._decode_and_describe(path, spectra_type=..., ...)
         # ... set the axis and signal arrays, apply corrections ...
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
+        self._bind_nesting(fast_sweep, slow_sweep)
 
     That sequence is spelled out in each subclass rather than hidden behind a
     template method, because the ordering matters — the sweep axis cannot be
@@ -752,6 +1106,10 @@ class _AttoCubeSweep:
     _AXIS_ATTR   = None     # attribute holding the (n_points,) axis
     _SIGNAL_ATTR = None     # attribute holding the (n_points, n_sweeps) signal
 
+    # No nest until one is declared, so a subclass that never calls
+    # _bind_nesting still answers is_nested.
+    _nesting = None
+
     # Canonical curated parameters: attribute name -> (CSV row label, scale, unit).
     # These are the analysis-primary quantities promoted to first-class
     # properties (scaled views into :attr:`parameters`).  The label and/or scale
@@ -759,16 +1117,19 @@ class _AttoCubeSweep:
     # ``curated_scales``; everything else in the file is reached through the
     # generic :attr:`parameters` store.  A row listed here that a given file does
     # not contain is not an error — the property raises only if accessed.
+    #
+    # The two gate entries are the exception: their labels come from ``gates``
+    # alone, and the rows below are never read without one.  They are listed here
+    # so that the file's own candidate rows can be named in that error, and so
+    # ``curated_scales`` still reaches them.
     _CURATED = {
         "v_top":     ("V_A",              1.0,      "V"),
         "v_bot":     ("V_B",              1.0,      "V"),
         "power":     ("Excitation Power", 0.303e6,  "µW"),
         "Ich1":      ("I_A",              1e9,      "nA"),
         "Ich2":      ("I_B",              1e9,      "nA"),
-        # Sample-stage position.  Unit assumed µm with scale 1.0 until the raw
-        # AttoCube units are confirmed (adjust the scale here if not microns).
-        "scanner_x": ("Scanner X",        1.0,      "µm"),
-        "scanner_y": ("Scanner Y",        1.0,      "µm"),
+        "scanner_x": ("Scanner X",        1.0,      "V"),
+        "scanner_y": ("Scanner Y",        1.0,      "V"),
     }
 
     # --- Construction helpers ----------------------------------------------
@@ -779,6 +1140,7 @@ class _AttoCubeSweep:
         *,
         spectra_type   : str  = None,
         geometry              = None,
+        gates          : dict = None,
         curated_labels : dict = None,
         curated_scales : dict = None,
     ) -> dict:
@@ -805,11 +1167,32 @@ class _AttoCubeSweep:
         self.spectra_type = self._resolve_spectra_type(spectra_type, meta)
         self.geometry     = geometry if geometry is not None else meta.get("geometry")
 
-        # Curated registry: class defaults, then the file's recorded map, then
-        # explicit constructor overrides.  Curated quantities are scaled @property
-        # views into self.parameters (single source of truth).
+        # Which acquisition channel reached which electrode, and thereby which
+        # electrodes the device has at all.  The explicit argument first, then
+        # whatever an HDF5 file recorded.  ``None`` means the session's wiring was
+        # never stated, and every role-dependent quantity then refuses rather than
+        # guessing.  Resolved before the curated registry because it supplies two of
+        # that registry's labels.
+        self._gates = self._resolve_gates(
+            gates if gates is not None else meta.get("gates")
+        )
+
+        # First creates a curated registry using defaults
+        # Then updates the registry with values from the file's metadata and any explicit overrides provided during construction.
+        # Raises an error if an unknown curated parameter name is encountered.
         self._curated = {name: list(cfg) for name, cfg in self._CURATED.items()}
-        for store, idx in ((meta.get("curated_labels"), 0),
+        # An HDF5 file dumps the *resolved* label of every curated entry, gates
+        # included.  Those are the writer's bookkeeping rather than a statement of
+        # wiring, so drop them here and let the file's own ``gates`` attribute be
+        # the only thing that can declare a role — a caller passing them is a
+        # different case, and raises below.
+        meta_labels = {
+            name: value
+            for name, value in (meta.get("curated_labels") or {}).items()
+            if name not in _GATE_CURATED
+        }
+        # Curated config has format (label, scale, unit).  Only label (index 0) and scale (index 1) can be overwritten
+        for store, idx in ((meta_labels,                0),
                            (curated_labels,             0),
                            (meta.get("curated_scales"), 1),
                            (curated_scales,             1)):
@@ -819,10 +1202,81 @@ class _AttoCubeSweep:
                         f"'{name}' is not a curated parameter. "
                         f"Valid names: {sorted(self._CURATED)}."
                     )
+                if idx == 0 and name in _GATE_CURATED:
+                    raise ValueError(
+                        f"'{name}' cannot be set through curated_labels. Which "
+                        f"acquisition channel drove which physical gate is "
+                        f"per-session wiring, declared through gates= so that the "
+                        f"mapping is recorded once and travels with the scan: "
+                        f"gates={{'top': '<row>', 'bottom': '<row>'}}."
+                    )
+                # If a curated parameter is not present in the file's metadata or the provided overrides, it retains its default value from _CURATED.
+                # If idx == 0, we are updating the label; if idx == 1, we are updating the scale. The value is converted to float for scales.
                 self._curated[name][idx] = value if idx == 0 else float(value)
+
+        # The declared mapping is what backs the gate roles.  A role left out, or
+        # present with a None row (an electrode tied to ground that no channel
+        # records), leaves its _CURATED entry alone — nothing will read it, because
+        # the raise lives on ``self._gates`` so that a defaulted label can never be
+        # mistaken for a stated one.
+        for role, attr in _GATE_ROLE_CURATED.items():
+            label = (self._gates or {}).get(role)
+            if label is not None:
+                self._curated[attr][0] = label
+
+        # Conver to tuple - not mutable, so that the curated parameters cannot be changed after initialization.
         self._curated = {name: tuple(cfg) for name, cfg in self._curated.items()}
 
         return payload
+
+    @staticmethod
+    def _resolve_gates(gates) -> dict:
+        """
+        Validate a declared electrode mapping, or pass ``None`` through.
+
+        The roles *present* describe the device: two gate electrodes is a
+        dual-gated stack, one gate plus a channel contact is a single-gated one.
+        Returns a copy in canonical role order, so that mutating the caller's dict
+        afterwards cannot change what the scan recorded.
+        """
+        if gates is None:
+            return None
+        if not isinstance(gates, dict):
+            raise ValueError(
+                f"gates must be a dict mapping electrode roles to parameter rows, "
+                f"got {type(gates).__name__}. Valid roles: {sorted(_GATE_ROLES)}."
+            )
+
+        unknown = sorted(set(gates) - set(_GATE_ROLES))
+        if unknown:
+            raise ValueError(
+                f"gates names unknown role(s) {unknown}. Valid roles: "
+                f"{sorted(_GATE_ROLES)} — 'top'/'bottom' are gate electrodes, "
+                f"'channel' is a contact to the TMDC itself."
+            )
+
+        electrodes = set(gates) & set(_GATE_ELECTRODES)
+        if not electrodes:
+            raise ValueError(
+                f"gates must name at least one gate electrode "
+                f"({' or '.join(_GATE_ELECTRODES)}); got {sorted(gates)}. A channel "
+                f"contact alone describes no gated device."
+            )
+        # One gate and no channel is ambiguous in the way this argument exists to
+        # remove: it cannot be told from a two-gate device whose other gate was
+        # forgotten.  Requiring the contact makes the single-gate case a statement.
+        if len(electrodes) == 1 and "channel" not in gates:
+            missing = next(e for e in _GATE_ELECTRODES if e not in electrodes)
+            raise ValueError(
+                f"gates names only the {electrodes.pop()} gate, which is ambiguous: "
+                f"a single-gated device is declared by naming its channel contact "
+                f"too — gates={{..., 'channel': '<row>'}}, or 'channel': None when "
+                f"the TMDC is hard-grounded and no row records it. If the device is "
+                f"dual-gated, name the {missing!r} gate as well (None if it is tied "
+                f"to ground). A lone gate with a floating TMDC defines neither a "
+                f"field nor a density."
+            )
+        return {role: gates[role] for role in _GATE_ROLES if role in gates}
 
     def _bind_sweep_axis(self, sweep, sweep_label, sweep_unit) -> None:
         """
@@ -873,6 +1327,157 @@ class _AttoCubeSweep:
                 UserWarning, stacklevel=4,
             )
 
+    def _bind_nesting(self, fast_sweep, slow_sweep) -> None:
+        """
+        Resolve the declared nest, then check the sweep axis against it.
+
+        Called after :meth:`_bind_sweep_axis`: both nest axes are length
+        ``n_sweeps`` and are verified against it, and a curated axis may read a
+        property that the sweep resolution has already checked the rows for.
+        """
+        self._nesting = self._resolve_nesting(fast_sweep, slow_sweep)
+        self._warn_if_sweep_axis_repeats()
+
+    def _warn_if_sweep_axis_repeats(self) -> None:
+        """
+        Warn when the declared sweep axis does not give each point its own value.
+
+        The sweep axis is what a map positions its spectra along, so points
+        sharing a value land on top of each other and only one of them is drawn.
+        ``__repr__`` prints the endpoints and reads perfectly well either way, so
+        nothing else announces it.
+
+        Both ways a flattened nest does this are caught: the inner quantity
+        restarts every row and the outer holds still through one, and both leave
+        repeats.  Repeat measurements at each setting collapse a map the same
+        way, and are warned about for the same reason.
+
+        Not an error — one quantity of a nest is a legitimate axis when the
+        caller means to slice, and the declaration is theirs to make.
+        """
+        if self.sweep_type == "index":
+            return
+        axis   = self.sweep_axis
+        finite = axis[np.isfinite(axis)]
+        if finite.size < 2:
+            return
+        n_distinct = _count_distinct(finite, _axis_atol(finite))
+        if n_distinct >= finite.size:
+            return
+
+        # For the message only: naming the nest, when there is one to name, turns
+        # "this is wrong" into "here is what to use instead".
+        structure = self._nesting if self._nesting is not None else self.sweep_grid()
+        if structure is not None:
+            fix = (f" These points are a 2-D nest ({structure}) — address it with "
+                   f"as_grid() and get_spectrum_at(fast=..., slow=...).")
+        else:
+            fix = (" If these points are a nest, declare it with fast_sweep= and "
+                   "slow_sweep=; if they are repeat measurements at each setting, "
+                   "sweep=None gives the flat index.")
+
+        unit = f" {self._sweep_unit}" if self._sweep_unit else ""
+        warnings.warn(
+            f"sweep={self.sweep_type!r} takes only {n_distinct} different values "
+            f"across {finite.size} sweep points in '{self.path}' "
+            f"({finite.min():.4g} → {finite.max():.4g}{unit}), so it does not "
+            f"label them individually. Plotted against it, points sharing a value "
+            f"land in the same place and only one of them is drawn.{fix}",
+            UserWarning, stacklevel=4,
+        )
+
+    def _resolve_nesting(self, fast_sweep, slow_sweep) -> SweepNesting:
+        """Build the declared nest, or return ``None`` when none was declared."""
+        meta = self.source_metadata
+        fast = fast_sweep if fast_sweep is not None else meta.get("fast_sweep")
+        slow = slow_sweep if slow_sweep is not None else meta.get("slow_sweep")
+
+        if fast is None and slow is None:
+            return None
+
+        # One without the other cannot be told from a forgotten second axis, and
+        # which of the two is inner is the fact the declaration exists to carry.
+        if fast is None or slow is None:
+            given, missing = (("slow_sweep", "fast_sweep") if fast is None
+                              else ("fast_sweep", "slow_sweep"))
+            raise ValueError(
+                f"{given}={slow if fast is None else fast!r} was declared without "
+                f"{missing}. A nest needs both axes named: the inner one as "
+                f"fast_sweep (it runs to completion at each point of the outer), "
+                f"the outer as slow_sweep. Pass neither to leave the sweep flat."
+            )
+
+        if fast == slow:
+            raise ValueError(
+                f"fast_sweep and slow_sweep are both {fast!r}. A nest needs two "
+                f"different axes."
+            )
+
+        resolved = {}
+        for param, declared in (("fast_sweep", fast), ("slow_sweep", slow)):
+            key, source, label, unit = self._resolve_sweep(
+                declared, None, None, param=param)
+            if key == "index":
+                raise ValueError(
+                    f"{param}='index' is not an axis of a nest — the sweep index "
+                    f"is the flat position the nest is being declared over. Name "
+                    f"the parameter that was scanned."
+                )
+            resolved[param] = (key, self._axis_for_source(source), label, unit)
+
+        (fast_key, fast_flat, fast_label, fast_unit) = resolved["fast_sweep"]
+        (slow_key, slow_flat, slow_label, slow_unit) = resolved["slow_sweep"]
+
+        shape = _nest_shape(fast_flat, slow_flat, self.n_sweeps)
+        if shape is None:
+            raise ValueError(self._nesting_failure(
+                fast_key, fast_flat, slow_key, slow_flat))
+        n_fast, n_slow = shape
+
+        # Read the coordinates straight out of the verified reshape, in
+        # acquisition order: row 0 holds one full run of the fast axis, and column
+        # 0 holds the slow value each row was taken at.
+        return SweepNesting(
+            fast_type = fast_key,
+            fast_label= fast_label,
+            fast_unit = fast_unit,
+            fast_axis = fast_flat.reshape(n_slow, n_fast)[0].copy(),
+            slow_type = slow_key,
+            slow_label= slow_label,
+            slow_unit = slow_unit,
+            slow_axis = slow_flat.reshape(n_slow, n_fast)[:, 0].copy(),
+        )
+
+    def _nesting_failure(self, fast_key, fast_flat, slow_key, slow_flat) -> str:
+        """Explain why a declared nest did not verify, checking for a swap first."""
+        n        = self.n_sweeps
+        n_fast   = _count_distinct(fast_flat, _axis_atol(fast_flat))
+        n_slow   = _count_distinct(slow_flat, _axis_atol(slow_flat))
+        head     = (f"fast_sweep={fast_key!r} ({n_fast} distinct) inside "
+                    f"slow_sweep={slow_key!r} ({n_slow} distinct) does not "
+                    f"describe the {n} sweep points in '{self.path}'.")
+
+        # The declaration exists to settle which axis is inner, so the reversed
+        # reading is the one mistake worth naming outright.
+        if _nest_shape(slow_flat, fast_flat, n) is not None:
+            return (f"{head}\n  Swapping them does: pass "
+                    f"fast_sweep={slow_key!r}, slow_sweep={fast_key!r}. The fast "
+                    f"axis is the one that runs to completion at each point of "
+                    f"the slow one.")
+
+        if n_fast * n_slow != n:
+            return (f"{head}\n  {n_fast} × {n_slow} = {n_fast * n_slow}, not {n}. "
+                    f"Either one of these is not a nest axis, or the scan was "
+                    f"aborted part-way through a row — a partial final row cannot "
+                    f"be reshaped. Compare against sweep_grid() and "
+                    f"varying_parameters(); slice the completed rows, or leave the "
+                    f"sweep flat.")
+
+        return (f"{head}\n  The counts multiply correctly, but the values do not "
+                f"repeat in a regular nest — the fast axis does not run the same "
+                f"values in every row, or the slow axis does not hold still "
+                f"across a row. Compare against sweep_grid().")
+
     def _validate_axis_and_signals(self, axis, signals: dict) -> None:
         """
         Check the decoded arrays are self-consistent before anything uses them.
@@ -880,25 +1485,35 @@ class _AttoCubeSweep:
         *signals* maps a display name (as it appears in the export header) to its
         ``(n_points, n_sweeps)`` array, so the error message can name the field
         the caller would recognise.
+
+        - Checks that the measured axis is a non-empty 1-D array.
+        - Checks that every signal array has the same number (the right number) of rows as the axis.
+        - Checks that every signal array has the same number of columns (same array shape).
+        - Checks that every parameter row has exactly one value per sweep point.
         """
+
+        # Checks that the measured axis is a non-empty 1-D array.
         if axis.ndim != 1 or axis.size == 0:
             raise ValueError(
                 f"'{self.path}' yielded an axis of shape {axis.shape}; "
                 f"expected a non-empty 1-D array."
             )
+        # Checks that every signal array has the same number (the right number) of rows as the axis.
         n_points = axis.size
         for name, arr in signals.items():
             if arr.ndim != 2 or arr.shape[0] != n_points:
                 raise ValueError(
                     f"'{self.path}': {name} has shape {arr.shape}, which does "
                     f"not match the {n_points}-point axis. Expected "
-                    f"(n_points, n_sweeps)."
+                    f"({n_points}, {n_sweeps})."
                 )
+        # Checks that every signal array has the same number of columns (same array shape).
         shapes = {name: arr.shape for name, arr in signals.items()}
         if len(set(shapes.values())) > 1:
             raise ValueError(f"'{self.path}': mismatched signal shapes {shapes}.")
 
         n_sweeps = next(iter(signals.values())).shape[1]
+        # Checks that every parameter row has exactly one value per sweep point.
         bad = {lbl: arr.shape for lbl, arr in self.parameters.items()
                if arr.shape != (n_sweeps,)}
         if bad:
@@ -987,38 +1602,84 @@ class _AttoCubeSweep:
             )
         return spectra_type
 
-    def _resolve_sweep(self, sweep, label, unit) -> tuple:
+    def _resolve_sweep(self, sweep, label, unit, *, param: str = "sweep") -> tuple:
         """
-        Resolve the declared sweep to ``(key, source, label, unit)``.
+        Resolve a declared axis to ``(key, source, label, unit)``.
 
         *source* is a ``(kind, name)`` pair consumed by :attr:`sweep_axis`:
         ``("curated", attr)`` for a registry entry, ``("row", label)`` for a raw
         CSV row, ``("index", None)`` when nothing was declared.
+
+        *param* is the name of the argument being resolved, interpolated into
+        every message so the error names the argument the caller actually passed.
         """
         if sweep is None:
             sweep = "index"
 
         if sweep in _SWEEP_TYPES:
             source, default_label, default_unit = _SWEEP_TYPES[sweep]
+            # A sweep resolving through a gate role needs the electrode declared
+            # first, so this comes before the row check: without a mapping there is
+            # no row to look for. Derived from _SWEEP_REQUIRES via
+            # _ROLE_FOR_CURATED rather than listed again, so a new gate-backed
+            # sweep type inherits the requirement.
+            grounded = []
+            for name in _SWEEP_REQUIRES.get(sweep, ()):
+                role = _ROLE_FOR_CURATED.get(name)
+                if role is None:
+                    continue
+                self._require_role(role, f"{param}={sweep!r}")
+                if self._gates[role] is None:
+                    grounded.append(role)
+            if grounded:
+                raise ValueError(
+                    f"{param}={sweep!r} resolves through the "
+                    f"{', '.join(repr(r) for r in grounded)} electrode, which gates "
+                    f"declared as tied to ground — its voltage is zero at every "
+                    f"sweep point, so it is not an axis. Sweep the driven electrode "
+                    f"instead, or pass {param}=None."
+                )
             # Fail on the row the *declared* sweep needs, not on every curated
             # row: the requirement follows what the caller said was measured.
             for name in _SWEEP_REQUIRES.get(sweep, ()):
                 csv_label = self._curated[name][0]
                 if csv_label not in self.parameters:
+                    # A gate row is named through gates=, everything else through
+                    # curated_labels; point at whichever one applies.
+                    fix = (f"Re-declare it with gates={{'top': '<row>', "
+                           f"'bottom': '<row>'}}"
+                           if name in _GATE_CURATED else
+                           f"Pass curated_labels={{'{name}': '<row>'}}")
                     raise KeyError(
-                        f"sweep={sweep!r} needs the curated parameter '{name}' "
+                        f"{param}={sweep!r} needs the curated parameter '{name}' "
                         f"(row '{csv_label}'), which '{self.path}' does not "
                         f"contain. Available rows: {self.parameter_labels}. "
-                        f"Pass curated_labels={{'{name}': '<row>'}} if it is "
-                        f"under another name."
+                        f"{fix} if it is under another name."
                     )
             if sweep == "electric_field" and self.geometry is None:
                 raise ValueError(
-                    "sweep='electric_field' needs a DeviceGeometry to convert "
-                    "gate voltages into a field — pass geometry=. To sweep a "
-                    "raw gate voltage instead, use sweep='top_voltage' or "
-                    "'bottom_voltage'."
+                    f"{param}='electric_field' needs a DeviceGeometry to convert "
+                    f"gate voltages into a field — pass geometry=. To use a "
+                    f"raw gate voltage instead, use {param}='top_voltage' or "
+                    f"'bottom_voltage'."
                 )
+            # carrier_density sums over whichever gates the device declares, so its
+            # requirement is not a fixed row list and cannot live in
+            # _SWEEP_REQUIRES.  Checked here so it fails at load, like the rest.
+            if sweep == "carrier_density":
+                if self.geometry is None:
+                    raise ValueError(
+                        f"{param}='carrier_density' needs a DeviceGeometry for the "
+                        f"gate capacitance — pass geometry= with the hBN thickness "
+                        f"of each gate. To use a raw gate voltage instead, use "
+                        f"{param}='top_voltage' or 'bottom_voltage'."
+                    )
+                # Charge has to come from somewhere: a density is defined against
+                # the contact that supplies it, so the contact must be declared.
+                self._require_role("channel", f"{param}='carrier_density'")
+                for role in _GATE_ELECTRODES:
+                    if role in self._gates:
+                        self.geometry.gate_capacitance(role)
             kind = ("index", None) if source is None else ("curated", source)
             return (sweep, kind,
                     label if label is not None else default_label,
@@ -1033,7 +1694,7 @@ class _AttoCubeSweep:
                     unit  if unit  is not None else "")
 
         raise ValueError(
-            f"sweep={sweep!r} is neither a known sweep type nor a parameter row "
+            f"{param}={sweep!r} is neither a known sweep type nor a parameter row "
             f"in '{self.path}'.\n"
             f"  Sweep types : {sorted(_SWEEP_TYPES)}\n"
             f"  File rows   : {self.parameter_labels}"
@@ -1084,14 +1745,128 @@ class _AttoCubeSweep:
     # --- Curated parameter properties (scaled views into self.parameters) ---
 
     @property
+    def gates(self) -> dict:
+        """
+        Which parameter row reached each electrode, or ``None`` if undeclared.
+
+        As given to *gates* at load time, in canonical role order. The roles
+        present describe the device — ``{"top", "bottom"}`` a dual-gated stack,
+        ``{"bottom", "channel"}`` a bottom-gated one with a contacted TMDC — and a
+        value of ``None`` means that electrode is tied to ground with no parameter
+        row recording it.
+
+        ``None`` means the wiring was never stated, in which case :attr:`v_top`,
+        :attr:`v_bot`, :attr:`v_channel`, :attr:`ef` and the gate sweep types all
+        raise.
+        """
+        return dict(self._gates) if self._gates is not None else None
+
+    @property
+    def is_dual_gated(self) -> bool:
+        """
+        Whether *gates* declared both gate electrodes, so a field is defined.
+
+        ``False`` both for a single-gated device and for a scan whose wiring was
+        never declared — in neither case can :attr:`ef` be computed.
+        """
+        return (self._gates is not None
+                and all(role in self._gates for role in _GATE_ELECTRODES))
+
+    def _require_gates(self, what: str) -> None:
+        """Raise unless the electrode mapping was declared at all."""
+        if self._gates is not None:
+            return
+        raise ValueError(
+            f"{what} is defined per electrode, but which acquisition channel "
+            f"reached which electrode was not declared for '{self.path}'. The "
+            f"electrodes can be wired either way round and no export records "
+            f"which, so transposing them mirrors the field axis and flips the sign "
+            f"of any extracted dipole. Pass gates={{'top': '<row>', 'bottom': "
+            f"'<row>'}} for a dual-gated device, or gates={{'bottom': '<row>', "
+            f"'channel': '<row>'}} for a single-gated one; candidate rows in this "
+            f"file: {self._gate_candidates()}. To work in channel terms instead, "
+            f"read the row directly — scan['<row>'], or sweep='<row>' for an axis."
+        )
+
+    def _require_role(self, role: str, what: str) -> None:
+        """Raise unless *role* is one of the electrodes this device declared."""
+        self._require_gates(what)
+        if role in self._gates:
+            return
+        # The device does not have this electrode.  For a gate that means there is
+        # no gate-to-gate potential difference and so no displacement field; the
+        # single knob such a device has controls carrier density instead.
+        extra = (" A single-gated device has no gate-to-gate potential difference "
+                 "and so no displacement field: carrier density is the quantity "
+                 "it controls."
+                 if role in _GATE_ELECTRODES and not self.is_dual_gated else "")
+        raise ValueError(
+            f"{what} needs the {role!r} electrode, which '{self.path}' does not "
+            f"have: gates declared {sorted(self._gates)}.{extra}"
+        )
+
+    def _gate_value(self, role: str) -> np.ndarray:
+        """
+        The voltage on a declared electrode, in V.
+
+        A role declared as ``None`` is tied to ground with no row recording it, so
+        its voltage is zero at every sweep point — that is what the declaration
+        says, not an assumption about a missing row.
+        """
+        label = self._gates[role]
+        if label is None:
+            return np.zeros(self.n_sweeps)
+        attr = _GATE_ROLE_CURATED.get(role)
+        # Gate electrodes go through the curated registry so a curated_scales
+        # override still applies; the channel has no curated entry of its own.
+        return (self._curated_value(attr) if attr is not None
+                else self.get_parameter(label))
+
+    def _gate_candidates(self) -> list:
+        """
+        Rows that plausibly carry an electrode voltage, for the undeclared error.
+
+        The conventional gate rows first if this file has them, then any other row
+        that varied — a row held at a constant 0 V is a grounded electrode and
+        cannot be told from an unused channel, so it is not proposed.
+        """
+        varying = self.varying_parameters()
+        default = [self._CURATED[name][0] for name in _GATE_CURATED
+                   if self._CURATED[name][0] in self.parameters]
+        return default + [lbl for lbl in varying if lbl not in default]
+
+    @property
     def v_top(self) -> np.ndarray:
-        """Top gate voltage in V (per sweep)."""
-        return self._curated_value("v_top")
+        """
+        Top gate voltage in V (per sweep).
+
+        Raises ``ValueError`` unless *gates* declared a top gate and which row
+        reached it; see :attr:`gates`.
+        """
+        self._require_role("top", "v_top")
+        return self._gate_value("top")
 
     @property
     def v_bot(self) -> np.ndarray:
-        """Bottom gate voltage in V (per sweep)."""
-        return self._curated_value("v_bot")
+        """
+        Bottom gate voltage in V (per sweep).
+
+        Raises ``ValueError`` unless *gates* declared a bottom gate and which row
+        reached it; see :attr:`gates`.
+        """
+        self._require_role("bottom", "v_bot")
+        return self._gate_value("bottom")
+
+    @property
+    def v_channel(self) -> np.ndarray:
+        """
+        Voltage on the contact to the TMDC itself, in V (per sweep).
+
+        Zero throughout for a grounded channel, which is the usual case. Raises
+        ``ValueError`` unless *gates* declared a ``"channel"`` role.
+        """
+        self._require_role("channel", "v_channel")
+        return self._gate_value("channel")
 
     @property
     def power(self) -> np.ndarray:
@@ -1110,12 +1885,12 @@ class _AttoCubeSweep:
 
     @property
     def scanner_x(self) -> np.ndarray:
-        """Sample-stage X position in µm (per sweep). Unit assumed; see _CURATED."""
+        """Piezo scanner X drive voltage in V (per sweep), not a distance."""
         return self._curated_value("scanner_x")
 
     @property
     def scanner_y(self) -> np.ndarray:
-        """Sample-stage Y position in µm (per sweep). Unit assumed; see _CURATED."""
+        """Piezo scanner Y drive voltage in V (per sweep), not a distance."""
         return self._curated_value("scanner_y")
 
     @property
@@ -1124,10 +1899,64 @@ class _AttoCubeSweep:
         Displacement field in mV/nm (per sweep), or ``None`` if no
         :class:`DeviceGeometry` was supplied.  Computed from the curated
         :attr:`v_top` / :attr:`v_bot`.
+
+        Raises ``ValueError`` when a geometry *was* supplied but the device is not
+        :attr:`is_dual_gated` — an undeclared wiring leaves the field's sign
+        undefined, and a single gate has no field at all. Saying no field was
+        computed needs neither, so the ungated case still returns ``None``.
         """
         if self.geometry is None:
             return None
+        # Named explicitly so the error says "ef", not "v_top" — the caller asked
+        # for a field and the reason it cannot have one is about the device.
+        for role in _GATE_ELECTRODES:
+            self._require_role(role, "ef")
         return self.geometry.electric_field(self.v_top, self.v_bot)
+
+    @property
+    def carrier_density(self) -> np.ndarray:
+        """
+        Gate-induced sheet carrier density in cm⁻² (per sweep), or ``None`` if no
+        :class:`DeviceGeometry` was supplied.
+
+        Summed over the gate electrodes *gates* declared, referenced to zero gate
+        voltage — so this is the density induced **relative to 0 V**, not an
+        absolute density, which needs a threshold no instrument file records. Call
+        :meth:`DeviceGeometry.carrier_density` directly with *v_ref* to reference it
+        elsewhere, or to a measured threshold.
+
+        Raises ``ValueError`` unless *gates* declared a ``"channel"`` role: a
+        density is defined against the contact that supplies the charge. Warns when
+        that contact's row varies across the sweep, since the reference then moves
+        with the axis and is not accounted for.
+        """
+        if self.geometry is None:
+            return None
+        self._require_role("channel", "carrier_density")
+
+        # The density is referenced to the contact, so a contact that is itself
+        # being driven moves the reference under the axis.  Legitimate for a
+        # source-drain bias measurement, wrong for a doping sweep, and the file
+        # cannot tell which — so say what was seen rather than pick.
+        channel_row = self._gates["channel"]
+        if channel_row is not None and channel_row in self.varying_parameters():
+            span = float(np.ptp(self.parameters[channel_row]))
+            warnings.warn(
+                f"carrier_density references the channel contact, but its row "
+                f"'{channel_row}' varies by {span:.4g} V across the sweep, so the "
+                f"reference moves with the axis. The returned density is relative "
+                f"to 0 V on the gates alone and does not account for it. Expected "
+                f"for a source-drain bias; for a doping sweep the channel should "
+                f"be at a fixed potential.",
+                UserWarning, stacklevel=2,
+            )
+
+        # One kwarg per declared gate, keyed by the same v_top / v_bot names
+        # DeviceGeometry takes; a gate the device lacks is left out of the sum
+        # rather than passed as zero.
+        volts = {_GATE_ROLE_CURATED[role]: self._gate_value(role)
+                 for role in _GATE_ELECTRODES if role in self._gates}
+        return self.geometry.carrier_density(**volts)
 
     @property
     def curated_parameters(self) -> dict:
@@ -1180,7 +2009,11 @@ class _AttoCubeSweep:
         sweep returns ``arange(n_sweeps)`` — never a guess at which parameter was
         meant.  See :meth:`varying_parameters`.
         """
-        kind, name = self._sweep_source
+        return self._axis_for_source(self._sweep_source)
+
+    def _axis_for_source(self, source: tuple) -> np.ndarray:
+        """Read the ``(n_sweeps,)`` array a ``(kind, name)`` source points at."""
+        kind, name = source
         if kind == "index":
             return np.arange(self.n_sweeps, dtype=float)
         if kind == "row":
@@ -1204,12 +2037,336 @@ class _AttoCubeSweep:
         """Unit of :attr:`sweep_axis`; empty when the file does not state one."""
         return self._sweep_unit
 
+    # --- The declared nest ---------------------------------------------------
+
+    @property
+    def nesting(self) -> SweepNesting:
+        """
+        The declared 2-D nest, or ``None`` when the sweep is flat.
+
+        Carries both coordinate axes with their labels and units.  A nest is
+        declared with ``fast_sweep=`` and ``slow_sweep=`` at load time and is
+        never inferred; :meth:`sweep_grid` reports what a file looks like it
+        contains, which is the diagnostic for deciding what to declare.
+        """
+        return self._nesting
+
+    @property
+    def is_nested(self) -> bool:
+        """Whether a 2-D nest was declared — the predicate :meth:`as_grid` needs."""
+        return self._nesting is not None
+
+    def as_grid(self, array: np.ndarray) -> np.ndarray:
+        """
+        Reshape a flat-sweep array onto the declared nest.
+
+        Parameters
+        ----------
+        array : np.ndarray
+            Either a signal array of shape ``(n_points, n_sweeps)`` — the spectra,
+            any corrected variant of them, the decays — or a per-sweep-point row
+            of shape ``(n_sweeps,)``, such as anything from :attr:`parameters`.
+
+        Returns
+        -------
+        np.ndarray
+            ``(n_points, n_slow, n_fast)`` for a signal array,
+            ``(n_slow, n_fast)`` for a per-point row.  The fast axis is last,
+            because the sweep was written with it running fastest.
+
+        Raises
+        ------
+        ValueError
+            If no nest was declared, or if *array* does not have ``n_sweeps`` as
+            its trailing dimension.
+
+        Notes
+        -----
+        A **view**, not a copy: the flat sweep is already in the right memory
+        order, so nothing moves.  It therefore shares storage with the array it
+        came from, and the never-mutate-after-load rule reaches it.
+
+        Examples
+        --------
+        >>> cube = scan.as_grid(scan.spectra)            # doctest: +SKIP
+        >>> cube.shape                                   # doctest: +SKIP
+        (1340, 51, 41)
+        >>> scan.as_grid(scan["Scanner X"]).shape        # doctest: +SKIP
+        (51, 41)
+        """
+        nest  = self._require_nesting("as_grid()")
+        array = np.asarray(array)
+        n     = self.n_sweeps
+
+        if array.ndim not in (1, 2) or array.shape[-1] != n:
+            raise ValueError(
+                f"as_grid() takes an array whose last axis is the {n} sweep "
+                f"points — either (n_points, {n}) or ({n},) — and got shape "
+                f"{array.shape}. An array indexed some other way has no nest to "
+                f"be put onto."
+            )
+        return array.reshape(array.shape[:-1] + nest.shape)
+
+    # --- Locating a sweep point ----------------------------------------------
+
+    def _lookup_axis(self, axis: str) -> tuple:
+        """
+        Return ``(values, label, unit)`` for an axis name.
+
+        ``"sweep"`` is the declared sweep axis; ``"fast"`` and ``"slow"`` are the
+        nest coordinates.  Anything else resolves the way ``sweep=`` does — a
+        registry key or a raw row label — so any per-sweep-point quantity can be
+        looked up, whether or not it is what the sweep was declared with.
+        """
+        if axis == "sweep":
+            return self.sweep_axis, self.sweep_label, self.sweep_unit
+        if axis in ("fast", "slow"):
+            nest = self._require_nesting(f"axis={axis!r}")
+            return (getattr(nest, f"{axis}_axis"),
+                    getattr(nest, f"{axis}_label"),
+                    getattr(nest, f"{axis}_unit"))
+        try:
+            _, source, label, unit = self._resolve_sweep(
+                axis, None, None, param="axis")
+        except ValueError as exc:
+            raise ValueError(
+                f"{exc}\n  Also accepted : 'sweep' (the declared sweep axis), "
+                f"'fast' and 'slow' (the nest coordinates)."
+            ) from None
+        return self._axis_for_source(source), label, unit
+
+    def nearest_index(self, value: float, axis: str = "sweep") -> int:
+        """
+        Position along *axis* of the point closest to *value*.
+
+        Parameters
+        ----------
+        value : float
+            The coordinate wanted, in the axis's own units.
+        axis : str
+            Which axis to search.  ``"sweep"`` is the flat sweep axis, so the
+            result indexes the columns of :attr:`spectra` directly.  ``"fast"``
+            and ``"slow"`` are the nest coordinates and need a declared nest.
+            Any other name is a quantity to search *instead* of the declared
+            axis, spelled as ``sweep=`` spells it — a registry key such as
+            ``"top_voltage"`` or ``"power"``, or a raw row label such as
+            ``"V_A"``.  Useful when a sweep is declared in one coordinate and
+            you want to locate a point by another: a field sweep driven by both
+            gates at a fixed ratio can be searched by ``"top_voltage"``.
+
+        Returns
+        -------
+        int
+            An index into that axis — always a single position, never a set.
+
+        Warns
+        -----
+        UserWarning
+            When the closest point is further than half the axis's median step
+            from *value*.  A nearest-value lookup cannot fail, so asking for a
+            coordinate the scan does not hold returns a real spectrum from
+            somewhere else; the warning names what was asked for and what was
+            used.  A request landing between two real points is silent.
+        UserWarning
+            When the value found occurs at more than one sweep point, so the
+            request does not identify one.  Only a quantity that changes
+            monotonically along the sweep is guaranteed not to: a hysteresis
+            loop passes the same gate voltage twice.
+        """
+        idx, values, label, unit, matches = self._nearest(value, axis, depth=4)
+        if matches.size > 1:
+            warnings.warn(
+                f"{label} holds {float(values[idx]):.6g}"
+                f"{f' {unit}' if unit else ''} at {_render_indices(matches)}, so "
+                f"looking it up by value does not identify one; using index "
+                f"{idx}. Address these by index, or search a quantity that "
+                f"changes monotonically along the sweep.",
+                UserWarning, stacklevel=3,
+            )
+        return idx
+
+    def _nearest(self, value: float, axis: str, depth: int = 3) -> tuple:
+        """
+        Locate *value* on *axis*, warning when nothing lies near it.
+
+        Returns ``(idx, values, label, unit, matches)``, *matches* being every
+        index sharing the coordinate found — one element when the lookup is
+        unambiguous.  What to do about more than one is the caller's policy:
+        :meth:`nearest_index` warns because a single index is its whole contract,
+        while an accessor returning spectra refuses, since dropping all but one
+        of them would be a silent partial answer.
+        """
+        values, label, unit = self._lookup_axis(axis)
+        value = float(value)
+
+        # inf where the axis is not finite, so a NaN row cannot win the argmin.
+        distance = np.where(np.isfinite(values), np.abs(values - value), np.inf)
+        if not np.isfinite(distance).any():
+            raise ValueError(
+                f"The {axis!r} axis holds no finite values, so there is no "
+                f"nearest point to {value:.6g}."
+            )
+        idx   = int(np.argmin(distance))
+        found = float(values[idx])
+
+        finite = values[np.isfinite(values)]
+        step   = (float(np.median(np.abs(np.diff(np.sort(finite)))))
+                  if finite.size > 1 else 0.0)
+        suffix = f" {unit}" if unit else ""
+
+        if abs(found - value) > 0.5 * step:
+            warnings.warn(
+                f"Looking up {value:.6g}{suffix} on {label} (axis={axis!r}) found "
+                f"no point there; using index {idx} at {found:.6g}{suffix}, which "
+                f"is {abs(found - value):.6g}{suffix} away. The axis spans "
+                f"{finite.min():.6g} to {finite.max():.6g}{suffix} in "
+                f"{finite.size} points.",
+                UserWarning, stacklevel=depth,
+            )
+
+        # A quantity that is not what the sweep was ordered by need not label its
+        # points individually — a hysteresis loop passes the same gate voltage
+        # twice, and every quantity of a nest repeats.  Compared on the
+        # *coordinate* rather than the distance, so a request landing midway
+        # between two distinct points is not a tie.
+        matches = np.flatnonzero(np.abs(values - found) <= _axis_atol(values))
+        return idx, values, label, unit, matches
+
+    def _index_for_value(self, value: float, axis: str, what: str) -> int:
+        """
+        Locate *value* on *axis*, refusing when it does not identify one point.
+
+        The accessors' policy.  Where :meth:`nearest_index` owes the caller an
+        integer and can only warn, an accessor has a complete answer to point at:
+        a declared nest addresses every match at once through ``fast=`` / ``slow=``.
+        """
+        idx, values, label, unit, matches = self._nearest(value, axis, depth=5)
+        if matches.size == 1:
+            return idx
+
+        grid = self.sweep_grid()
+        if grid is not None:
+            fix = (f" This file looks like {grid} — declare it with "
+                   f"fast_sweep='{grid.fast_label}', slow_sweep='{grid.slow_label}', "
+                   f"and fast= / slow= then return every spectrum at a coordinate "
+                   f"rather than one of them.")
+        else:
+            fix = (" If these points are a nest, declare it with fast_sweep= and "
+                   "slow_sweep=, and address it with fast= / slow=.")
+        raise ValueError(
+            f"{what}: {label} holds {float(values[idx]):.6g}"
+            f"{f' {unit}' if unit else ''} at {_render_indices(matches)}, so it "
+            f"does not identify one spectrum.{fix} To take a single one of them, "
+            f"use get_spectrum_by_index()."
+        )
+
+    def _positional_index(self, index, axis: str, length: int) -> int:
+        """Validate an integer position, accepting Python-style negatives."""
+        try:
+            index = int(index)
+        except (TypeError, ValueError):
+            raise TypeError(
+                f"A {axis!r} index must be an integer, got {index!r}. To look up "
+                f"by value instead, use the *_at accessor."
+            ) from None
+        if not -length <= index < length:
+            raise IndexError(
+                f"{axis!r} index {index} is out of range for {length} points."
+            )
+        return index % length
+
+    def _sweep_selector(self, value=None, *, axis: str = "sweep",
+                        fast=None, slow=None, by_value: bool, what: str):
+        """
+        Resolve a point request into an ``int`` or ``slice`` over the sweep axis.
+
+        An ``int`` drops the sweep dimension, a ``slice`` keeps it — and both are
+        basic indexing, so the signal array is viewed rather than copied.  For a
+        nest, pinning the slow axis takes one contiguous run of columns while
+        pinning the fast axis strides across every run.
+        """
+        # By value the accessors refuse an ambiguous coordinate rather than
+        # returning one of the points it names; see _index_for_value.
+        locate = ((lambda v, ax: self._index_for_value(v, ax, what)) if by_value
+                  else (lambda v, ax: self._positional_index(
+                      v, ax, len(self._lookup_axis(ax)[0]))))
+        arg = "value" if by_value else "index"
+
+        # axis= says what the positional argument is read against, so it is an
+        # alternative to naming the nest axes rather than a modifier of them.
+        if axis != "sweep" and (fast is not None or slow is not None):
+            raise ValueError(
+                f"{what}: axis={axis!r} names the quantity the positional {arg} "
+                f"is read against, so it cannot be combined with fast= or "
+                f"slow=. To address a nest by another quantity, declare the nest "
+                f"in it: fast_sweep={axis!r}."
+            )
+
+        if not self.is_nested:
+            if fast is not None or slow is not None:
+                raise ValueError(
+                    f"{what}: fast= and slow= need a declared nest, and this "
+                    f"sweep is flat ({self.n_sweeps} points). Give the {arg} "
+                    f"positionally to index the sweep axis, or declare the nest "
+                    f"with fast_sweep= and slow_sweep= at load time."
+                )
+            if value is None:
+                raise ValueError(f"{what} needs a {arg}.")
+            return locate(value, axis)
+
+        nest = self._nesting
+        if value is not None:
+            raise ValueError(
+                f"{what}: this sweep is a declared nest ({nest}), so a single "
+                f"{arg} does not locate a point. Name the axes: fast= and/or "
+                f"slow=."
+            )
+        if fast is None and slow is None:
+            raise ValueError(
+                f"{what}: name fast= and/or slow=. Naming both gives one "
+                f"spectrum, naming one gives the line of spectra along the "
+                f"other. For the whole grid at once, use as_grid()."
+            )
+
+        n_fast = nest.n_fast
+        if fast is not None and slow is not None:
+            return locate(slow, "slow") * n_fast + locate(fast, "fast")
+        if slow is not None:
+            start = locate(slow, "slow") * n_fast
+            return slice(start, start + n_fast)
+        return slice(locate(fast, "fast"), None, n_fast)
+
+    def _require_nesting(self, what: str) -> SweepNesting:
+        """Return the nest, or raise naming what needed it."""
+        if self._nesting is None:
+            detected = self.sweep_grid()
+            hint = (f" This file looks like {detected}; declare it with "
+                    f"fast_sweep= and slow_sweep=."
+                    if detected is not None else
+                    " Declare one with fast_sweep= and slow_sweep= at load time.")
+            raise ValueError(
+                f"{what} needs a declared nest, and this sweep is flat "
+                f"({self.n_sweeps} points).{hint}"
+            )
+        return self._nesting
+
     # --- What the measurement is -------------------------------------------
 
     @property
     def signal_name(self) -> str:
         """Name of the measured signal, from :attr:`spectra_type`."""
         return SIGNAL_LABELS[self.spectra_type][0]
+
+    @property
+    def signal_unit(self) -> str:
+        """
+        Native unit of :attr:`signal_name`; empty for dimensionless ratios.
+
+        Exposed separately from :attr:`signal_label` so a caller that rescales
+        the data can substitute its own unit rather than parse one out of a
+        composed string.
+        """
+        return SIGNAL_LABELS[self.spectra_type][1]
 
     @property
     def signal_label(self) -> str:
@@ -1234,9 +2391,11 @@ class _AttoCubeSweep:
         Report which parameter rows actually changed across the sweep.
 
         Evidence for choosing a *sweep*, and the check for "was only one gate
-        driven?".  A row counts as varying when its span exceeds *rtol* times
-        its own mean magnitude, so instrument read-back jitter on a nominally
-        static channel does not register.
+        driven?".  A row counts as varying when its span exceeds *rtol* times its
+        own RMS magnitude, so instrument read-back jitter on a nominally static
+        channel does not register.  RMS rather than mean, so that a row straddling
+        zero — an anti-symmetric gate pair, say — is measured by how large it is
+        rather than by how nearly it cancels.
 
         Parameters
         ----------
@@ -1246,18 +2405,18 @@ class _AttoCubeSweep:
         Returns
         -------
         dict
-            ``label -> (min, max, span)``, ordered by *relative* span,
+            ``label -> (min, max, span)``, ordered by span relative to RMS,
             largest first.
 
         Notes
         -----
         The ordering ranks how much a channel moved relative to its own
         magnitude; it does **not** identify the swept quantity, and should not be
-        read as doing so. A near-zero-mean channel outranks the real sweep axis
-        for exactly that reason — on the example reflectance raster the leakage
-        currents ``I_A``/``I_B`` (means ~1e-13 A) come above ``Scanner X``/``Y``.
-        This returns the evidence; which axis was swept is the caller's to
-        declare via ``sweep=``.
+        read as doing so.  A small channel that swings across its whole range —
+        a leakage current, or a gate driven symmetrically about zero — outranks a
+        large one stepped through part of its range, however clearly the second
+        is the axis of the experiment.  This returns the evidence; which axis was
+        swept is the caller's to declare via ``sweep=``.
 
         Examples
         --------
@@ -1272,7 +2431,18 @@ class _AttoCubeSweep:
             span  = float(np.ptp(finite))
             # Relative to the row's own magnitude: a 1 mV wobble on a 10 V gate
             # is noise, the same wobble on a 2 mV channel is a sweep.
-            scale = max(abs(float(np.mean(finite))), np.finfo(float).tiny)
+            #
+            # RMS rather than |mean|, because a row can sit astride zero — an
+            # anti-symmetric gate pair sweeping the field does, and is routine —
+            # and its mean is then no measure of how large it is.  Flooring a
+            # vanishing mean at finfo.tiny turned the division by zero into a
+            # division by 2.2e-308, i.e. into inf.  RMS cannot vanish unless the
+            # row is identically zero, which a zero span already excludes; the
+            # floor below is belt and braces.  The threshold uses the same scale
+            # as the ranking, so the two cannot disagree about what is noise.
+            scale = max(float(np.sqrt(np.mean(finite ** 2))),
+                        np.finfo(float).tiny)
+            # Checks if span of the data is bigger than the defined jitter threshold
             if span > rtol * scale:
                 found.append((span / scale, label,
                               (float(finite.min()), float(finite.max()), span)))
@@ -1284,29 +2454,56 @@ class _AttoCubeSweep:
         """
         How the gates were driven, read off the data.
 
-        ``None`` when the curated gate rows are absent from the file.  Purely
-        descriptive: the correlation sign distinguishes an anti-symmetric
-        (field-like) sweep from a symmetric (doping-like) one, but which physical
-        electrode each channel drove is per-session wiring that no file records
-        — see :meth:`DeviceGeometry.electric_field`.
+        ``None`` when no gate row is available to look at.  Purely descriptive:
+        the correlation sign distinguishes an anti-symmetric (field-like) sweep
+        from a symmetric (doping-like) one.
+
+        Never raises, and never needs *gates*: how many channels moved together is
+        a property of the data, and the correlation is symmetric in the two rows,
+        so the verdict is unchanged by transposing them. Only the wording differs —
+        with a declared mapping a single driven gate is named by its role
+        (``"bottom-gate only"``), and without one by its channel
+        (``"single gate driven ('V_B')"``), because which electrode that channel
+        reached is not in the file.
+
+        A single-gated device reports on its one gate; the channel contact is not
+        a gate and is not included.
         """
-        labels = [self._curated[n][0] for n in ("v_top", "v_bot")]
-        if any(lbl not in self.parameters for lbl in labels):
+        # Read the rows straight from the store rather than through v_top / v_bot,
+        # which require a declared mapping this property deliberately does without.
+        # A grounded electrode (declared None) has no row and cannot be described.
+        if self._gates is not None:
+            rows = {role: self._gates[role] for role in _GATE_ELECTRODES
+                    if self._gates.get(role) is not None}
+        else:
+            rows = {role: self._CURATED[attr][0]
+                    for role, attr in _GATE_ROLE_CURATED.items()}
+        rows = {role: lbl for role, lbl in rows.items() if lbl in self.parameters}
+        if not rows:
             return None
 
         varying = self.varying_parameters()
-        top_var, bot_var = (lbl in varying for lbl in labels)
+        driven  = [role for role, lbl in rows.items() if lbl in varying]
 
-        if not (top_var or bot_var):
+        if not driven:
             return "gates static"
-        if top_var and not bot_var:
-            return "top-gate only"
-        if bot_var and not top_var:
-            return "bottom-gate only"
+
+        # One gate available or one gate driven: describe that gate alone.  Naming
+        # its role needs the declaration; without one, name the channel, which is
+        # true whatever the wiring.
+        if len(rows) == 1 or len(driven) == 1:
+            role = driven[0]
+            if self._gates is None:
+                return f"single gate driven ('{rows[role]}')"
+            return f"{role}-gate only"
 
         if self.n_sweeps < 3:
             return "dual-gate"
-        r = float(np.corrcoef(self.v_top, self.v_bot)[0, 1])
+        first, second = (rows[role] for role in driven[:2])
+        # Pearson coefficient of the two gate channels.  [0, 1] is the cross term;
+        # it is symmetric in the two, so the sign does not depend on the wiring.
+        r = float(np.corrcoef(self.parameters[first],
+                              self.parameters[second])[0, 1])
         if r < -0.95:
             return "dual-gate, anti-correlated (field-like)"
         if r > 0.95:
@@ -1330,30 +2527,48 @@ class _AttoCubeSweep:
         Returns
         -------
         SweepGrid or None
-            ``(inner_label, n_inner, outer_label, n_outer)``, inner being the
-            fast axis.  ``None`` when the sweep is not a raster — which is the
-            normal case for a gate or power sweep.
+            ``(fast_label, n_fast, slow_label, n_slow)``.  ``None`` when the
+            sweep is not a raster — the normal case for a gate or power sweep.
+
+        See Also
+        --------
+        nesting : the nest actually declared, which is what reshaping uses.
+
+        Notes
+        -----
+        Reports; does not decide.  Both axes are looked for among the raw
+        parameter rows, so a nest whose axis is a *derived* quantity — an
+        anti-symmetric gate pair sweeping the field, say — is reported through
+        the channels that carry it rather than through the field.  Declare the
+        nest with ``fast_sweep=`` / ``slow_sweep=``, which accept the same
+        vocabulary as ``sweep=``.
         """
         n = self.n_sweeps
-        if n < 4:
+        if n < 4: # Checks if less than 4 points -- not a grid sweep
             return None
 
         counts = {}
         for label in self.varying_parameters(rtol=rtol):
             arr = self.parameters[label]
+            # Find finite values, then find unique values, then count the unique values
             n_unique = np.unique(arr[np.isfinite(arr)]).size
             if 1 < n_unique < n:
+                # If n_unique is more than 1 but less than n, it could be a sweep grid
                 counts[label] = n_unique
 
-        for inner, n_inner in counts.items():
-            for outer, n_outer in counts.items():
-                if inner == outer or n_inner * n_outer != n:
+        for fast, n_fast in counts.items():
+            for slow, n_slow in counts.items():
+                if fast == slow or n_fast * n_slow != n:
+                    # Same row twice, or the two counts do not account for every
+                    # sweep point: not this pair.
                     continue
-                values = self.parameters[inner]
+                values = self.parameters[fast]
                 # The fast axis runs through all its values, then starts over.
-                if (np.unique(values[:n_inner]).size == n_inner
-                        and np.isclose(values[0], values[n_inner])):
-                    return SweepGrid(inner, n_inner, outer, n_outer)
+                # The first n_fast values holding every distinct value with no
+                # repeat, and value n_fast returning to the first, is that.
+                if (np.unique(values[:n_fast]).size == n_fast
+                        and np.isclose(values[0], values[n_fast])):
+                    return SweepGrid(fast, n_fast, slow, n_slow)
         return None
 
     # --- Export ------------------------------------------------------------
@@ -1384,7 +2599,9 @@ class _AttoCubeSweep:
     # --- Dunder methods ----------------------------------------------------
 
     def __getitem__(self, label: str) -> np.ndarray:
-        """Sugar for :meth:`get_parameter` — ``scan["Galvo_X"]``."""
+        """Sugar for :meth:`get_parameter`.
+        Makes scan.get_parameter('V_A') equivalent to scan['V_A'].
+        """
         return self.get_parameter(label)
 
     def _repr_axis_lines(self, w: int) -> list:
@@ -1419,17 +2636,29 @@ class _AttoCubeSweep:
 
         # Gate wiring is per-session and unrecorded, so state which row was read
         # as which gate: transposing them flips the sign of any extracted dipole.
+        # Undeclared, say so here rather than anywhere else — this is where someone
+        # looks after loading, and the failure being guarded against is a plot that
+        # looks entirely normal.
         if self.gate_mode is not None:
-            lines.append(
-                f"  {'Gates':<{w}}: {self.gate_mode}  "
-                f"(top ← '{self._curated['v_top'][0]}', "
-                f"bottom ← '{self._curated['v_bot'][0]}')"
-            )
+            if self._gates is not None:
+                # Every declared role, so the device topology is visible too: a
+                # missing 'top' is what makes this a single-gated device.
+                wiring = "(" + ", ".join(
+                    f"{role} ← " + ("grounded" if lbl is None else f"'{lbl}'")
+                    for role, lbl in self._gates.items()
+                ) + ")"
+            else:
+                wiring = ("— wiring not declared; pass "
+                          "gates={'top': ..., 'bottom': ...} for v_top/v_bot/E_F")
+            lines.append(f"  {'Gates':<{w}}: {self.gate_mode}  {wiring}")
 
         # Context the sweep axis does not already show; skip E_F when the field
-        # *is* the swept axis, which the Sweep line has just reported.
+        # *is* the swept axis, which the Sweep line has just reported, and when the
+        # device cannot define one — an undeclared wiring leaves its sign undefined,
+        # a single gate leaves it undefined outright.  A repr must render whatever
+        # state the object is in.
         extra = [("Power", self._curated_or_none("power"), "µW")]
-        if self.sweep_type != "electric_field":
+        if self.sweep_type != "electric_field" and self.is_dual_gated:
             extra.append(("E_F", self.ef, "mV/nm"))
         for label, arr, unit in extra:
             if arr is not None:
@@ -1441,9 +2670,19 @@ class _AttoCubeSweep:
         if varying:
             lines.append(f"  {'Varying':<{w}}: {', '.join(varying)}")
 
-        grid = self.sweep_grid()
-        if grid is not None:
-            lines.append(f"  {'Grid':<{w}}: {grid}")
+        # A declared nest is a fact about the scan; a detected one is only a
+        # reading of the rows, so say which of the two this is.  Same split as
+        # the gate wiring above.
+        if self._nesting is not None:
+            lines.append(f"  {'Nesting':<{w}}: {self._nesting}")
+        else:
+            grid = self.sweep_grid()
+            if grid is not None:
+                lines.append(
+                    f"  {'Grid':<{w}}: {grid}  — detected, not declared; pass "
+                    f"fast_sweep='{grid.fast_label}', "
+                    f"slow_sweep='{grid.slow_label}'"
+                )
 
         if self.n_declared_sweeps != self.n_sweeps:
             lines.append(
@@ -1458,11 +2697,21 @@ class _AttoCubeSweep:
 # AttoCubeSpectralSweep
 # ---------------------------------------------------------------------------
 
+# Accepted keys of the `cosmic_rays=` declaration, read off the function they are
+# forwarded to so the two cannot drift apart as that signature grows.  `spectra`
+# is the array being loaded and `axis` is fixed by this class's
+# (n_pixels, n_sweeps) convention, so neither is the caller's to set — passing an
+# axis would transpose the detection without changing the stored shape.
+_COSMIC_RAY_KEYS = frozenset(
+    inspect.signature(processing.remove_cosmic_rays).parameters
+) - {"spectra", "axis"}
+
+
 class AttoCubeSpectralSweep(_AttoCubeSweep):
     """
     A sweep of spectra from the AttoCube cryogenic confocal.
 
-    One spectrum per sweep point, over *any* scanned parameter — displacement
+    One spectrum per sweep point, over any scanned parameter — displacement
     field, a single gate, excitation power, sample position, or a raw
     instrument channel.  What was measured (:attr:`spectra_type`) and what was
     swept (:attr:`sweep_type`) are recorded metadata rather than assumptions
@@ -1472,7 +2721,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     Two input formats, dispatched on the file suffix:
 
     * ``.csv`` — the raw AttoCube export.  The **first column** is a row label
-      (e.g. ``"V_A"``), every **sweep point** occupies four consecutive columns
+      (e.g. ``"V_A"``, ``V_B``), every **sweep point** occupies four consecutive columns
       ``[Par, Wavelength, ExpROI1, ExpROI2]``, and the file is padded with
       empty columns beyond the last sweep point.
     * ``.h5`` / ``.hdf5`` — written by :meth:`to_hdf5`.  Carries the parameter
@@ -1494,7 +2743,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     spectra_type : str
         What the spectra *are*, one of
         :data:`~tmdc_optics_tools.constants.SPECTROSCOPY_TYPES`
-        (``"PL"``, ``"R"``, ``"RC"``, ``"T"``, ``"A"``, ``"Raman"``, ``"TRPL"``).
+        (``"PL"``, ``"R"``, ``"RC"``, ``"T"``, ``"A"``, ``"TRPL"``).
         Required for CSV input; optional when reading HDF5, where it is taken
         from the file unless given (a mismatch warns and the argument wins).
         Keyword-only and deliberately without a default: the value is written
@@ -1502,12 +2751,13 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         the session that made it.
     sweep : str, optional
         What was scanned.  Either a key of :data:`_SWEEP_TYPES`
-        (``"electric_field"``, ``"top_voltage"``, ``"bottom_voltage"``,
-        ``"power"``, ``"position_x"``, ``"position_y"``) or any raw CSV row
+        (``"electric_field"``, ``"carrier_density"``, ``"top_voltage"``,
+        ``"bottom_voltage"``, ``"power"``, ``"piezo_x"``, ``"piezo_y"``) or any raw CSV row
         label (``"Galvo_Y"``, ``"T"``, …), which is then used in its file
         units.  ``None`` (default) means **no axis is assumed**: the sweep axis
-        becomes the sweep index.  Use :meth:`varying_parameters` to see which
-        rows actually changed before committing to one.
+        becomes the sweep index (for sweep of length N, [1,2,3,…,N]).  Use :meth:`varying_parameters` to see which
+        rows actually changed before committing to one.  The three gate sweeps
+        name a physical electrode, so they also need *gates*.
     sweep_label, sweep_unit : str, optional
         Override the axis label / unit for the resolved sweep.  Needed mainly
         for raw-row sweeps, whose units the file does not state.
@@ -1515,6 +2765,20 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Device geometry used to convert gate voltages to a displacement field.
         Without it :attr:`ef` is ``None``, and ``sweep="electric_field"``
         raises.
+    cosmic_rays : dict, optional
+        Opts into cosmic-ray repair, and carries the keyword arguments forwarded
+        to :func:`~tmdc_optics_tools.processing.remove_cosmic_rays` — e.g.
+        ``{"sigma_threshold": 4.0}``, or ``{}`` to accept that function's
+        defaults.  ``None`` (default) leaves the counts alone.  An unknown key
+        raises; ``spectra`` and ``axis`` are not accepted, being the array this
+        loader read and the axis convention it stores it in.
+
+        Runs in wavelength space and **before every other correction**, so it
+        feeds each array below: a spike inside the *bg_region* window would
+        otherwise bias the pedestal estimate, and a spike in either array of a
+        contrast biases the ratio non-linearly.  :attr:`spectra` is left as the
+        file wrote it — the repaired counts are :attr:`spectra_cr` and the pixels
+        replaced are :attr:`cosmic_ray_mask`.
     bg_region_nm : tuple of (wl_min, wl_max), optional
         Wavelength range in **nm** used to estimate the background level.
         The mean counts in this window are subtracted from every sweep
@@ -1556,10 +2820,42 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         ``False``: it redistributes spectral weight, so it is opt-in, and peak
         *positions* do not need it.  It is **never** applied to
         :attr:`energy_contrast`: the factor cancels identically in a ratio.
+        Warns when ``True`` and no background was supplied — neither
+        *bg_region_nm* / *bg_region_eV* nor *bg_spectrum* — because the λ²
+        factor scales a dark pedestal into a curved baseline instead of
+        leaving it a flat offset.
+    gates : dict, optional
+        Which parameter row reached each electrode.  The roles *present* describe
+        the device, so this declares its topology as well as its wiring:
+
+        - ``{"top": "V_A", "bottom": "V_B"}`` — dual-gated. :attr:`ef` available.
+        - ``{"bottom": "V_A", "channel": "V_B"}`` — bottom-gated with a contact to
+          the TMDC. One gate is one degree of freedom, so there is no independent
+          field: :attr:`v_top` and :attr:`ef` raise.
+
+        ``"top"`` and ``"bottom"`` are gate electrodes across a dielectric;
+        ``"channel"`` is a contact to the TMDC itself, the ground reference of a
+        doping measurement.  A value of ``None`` means that electrode is tied to
+        ground and no row records it, giving zero at every sweep point.  At least
+        one gate is required, and a lone gate must be accompanied by its
+        ``"channel"`` — one gate with a floating TMDC defines neither a field nor a
+        density, so the declaration would be ambiguous rather than informative.
+
+        The electrodes can be wired either way round and no export records which
+        way, so this is per-session information the file cannot supply.  Without
+        it, :attr:`v_top`, :attr:`v_bot`, :attr:`v_channel`, :attr:`ef` and
+        ``sweep="electric_field"`` / ``"top_voltage"`` / ``"bottom_voltage"`` all
+        raise rather than assume one: transposing two gates mirrors the field axis
+        and flips the sign of any extracted dipole.  Work in channel terms with
+        ``scan["V_A"]`` or ``sweep="V_A"`` if the roles are not needed.
+
+        Recorded on the scan (:attr:`gates`), shown in :func:`repr`, and written
+        into exported HDF5.
     curated_labels : dict, optional
         Override which CSV row backs a curated attribute, e.g.
-        ``{"v_top": "V_B", "v_bot": "V_A"}`` for the opposite gate wiring.
-        Keys are :attr:`_CURATED` names; unknown keys raise.
+        ``{"power": "Laser Power"}``.  Keys are :attr:`_CURATED` names; unknown
+        keys raise, as do ``"v_top"`` and ``"v_bot"`` — those are declared through
+        *gates*, so that one fact has one spelling.
     curated_scales : dict, optional
         Override the scale factor of a curated attribute, e.g.
         ``{"power": 1.0}`` to keep raw power.  Same keys as *curated_labels*.
@@ -1575,6 +2871,17 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Photon energy axis in eV (ascending order).
     spectra : np.ndarray, shape (n_pixels, n_sweeps)
         Raw PL counts in wavelength space. Never modified after loading.
+    spectra_cr : np.ndarray or None, shape (n_pixels, n_sweeps)
+        Wavelength-space counts with cosmic rays replaced by local medians, or
+        ``None`` when *cosmic_rays* was not given.  Where it exists it is what
+        every array below is built from, :attr:`contrast` included.
+    cosmic_ray_mask : np.ndarray[bool] or None, shape (n_pixels, n_sweeps)
+        Which pixels :attr:`spectra_cr` replaced, ``None`` when no repair was
+        asked for.  ``cosmic_ray_mask.mean(axis=1)`` localises a detector defect
+        or a narrow spectral feature flagged in most sweeps, which a cosmic ray
+        cannot be.
+    cosmic_rays : dict or None
+        The repair arguments as declared, or ``None``.
     energy_spectra : np.ndarray, shape (n_pixels, n_sweeps)
         Spectra remapped to the energy axis.  Jacobian correction applied
         if *apply_jacobian* is ``True``.  No background subtraction.
@@ -1582,7 +2889,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Spectra remapped to the energy axis with **no** Jacobian correction,
         regardless of *apply_jacobian*.  Useful for comparing raw counts
         on the energy axis or for peak-position fitting where the density
-        correction is undesirable.  No background subtraction.
+        correction is undesirable. No background subtraction.
     energy_spectra_bg : np.ndarray or None, shape (n_pixels, n_sweeps)
         Background-subtracted version of *energy_spectra*.  Background is
         removed in wavelength space *before* the Jacobian is applied, so
@@ -1622,29 +2929,55 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Y-axis label for the measured signal, from :attr:`spectra_type` — e.g.
         ``"PL intensity (counts)"``, ``"$\\Delta R/R_0$"``.  Use this instead of
         hardcoding "PL" in a plot that may be handed reflectance.
+    signal_name : str
+        The quantity alone, without the unit — e.g. ``"PL intensity"``.
+    signal_unit : str
+        The unit alone, empty for a dimensionless ratio — e.g. ``"counts"``.
+    gates : dict or None
+        The declared electrode mapping, or ``None`` if the wiring was never
+        stated.  Read-only property.
+    is_dual_gated : bool
+        Whether *gates* declared both gate electrodes, so a field is defined.
+        ``False`` for a single-gated device and for an undeclared wiring alike.
+        Read-only property.
     v_top, v_bot : np.ndarray, shape (n_sweeps,)
         Top / bottom gate voltages in V.  Read-only properties (scaled views
-        into :attr:`parameters`).
+        into :attr:`parameters`).  Raise unless *gates* declared that electrode.
+    v_channel : np.ndarray, shape (n_sweeps,)
+        Voltage on the contact to the TMDC itself in V, zero throughout for the
+        usual grounded channel.  Raises unless *gates* declared a ``"channel"``.
+        Read-only property.
     power : np.ndarray, shape (n_sweeps,)
         Excitation power in µW.  Read-only property (scaled view).
     Ich1, Ich2 : np.ndarray, shape (n_sweeps,)
         Gate-channel currents in nA.  Read-only properties (scaled views).
     scanner_x, scanner_y : np.ndarray, shape (n_sweeps,)
-        Sample-stage X / Y position, assumed µm (scale 1.0 until the raw
-        AttoCube unit is confirmed).  Read-only properties (views).
+        Piezo scanner X / Y drive voltage in V — a drive level, not a distance.
+        Converting to µm needs a per-stage µm/V calibration that is not in the
+        file; supply one through *curated_scales*.  Read-only properties (views).
     ef : np.ndarray or None, shape (n_sweeps,)
         Displacement field in mV/nm, or ``None`` if no geometry supplied.
-        Read-only property computed from :attr:`v_top` / :attr:`v_bot`.
+        Read-only property computed from :attr:`v_top` / :attr:`v_bot`, so it
+        raises when a geometry was supplied and the device is not
+        :attr:`is_dual_gated` — either because *gates* was not given, or because
+        the device has one gate and therefore no field to report.
+    carrier_density : np.ndarray or None, shape (n_sweeps,)
+        Gate-induced sheet density in cm⁻² relative to zero gate voltage, summed
+        over the declared gates, or ``None`` if no geometry supplied.  Raises
+        unless *gates* declared a ``"channel"``.  Read-only property; see
+        :meth:`DeviceGeometry.carrier_density` for a different reference.
     gate_mode : str or None
         Description of how the gates were driven — ``"dual-gate,
         anti-correlated (field-like)"``, ``"bottom-gate only"``, … — or ``None``
         when the gate rows are absent.  Descriptive, from the data; see
-        :meth:`varying_parameters`.
+        :meth:`varying_parameters`.  Needs no *gates*: without one, a single
+        driven gate is named by its channel rather than by a role.
     source_metadata : dict
         Metadata recorded in the source file, empty for CSV input.  Includes the
-        ``apply_jacobian`` / ``bg_region_nm`` of the session that wrote an HDF5
-        file — provenance only.  Those corrections are **not** replayed on read;
-        the stored spectra are raw, and a correction stays the caller's decision.
+        ``apply_jacobian`` / ``bg_region_nm`` / ``cosmic_rays`` of the session
+        that wrote an HDF5 file — provenance only.  Those corrections are **not**
+        replayed on read; the stored spectra are raw, and a correction stays the
+        caller's decision.  Pass ``cosmic_rays=`` again to repeat a repair.
     curated_parameters : dict[str, tuple]
         Mapping ``attr -> (csv_label, scale, unit)`` documenting which rows are
         promoted to the curated properties above, the scale applied, and the
@@ -1678,19 +3011,21 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     --------
     >>> geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
 
-    **A displacement-field PL sweep** (what ``AttoCubePLVabScan`` used to be):
+    **A displacement-field PL sweep.**  The field's sign depends on which channel
+    reached which electrode, so that mapping is stated rather than assumed:
 
     >>> scan = AttoCubeSpectralSweep(
     ...     "myscan.csv", spectra_type="PL",
     ...     sweep="electric_field", geometry=geom,
+    ...     gates={"top": "V_A", "bottom": "V_B"},
     ... )
     >>> scan.sweep_axis_label
     '$E_F$ (mV/nm)'
 
-    **A power series and a position line-scan — same class, same file layout:**
+    **A power series and a piezo line-scan — same class, same file layout:**
 
-    >>> pwr = AttoCubeSpectralSweep("power.csv", spectra_type="PL", sweep="power")
-    >>> pos = AttoCubeSpectralSweep("line.csv",  spectra_type="PL", sweep="position_y")
+    >>> pwr  = AttoCubeSpectralSweep("power.csv", spectra_type="PL", sweep="power")
+    >>> line = AttoCubeSpectralSweep("line.csv",  spectra_type="PL", sweep="piezo_y")
 
     **Don't know what was swept?  Load it and ask:**
 
@@ -1699,12 +3034,34 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     >>> scan.gate_mode
     'dual-gate, anti-correlated (field-like)'
 
-    **Opposite gate wiring**, recorded rather than assumed:
+    **The same device rewired the other way round**, which mirrors the field axis:
 
     >>> scan = AttoCubeSpectralSweep(
     ...     "myscan.csv", spectra_type="PL", sweep="electric_field",
-    ...     geometry=geom, curated_labels={"v_top": "V_B", "v_bot": "V_A"},
+    ...     geometry=geom, gates={"top": "V_B", "bottom": "V_A"},
     ... )
+
+    **A bottom-gated device with the TMDC contacted** — a doping sweep.  One gate
+    is one degree of freedom, so ``ef`` and ``v_top`` raise; sweep the gate itself:
+
+    >>> scan = AttoCubeSpectralSweep(
+    ...     "doping.csv", spectra_type="PL", sweep="bottom_voltage",
+    ...     gates={"bottom": "V_A", "channel": "V_B"},
+    ... )
+    >>> scan.is_dual_gated
+    False
+    >>> scan.gate_mode
+    'bottom-gate only'
+
+    **The same sweep on a density axis**, which is what one gate controls:
+
+    >>> bottom = DeviceGeometry.from_single("WSe2", d_hbn_bottom=46)
+    >>> scan = AttoCubeSpectralSweep(
+    ...     "doping.csv", spectra_type="PL", sweep="carrier_density",
+    ...     geometry=bottom, gates={"bottom": "V_A", "channel": "V_B"},
+    ... )
+    >>> scan.sweep_axis_label
+    '$\\Delta n$ (cm$^{-2}$)'
 
     **Any instrument parameter, and a raw row as the sweep axis:**
 
@@ -1718,10 +3075,11 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
     >>> scan = AttoCubeSpectralSweep(
     ...     "myscan.csv", spectra_type="PL", sweep="electric_field",
-    ...     geometry=geom, bg_region_eV=(1.28, 1.32), apply_jacobian=True,
+    ...     geometry=geom, gates={"top": "V_A", "bottom": "V_B"},
+    ...     bg_region_eV=(1.28, 1.32), apply_jacobian=True,
     ... )
     >>> scan.to_hdf5("myscan.h5")
-    >>> again = AttoCubeSpectralSweep("myscan.h5")   # type, sweep, geometry restored
+    >>> again = AttoCubeSpectralSweep("myscan.h5")   # type, sweep, geometry, gates restored
 
     See Also
     --------
@@ -1744,7 +3102,10 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         sweep          : str   = None,
         sweep_label    : str   = None,
         sweep_unit     : str   = None,
+        fast_sweep     : str   = None,
+        slow_sweep     : str   = None,
         geometry        : DeviceGeometry = None,
+        cosmic_rays     : dict  = None,
         bg_region_nm    : tuple = None,
         bg_region_eV    : tuple = None,
         bg_spectrum            = None,
@@ -1752,18 +3113,31 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         reference_scale : float = None,
         contrast        : str   = "contrast",
         apply_jacobian  : bool  = False,
+        gates           : dict  = None,
         curated_labels  : dict  = None,
         curated_scales  : dict  = None,
         roi             : int   = None,
     ):
+        # Both checks precede the read: an export is large enough that a mistyped
+        # argument should not cost the decode before it is reported.
         if bg_region_nm is not None and bg_region_eV is not None:
             raise ValueError(
                 "Provide at most one of bg_region_nm or bg_region_eV, not both."
             )
+        if cosmic_rays is not None:
+            unknown = set(cosmic_rays) - _COSMIC_RAY_KEYS
+            if unknown:
+                raise ValueError(
+                    f"cosmic_rays received unknown key(s) {sorted(unknown)}. "
+                    f"Accepted: {sorted(_COSMIC_RAY_KEYS)} — these are forwarded "
+                    f"to processing.remove_cosmic_rays, whose 'spectra' and "
+                    f"'axis' are set by the loader. Pass cosmic_rays={{}} to "
+                    f"accept every default."
+                )
 
         # --- Decode, and settle everything independent of the spectral axis ---
         payload = self._decode_and_describe(
-            path, spectra_type=spectra_type, geometry=geometry,
+            path, spectra_type=spectra_type, geometry=geometry, gates=gates,
             curated_labels=curated_labels, curated_scales=curated_scales,
         )
         meta = payload["metadata"]
@@ -1812,6 +3186,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         # What *is* checked is the row the declared sweep needs — which is why
         # this comes after the signal array, since it validates against n_sweeps.
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
+        self._bind_nesting(fast_sweep, slow_sweep)
 
         # --- Resolve background window to nm (always work in wavelength space) ---
         if bg_region_eV is not None:
@@ -1823,6 +3198,44 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         else:
             self.bg_region_nm = bg_region_nm      # may be None
 
+        # The Jacobian multiplies by λ², so it turns a constant dark pedestal
+        # into a curve rather than leaving it as an offset a fit can absorb.
+        # Both background mechanisms run in wavelength space below, so either
+        # one satisfies this; neither means the pedestal is already curved by
+        # the time any caller sees energy_spectra.
+        if apply_jacobian and self.bg_region_nm is None and self.bg_spectrum is None:
+            warnings.warn(
+                "apply_jacobian=True with no background subtraction: pass "
+                "bg_region_nm / bg_region_eV or bg_spectrum. The Jacobian "
+                "multiplies by λ²/hc, so an un-subtracted dark pedestal B "
+                "becomes B·λ²/hc — a baseline curving up towards the red "
+                "rather than a flat offset, which inflates fitted amplitude "
+                "and FWHM. energy_spectra_pre_jacobian holds the uncorrected "
+                "array.",
+                UserWarning, stacklevel=3,
+            )
+
+        # --- Cosmic rays, ahead of every other correction ----------------------
+        # First because both of the corrections below read the counts as if they
+        # were signal: a spike inside the bg_region window pulls the pedestal
+        # estimate up, and one in either array of a contrast biases the ratio
+        # non-linearly.  In wavelength space because the 3-point Laplacian the
+        # detection is built on assumes uniform sample spacing, which the detector
+        # axis has and the energy axis does not.
+        self.cosmic_rays = dict(cosmic_rays) if cosmic_rays is not None else None
+        if cosmic_rays is None:
+            self.spectra_cr      = None
+            self.cosmic_ray_mask = None
+        else:
+            self.spectra_cr, self.cosmic_ray_mask = processing.remove_cosmic_rays(
+                self.spectra, axis=0, **cosmic_rays
+            )
+
+        # What every array below is built from: the repaired counts where a repair
+        # was asked for, the file's own otherwise.  `spectra` is never reassigned,
+        # so a repair adds an array rather than replacing one.
+        signal = self.spectra if self.spectra_cr is None else self.spectra_cr
+
         # --- Build energy axis and energy-space spectra ---
         self.energy       = HC_EV_NM / self.wavelength              # eV, descending at this point
         _sort_idx         = np.argsort(self.energy)                 # ascending energy sort index
@@ -1830,7 +3243,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
         # energy_spectra: Jacobian applied (or not), no background subtraction
         self.energy_spectra = self._build_energy_spectra(
-            self.spectra, self.wavelength, _sort_idx, apply_jacobian
+            signal, self.wavelength, _sort_idx, apply_jacobian
         )
 
         # energy_spectra_pre_jacobian: always no Jacobian, no background subtraction.
@@ -1838,17 +3251,18 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         # when apply_jacobian=True so both representations are always available.
         if apply_jacobian:
             self.energy_spectra_pre_jacobian = self._build_energy_spectra(
-                self.spectra, self.wavelength, _sort_idx, apply_jacobian=False
+                signal, self.wavelength, _sort_idx, apply_jacobian=False
             )
         else:
             self.energy_spectra_pre_jacobian = self.energy_spectra
 
         # --- Wavelength-space corrections, in the order the physics requires ---
-        # 1. the bg_region window mean, 2. a measured background spectrum. Both
-        # must precede any ratio: a pedestal in either array biases a contrast
+        # 1. the bg_region window mean
+        # 2. a measured background spectrum.
+        # Both must precede any ratio: a pedestal in either array biases a contrast
         # non-linearly, and both must precede the Jacobian (a flat pedestal B
         # becomes B·λ²/hc — curved, not flat — in energy space).
-        corrected = self.spectra
+        corrected = signal
         if self.bg_region_nm is not None:
             corrected = subtract_background(
                 corrected,
@@ -1861,8 +3275,10 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
                 corrected, self.bg_spectrum, axis=0)
 
         # energy_spectra_bg: background-corrected, then Jacobian applied (or not).
-        # None when neither background mechanism was used.
-        if corrected is not self.spectra:
+        # None when neither background mechanism was used.  Compared against
+        # `signal`, not `spectra`, so a cosmic-ray repair on its own does not
+        # masquerade as a background subtraction.
+        if corrected is not signal:
             self.energy_spectra_bg = self._build_energy_spectra(
                 corrected, self.wavelength, _sort_idx, apply_jacobian
             )
@@ -1924,7 +3340,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     @classmethod
     def _decode_csv(cls, path) -> dict:
         """
-        Decode a raw AttoCube spectral export.
+        Decode a raw AttoCube spectral sweep export.
 
         Each sweep point occupies a ``[Par, Wavelength, ExpROI1, ExpROI2]``
         block, so every field is read as a stride-``block_width`` column slice.
@@ -1944,12 +3360,13 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         raw = pd.read_csv(path, header=0, index_col=0, low_memory=False)
         row_labels = list(raw.index)
 
-        # Keep only the declared block columns; the exporter appends as many
-        # unnamed empty columns again after them.  Slicing here rather than via
-        # read_csv(usecols=...) is deliberate and measured: on the 314 MB raster
-        # usecols costs 13.8 s against 10.7 s for reading everything and slicing,
-        # because filtering 16 728 of 33 457 columns during the parse is dearer
-        # than parsing them and throwing them away.
+        # The code reads the whole CSV first and then keeps only the columns that
+        # belong to the declared sweep blocks. That choice is faster than asking 
+        # pandas.read_csv(..., usecols=...) to pre-filter a very large number of columns, 
+        # because dropping thousands of unused columns during parsing is more expensive 
+        # than parsing them and discarding them afterward.
+
+        # Remove trailing pad
         d = raw.to_numpy(dtype=float)[:, :n_declared * width]
 
         # One column index per sweep point, for each field of the block.
@@ -1960,7 +3377,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         # empty, so they survive any NaN-based strip and must go before the
         # arrays are shaped.
         keep, n_declared, axis_block = _drop_unwritten_blocks(
-            d[:, cols["Wavelength"]], cols, path)
+            d[:, cols["Wavelength"]], path)
 
         # Labeled scalar rows are overlaid on the leading pixel rows: row i's
         # value for sweep j sits in that block's Par column.
@@ -2037,6 +3454,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
     def _validate_payload(self) -> None:
         """Check the decoded arrays are self-consistent before anything uses them."""
+        # Check that the spectra is 2D and has at least one sweep point
         if self.spectra_roi1.ndim == 2 and self.spectra_roi1.shape[1] == 0:
             # Every block was zero-filled: the file carries a parameter table and
             # no measurement.  That is the metadata companion written alongside a
@@ -2106,13 +3524,141 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Y-axis label for :attr:`contrast` / :attr:`energy_contrast`.
 
         Independent of :attr:`signal_label`, because the contrast is a *derived*
-        quantity: a scan of ``spectra_type="R"`` keeps reporting "Reflectance
-        (counts)" for its raw spectra while its contrast is labelled ΔR/R₀.
+        quantity: a scan of ``spectra_type="R"`` keeps reporting "Reflected
+        intensity (counts)" for its raw spectra while its contrast is labelled
+        ΔR/R₀.
         """
         if self.contrast_mode == "ratio":
             return r"$R/R_0$"
         name, unit = SIGNAL_LABELS["RC"]
         return f"{name} ({unit})" if unit else name
+
+    # --- Picking spectra out of the sweep ------------------------------------
+
+    def get_spectrum_at(self, value: float = None, *,
+                        axis   : str   = "sweep",
+                        fast   : float = None,
+                        slow   : float = None,
+                        source : str   = "best",
+                        x_axis : str   = "energy") -> np.ndarray:
+        """
+        Spectra at the sweep coordinate closest to the value(s) given.
+
+        **The rank of the result depends on how much you specify.**  Pinning
+        every axis gives one spectrum, ``(n_pixels,)``; leaving one free gives
+        the line of spectra along it, ``(n_pixels, n)`` with the swept dimension
+        last, as everywhere else in the package.
+
+        Parameters
+        ----------
+        value : float, optional
+            Coordinate on the sweep axis.  For a flat sweep only; a nest is
+            addressed with *fast* and *slow*.
+        axis : str
+            Which quantity *value* is read against, spelled as ``sweep=`` spells
+            it: a registry key such as ``"top_voltage"`` or a raw row label such
+            as ``"V_A"``.  The default searches the declared sweep axis.  Use it
+            when a sweep is declared in one coordinate and you want a point in
+            another — a field sweep driven by both gates at a fixed ratio can be
+            addressed by ``axis="top_voltage"``.  Not combinable with *fast* or
+            *slow*: to address a nest by another quantity, declare the nest in
+            it.
+        fast, slow : float, optional
+            Coordinates on the nest axes.  Give both for a single spectrum, or
+            one to hold that axis and take every point of the other.
+        source : str
+            Which array to read: ``"best"`` (repaired and background-corrected
+            where available), ``"raw"``, ``"energy"``, ``"energy_bg"``,
+            ``"energy_pre_jacobian"``, ``"contrast"``, ``"contrast_wavelength"``.
+        x_axis : {"energy", "wavelength"}
+            Which spectral ordering ``"best"`` should resolve to.  The returned
+            spectra run along :attr:`energy` or :attr:`wavelength` accordingly.
+
+        Returns
+        -------
+        np.ndarray
+            A **view** into the source array, never a copy, so the
+            never-mutate rule reaches it.  Strided rather than contiguous, as
+            any column selection out of a row-major array is; anything
+            downstream that demands contiguity will copy it.
+
+        Raises
+        ------
+        ValueError
+            If *value* is given for a nested sweep, or *fast*/*slow* for a flat
+            one, or if neither is given.  For the whole grid, use :meth:`as_grid`.
+        ValueError
+            If a coordinate names more than one sweep point, since returning one
+            of them would drop the rest without saying so.  Every quantity of a
+            nest repeats, so this is what an undeclared nest looks like from
+            here; the message says what to declare.  :meth:`nearest_index` warns
+            instead of raising, because a single index is all it can return.
+
+        Warns
+        -----
+        UserWarning
+            When a requested coordinate is further than half a step from any real
+            point — see :meth:`nearest_index`.
+
+        See Also
+        --------
+        get_spectrum_by_index : the same selection by integer position.
+        nearest_index : the index alone, for composing against another array.
+        as_grid : the whole sweep reshaped onto the nest.
+
+        Examples
+        --------
+        >>> scan.get_spectrum_at(2.5).shape                  # doctest: +SKIP
+        (1340,)
+        >>> scan.get_spectrum_at(15.0, axis="top_voltage").shape  # doctest: +SKIP
+        (1340,)
+        >>> scan.get_spectrum_at(fast=3.0, slow=1.0).shape   # doctest: +SKIP
+        (1340,)
+        >>> scan.get_spectrum_at(fast=3.0).shape             # doctest: +SKIP
+        (1340, 51)
+        """
+        selector = self._sweep_selector(
+            value, axis=axis, fast=fast, slow=slow, by_value=True,
+            what="get_spectrum_at()")
+        return _resolve_spectra(self, source, x_axis)[:, selector]
+
+    def get_spectrum_by_index(self, index: int = None, *,
+                              fast   : int = None,
+                              slow   : int = None,
+                              source : str = "best",
+                              x_axis : str = "energy") -> np.ndarray:
+        """
+        Spectra at integer sweep positions — :meth:`get_spectrum_at` by index.
+
+        Same arguments, same rank rules and same return contract, except that
+        the coordinates are positions rather than values, so nothing is searched
+        for and nothing is warned about.  Negative positions count from the end,
+        as elsewhere in Python.
+
+        Parameters
+        ----------
+        index : int, optional
+            Position on the sweep axis.  For a flat sweep only.
+        fast, slow : int, optional
+            Positions on the nest axes, ``0 <= i < n_fast`` / ``n_slow``.
+        source, x_axis
+            As :meth:`get_spectrum_at`.
+
+        Returns
+        -------
+        np.ndarray
+            ``(n_pixels,)`` with every axis pinned, else ``(n_pixels, n)``.
+            A view, as :meth:`get_spectrum_at`.
+
+        Raises
+        ------
+        IndexError
+            If a position is out of range for its axis.
+        """
+        selector = self._sweep_selector(
+            index, fast=fast, slow=slow, by_value=False,
+            what="get_spectrum_by_index()")
+        return _resolve_spectra(self, source, x_axis)[:, selector]
 
     # --- Dunder methods ----------------------------------------------------
 
@@ -2126,6 +3672,12 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
     def _repr_extra_lines(self, w: int) -> list:
         lines = [f"  {'ROI':<{w}}: ExpROI{self._roi}"]
+        if self.cosmic_ray_mask is not None:
+            n_flagged = int(self.cosmic_ray_mask.sum())
+            lines.append(
+                f"  {'Cosmic rays':<{w}}: {n_flagged} pixel"
+                f"{'' if n_flagged == 1 else 's'} replaced"
+            )
         if self.bg_region_nm is not None:
             lines.append(
                 f"  {'BG region':<{w}}: "
@@ -2150,7 +3702,12 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
     sweep axis of displacement field when a :class:`DeviceGeometry` is supplied,
     top-gate voltage otherwise — which is what the old ``gate_axis`` did.  The
     old per-channel ``*_label`` / ``power_scale`` arguments are accepted and
-    folded into the new *curated_labels* / *curated_scales* dictionaries.
+    folded into the new *gates* / *curated_labels* / *curated_scales* arguments.
+
+    Assumes ``V_A`` drove the top gate and ``V_B`` the bottom unless
+    *top_gate_label* / *bot_gate_label* say otherwise. That assumption is what
+    :class:`AttoCubeSpectralSweep` refuses to make; it survives here only so that
+    existing scripts keep running unchanged.
 
     .. deprecated::
        Use :class:`AttoCubeSpectralSweep` with an explicit ``spectra_type=`` and
@@ -2188,10 +3745,18 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
         )
 
         labels = {name: value for name, value in (
-            ("v_top", top_gate_label), ("v_bot", bot_gate_label),
             ("power", power_label),
             ("Ich1",  ich1_label),     ("Ich2",  ich2_label),
         ) if value is not None}
+
+        # Both sweeps below resolve through a gate role, which the new API requires
+        # be declared.  State the historical mapping here so scripts written against
+        # this class keep producing the numbers they always did — its FutureWarning
+        # is what asks callers to confirm the wiring rather than inherit it.
+        gates = {
+            "top":    top_gate_label if top_gate_label is not None else "V_A",
+            "bottom": bot_gate_label if bot_gate_label is not None else "V_B",
+        }
 
         super().__init__(
             path,
@@ -2199,6 +3764,7 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
             # The old gate_axis was ef when a geometry was given, else v_top.
             sweep          = "electric_field" if geometry is not None else "top_voltage",
             geometry       = geometry,
+            gates          = gates,
             bg_region_nm   = bg_region_nm,
             bg_region_eV   = bg_region_eV,
             apply_jacobian = apply_jacobian,
@@ -2257,14 +3823,19 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         class name already declares the modality here, whereas a spectral sweep
         may be PL, R, RC, T or A and cannot know which.
     sweep, sweep_label, sweep_unit : str, optional
-        As :class:`AttoCubeSpectralSweep`.  The example 3-point sweep is a
-        displacement-field sweep, so ``sweep="electric_field"`` with a *geometry*
-        gives a field axis.
+        As :class:`AttoCubeSpectralSweep`.  A gate sweep needs a *geometry* for
+        ``"electric_field"``, and *gates* for any of the three.
     geometry : DeviceGeometry, optional
     bg_region_ns : tuple of (t_min, t_max), optional
         **Pre-pulse** time window whose mean is subtracted from every decay —
         the TCSPC equivalent of a spectral background window, and the dark/
         afterpulse floor before the rise.  ``None`` (default) subtracts nothing.
+    gates : dict, optional
+        Which parameter row reached each electrode, e.g.
+        ``{"top": "V_A", "bottom": "V_B"}``.  As
+        :class:`AttoCubeSpectralSweep` — the roles present describe the device, and
+        the declaration is required for :attr:`v_top`, :attr:`v_bot`,
+        :attr:`v_channel`, :attr:`ef` and the gate sweep types.
     curated_labels, curated_scales : dict, optional
     time_rtol : float
         Tolerance for agreement between the per-file time axes.  They are *not*
@@ -2318,7 +3889,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
     >>> geom  = DeviceGeometry.from_single("WSe2", d_hbn_top=53, d_hbn_bottom=46)
     >>> sweep = AttoCubeTRPLSweep(
     ...     "examples/data/TRPL/", sweep="electric_field", geometry=geom,
-    ...     bg_region_ns=(0.0, 1.0),
+    ...     gates={"top": "V_A", "bottom": "V_B"}, bg_region_ns=(0.0, 1.0),
     ... )
     >>> sweep.time.max(), sweep.n_sweeps
     (12.817, 3)
@@ -2347,8 +3918,11 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         sweep          : str   = None,
         sweep_label    : str   = None,
         sweep_unit     : str   = None,
+        fast_sweep     : str   = None,
+        slow_sweep     : str   = None,
         geometry       : DeviceGeometry = None,
         bg_region_ns   : tuple = None,
+        gates          : dict  = None,
         curated_labels : dict  = None,
         curated_scales : dict  = None,
         time_rtol      : float = 1e-4,
@@ -2357,7 +3931,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         self._time_rtol = time_rtol
 
         payload = self._decode_and_describe(
-            path, spectra_type=spectra_type, geometry=geometry,
+            path, spectra_type=spectra_type, geometry=geometry, gates=gates,
             curated_labels=curated_labels, curated_scales=curated_scales,
         )
 
@@ -2370,6 +3944,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         self._validate_axis_and_signals(self.time, {"Exp": self.decays})
 
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
+        self._bind_nesting(fast_sweep, slow_sweep)
 
         # Pre-pulse baseline.  processing.subtract_background is generic in x, so
         # a time window needs no separate implementation from a spectral one.
@@ -2408,7 +3983,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         cols = {role: np.arange(offset, d.shape[1], width)
                 for offset, role in enumerate(blocks["roles"])}
         keep, n_declared, axis_block = _drop_unwritten_blocks(
-            d[:, cols["Wavelength"]], cols, path)
+            d[:, cols["Wavelength"]], path)
 
         parameters = {
             str(label): d[i, cols["Par"]][keep]
@@ -2694,6 +4269,9 @@ class SingleSpectrum:
         If ``True``, apply the ``dλ/dE = λ²/hc`` density correction when
         building :attr:`energy_spectra`, conserving integrated intensity
         under the wavelength → energy change of variables. Default ``False``.
+        Warns when ``True`` and no background region was supplied, because the
+        λ² factor scales a dark pedestal into a curved baseline instead of
+        leaving it a flat offset.
     bg_region_nm : tuple of (wl_min, wl_max), optional
         Wavelength range in **nm** used to estimate the background level.
         The mean counts in this window are subtracted in wavelength space
@@ -2763,6 +4341,18 @@ class SingleSpectrum:
                                  HC_EV_NM / bg_region_eV[0])   # E_min → λ_max
         else:
             self.bg_region_nm = bg_region_nm                   # may be None
+
+        # λ² scaling turns a constant dark pedestal into a curve, so the
+        # subtraction below has to happen for energy_spectra to mean anything.
+        if apply_jacobian and self.bg_region_nm is None:
+            warnings.warn(
+                "apply_jacobian=True with no background subtraction: pass "
+                "bg_region_nm or bg_region_eV. The Jacobian multiplies by "
+                "λ²/hc, so an un-subtracted dark pedestal B becomes B·λ²/hc — "
+                "a baseline curving up towards the red rather than a flat "
+                "offset, which inflates fitted amplitude and FWHM.",
+                UserWarning, stacklevel=2,
+            )
 
         self.wavelength = arr[0]                      # nm, ascending
         self.spectra    = arr[1].astype(float)        # raw counts, wavelength space

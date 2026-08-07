@@ -11,6 +11,8 @@ parser, so it cannot catch a misunderstanding shared by both — see E9 in
 ``dev/audit-2026-07.md``.  It does pin the decoding *contract*.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -40,6 +42,10 @@ PARAMS = {
 }
 POWER_SCALE = 0.303e6  # AttoCubePLVabScan default
 
+# The channel-to-gate wiring the loaders refuse to assume.  Shared so that a test
+# only spells it out when the wiring itself is the subject.
+GATES = {"top": "V_A", "bottom": "V_B"}
+
 
 def _roi1(r, i):
     return 100 + r * 10 + i
@@ -54,6 +60,8 @@ def make_spectral_csv(
     params      : dict = None,
     zero_blocks : int  = 0,
     interleave  : bool = False,
+    roi1        : np.ndarray = None,
+    wavelength  : np.ndarray = None,
 ) -> None:
     """
     Write a spectral CSV with labeled parameter rows + 2 padding columns.
@@ -63,6 +71,16 @@ def make_spectral_csv(
     params : dict, optional
         Overrides the default :data:`PARAMS` row set, so a test can supply
         awkward labels (e.g. one containing ``/``) without a second builder.
+        The sweep count is taken from the row length, so a longer row set writes
+        a longer sweep — which is how a raster fixture is built.
+    roi1 : np.ndarray, shape (n_pixels, N_SWEEPS), optional
+        Overrides the ``ExpROI1`` counts, for a test that needs spectra with
+        structure rather than the default index ramp.  More pixel rows than
+        *params* has labels is fine — the surplus rows are unlabeled, which is
+        what the export does.
+    wavelength : np.ndarray, shape (n_pixels,), optional
+        Wavelength axis to write, defaulting to :data:`WAVELENGTH`.  Give it
+        whenever *roi1* has a different pixel count.
     zero_blocks : int
         Append this many extra *declared* blocks filled entirely with literal
         zeros — what the real exporter does when it over-allocates the header.
@@ -74,8 +92,12 @@ def make_spectral_csv(
     """
     params = PARAMS if params is None else params
     labels = list(params)                          # first len(params) rows
+    wl     = WAVELENGTH if wavelength is None else np.asarray(wavelength, float)
+    n_pixels = wl.size
+    # The rows are one value per sweep point, so their length *is* the count.
+    n_sweeps = len(next(iter(params.values())))
 
-    n_declared = N_SWEEPS + zero_blocks
+    n_declared = n_sweeps + zero_blocks
     header = ["Parameters Labels"]
     for i in range(n_declared):
         header += [f"Par_{i}", f"Wavelength{i}", f"ExpROI1_{i}", f"ExpROI2_{i}"]
@@ -83,13 +105,14 @@ def make_spectral_csv(
 
     zeros = ["0.0", "0.0", "0.0", "0.0"]
     lines = [",".join(header)]
-    for r in range(N_PIXELS):
+    for r in range(n_pixels):
         label = labels[r] if r < len(labels) else ""
-        par = params[label] if label else np.zeros(N_SWEEPS)
+        par = params[label] if label else np.zeros(n_sweeps)
         real = []
-        for i in range(N_SWEEPS):
-            real += [f"{par[i]}", f"{WAVELENGTH[r]}",
-                     f"{_roi1(r, i)}", f"{_roi2(r, i)}"]
+        for i in range(n_sweeps):
+            counts = _roi1(r, i) if roi1 is None else roi1[r, i]
+            real += [f"{par[i]}", f"{wl[r]}",
+                     f"{counts}", f"{_roi2(r, i)}"]
         pad = zeros * zero_blocks
         row = [label] + (pad + real if interleave else real + pad)
         row += ["", ""]                            # padding cells
@@ -106,6 +129,12 @@ def csv_path(tmp_path):
 
 @pytest.fixture
 def scan(csv_path):
+    return AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES)
+
+
+@pytest.fixture
+def unwired(csv_path):
+    """The same scan with no declared wiring — every gate role then refuses."""
     return AttoCubeSpectralSweep(str(csv_path), spectra_type="PL")
 
 
@@ -233,8 +262,9 @@ def test_curated_parameters_registry(scan):
     assert reg["v_top"] == ("V_A", 1.0, "V")
     assert reg["power"] == ("Excitation Power", 0.303e6, "µW")
     assert reg["Ich1"] == ("I_A", 1e9, "nA")
-    assert reg["scanner_x"] == ("Scanner X", 1.0, "µm")
-    assert reg["scanner_y"] == ("Scanner Y", 1.0, "µm")
+    # The scanners are piezos; the rows carry drive voltage, not a distance.
+    assert reg["scanner_x"] == ("Scanner X", 1.0, "V")
+    assert reg["scanner_y"] == ("Scanner Y", 1.0, "V")
 
 
 def test_scanner_position_properties(scan):
@@ -255,12 +285,13 @@ def test_curated_properties_are_read_only(scan):
 def test_constructor_overrides_flow_through_registry(csv_path):
     s = AttoCubeSpectralSweep(
         str(csv_path), spectra_type="PL",
-        curated_labels={"v_top": "V_B"}, curated_scales={"power": 1.0},
+        gates={"top": "V_B", "bottom": "V_A"}, curated_labels={"power": "Galvo_X"},
+        curated_scales={"power": 1.0},
     )
-    # scale override: power now equals the raw row
-    assert np.allclose(s.power, s.parameters["Excitation Power"])
-    assert s.curated_parameters["power"] == ("Excitation Power", 1.0, "µW")
-    # label override: v_top now reads the V_B row
+    # scale override: power now equals the raw row it was pointed at
+    assert np.allclose(s.power, s.parameters["Galvo_X"])
+    assert s.curated_parameters["power"] == ("Galvo_X", 1.0, "µW")
+    # gates override: v_top now reads the V_B row
     assert np.allclose(s.v_top, s.parameters["V_B"])
     assert s.curated_parameters["v_top"][0] == "V_B"
 
@@ -274,7 +305,7 @@ def test_unknown_curated_name_rejected(csv_path):
 def test_ef_property_with_geometry(csv_path):
     geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
     s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
-                              sweep="electric_field", geometry=geom)
+                              sweep="electric_field", geometry=geom, gates=GATES)
     assert s.ef is not None
     assert np.allclose(s.ef, geom.electric_field(s.v_top, s.v_bot))
     assert np.allclose(s.sweep_axis, s.ef)
@@ -306,7 +337,7 @@ def test_declared_sweep_requires_its_own_row(csv_path):
 def test_electric_field_sweep_requires_geometry(csv_path):
     with pytest.raises(ValueError, match="DeviceGeometry"):
         AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
-                              sweep="electric_field")
+                              sweep="electric_field", gates=GATES)
 
 
 # ---------------------------------------------------------------------------
@@ -346,11 +377,20 @@ def test_unknown_sweep_lists_both_registries(csv_path):
     assert "Galvo_X" in str(exc.value)          # rows in this file
 
 
-def test_position_sweep_uses_scanner_row(csv_path):
+def test_piezo_sweep_uses_scanner_row(csv_path):
     s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
-                              sweep="position_y")
+                              sweep="piezo_y")
     assert np.allclose(s.sweep_axis, PARAMS["Scanner Y"])
-    assert s.sweep_axis_label == r"$y$ (µm)"
+    assert s.sweep_axis_label == r"Piezo $y$ (V)"
+
+
+def test_old_position_sweep_key_is_refused_with_the_new_name(csv_path):
+    # No shim for the rename: the unknown-key path lists the valid types, so the
+    # error hands back the name that replaced it.
+    with pytest.raises(ValueError) as exc:
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              sweep="position_y")
+    assert "piezo_y" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
@@ -365,24 +405,386 @@ def test_varying_parameters_excludes_static_rows(scan):
     assert varying["V_A"] == (0.0, 1.0, 1.0)   # (min, max, span)
 
 
+def test_varying_parameters_ranks_a_row_straddling_zero(tmp_path):
+    """
+    An anti-symmetric gate pair has a mean of zero and a magnitude that is not.
+
+    Scaling the span by the mean divided by ~2.2e-308 and returned ``inf``, so the
+    two gates tied with each other and outranked every row that really did move
+    most.  Scaling by RMS keeps the rank finite and ordered.
+    """
+    n = 12
+    v = np.tile(np.linspace(-3.0, 3.0, 4), 3)
+    assert float(np.mean(v)) == 0.0            # the case, exactly
+
+    params = {
+        "V_A":              v,
+        "V_B":              -v,
+        "Excitation Power": np.full(n, 2e-6),
+        "Scanner X":        np.tile(np.arange(4.0) * 2, 3),
+        "Scanner Y":        np.repeat(np.arange(3.0) * 5, 4),
+    }
+    path = tmp_path / "antisymmetric.csv"
+    make_spectral_csv(path, params=params)
+    s = AttoCubeSpectralSweep(str(path), spectra_type="PL")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")         # a numpy overflow would raise here
+        varying = s.varying_parameters()
+
+    assert set(varying) == {"V_A", "V_B", "Scanner X", "Scanner Y"}
+    assert varying["V_A"] == (-3.0, 3.0, 6.0)
+    # Finite and ordered, rather than two rows tied at inf ahead of everything.
+    assert list(varying).index("Scanner X") > list(varying).index("V_A")
+
+
+def test_varying_parameters_still_separates_jitter_from_a_sweep(tmp_path):
+    """The distinction the scale exists to make, unchanged by using RMS."""
+    params = {
+        "V_A":              np.array([10.000, 10.001, 10.000]),   # wobble on 10 V
+        "V_B":              np.array([0.002, 0.003, 0.002]),      # same, on 2 mV
+        "Excitation Power": np.full(3, 2e-6),
+    }
+    path = tmp_path / "jitter.csv"
+    make_spectral_csv(path, params=params)
+    varying = AttoCubeSpectralSweep(str(path), spectra_type="PL").varying_parameters()
+
+    assert "V_A" not in varying                # 1e-4 of its magnitude: noise
+    assert "V_B" in varying                    # 0.4 of its magnitude: a sweep
+
+
 def test_gate_mode_detects_antisymmetric_sweep(scan):
     # V_A goes 0 -> +1 while V_B goes 0 -> -1: a field-like sweep.
     assert scan.gate_mode == "dual-gate, anti-correlated (field-like)"
 
 
 def test_gate_mode_none_when_gate_rows_absent(csv_path):
-    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
-                              curated_labels={"v_top": "NoSuchRow"})
+    s = AttoCubeSpectralSweep(
+        str(csv_path), spectra_type="PL",
+        gates={"top": "NoSuchRow", "bottom": "AlsoMissing"},
+    )
     assert s.gate_mode is None
+
+
+def test_gate_mode_describes_the_one_gate_it_can_see(csv_path):
+    # One declared row is missing from the file, so only the other can be
+    # described.  Reporting on it beats returning None and saying nothing.
+    s = AttoCubeSpectralSweep(
+        str(csv_path), spectra_type="PL",
+        gates={"top": "NoSuchRow", "bottom": "V_B"},
+    )
+    assert s.gate_mode == "bottom-gate only"
+
+
+def test_gate_mode_needs_no_declared_wiring(unwired):
+    # How many channels moved together is a property of the data, so the
+    # correlation verdict is the same with or without a mapping.
+    assert unwired.gate_mode == "dual-gate, anti-correlated (field-like)"
+
+
+def test_gate_mode_names_the_channel_when_wiring_is_undeclared(tmp_path):
+    # Only V_B moves.  Undeclared, calling that "bottom-gate only" would assert a
+    # wiring nothing recorded -- the exact mislabelling this refuses to make.
+    params = dict(PARAMS)
+    params["V_A"] = np.zeros(N_SWEEPS)
+    csv = tmp_path / "one_gate.csv"
+    make_spectral_csv(csv, params=params)
+
+    assert (AttoCubeSpectralSweep(str(csv), spectra_type="PL").gate_mode
+            == "single gate driven ('V_B')")
+    # Declared, the role is known and is what gets reported.
+    assert (AttoCubeSpectralSweep(str(csv), spectra_type="PL",
+                                  gates=GATES).gate_mode
+            == "bottom-gate only")
+    # ...and the opposite wiring names the other electrode for the same file.
+    assert (AttoCubeSpectralSweep(str(csv), spectra_type="PL",
+                                  gates={"top": "V_B", "bottom": "V_A"}).gate_mode
+            == "top-gate only")
 
 
 def test_repr_survives_missing_rows(csv_path):
     # __repr__ raised for every geometry once already (A2); it must not raise
     # here either, whatever the file happens to lack.
-    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
                               curated_labels={"power": "NoSuchRow"})
     assert "AttoCubeSpectralSweep" in repr(s)
     assert "Photoluminescence" in repr(s)
+
+
+# ---------------------------------------------------------------------------
+# The channel-to-gate mapping: stated, never assumed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sweep", ["electric_field", "top_voltage",
+                                   "bottom_voltage"])
+def test_gate_sweep_refuses_an_undeclared_wiring(csv_path, sweep):
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    with pytest.raises(ValueError, match="not declared") as exc:
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", sweep=sweep,
+                              geometry=geom)
+    # The message has to name the rows this file actually offers, or the reader
+    # cannot act on it.
+    assert "V_A" in str(exc.value) and "V_B" in str(exc.value)
+
+
+def test_non_gate_sweeps_are_unaffected(csv_path):
+    # An ungated measurement must not have to state a wiring it does not use.
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", sweep="power")
+    assert s.gates is None
+    assert np.allclose(s.sweep_axis, PARAMS["Excitation Power"] * POWER_SCALE)
+
+
+@pytest.mark.parametrize("attr", ["v_top", "v_bot"])
+def test_gate_properties_refuse_an_undeclared_wiring(unwired, attr):
+    with pytest.raises(ValueError, match="not declared"):
+        getattr(unwired, attr)
+
+
+def test_ef_refuses_an_undeclared_wiring_only_when_a_geometry_was_given(csv_path):
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    with pytest.raises(ValueError, match="not declared"):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", geometry=geom).ef
+    # Saying that no field was computed needs no wiring, so this stays None
+    # rather than raising.
+    assert AttoCubeSpectralSweep(str(csv_path), spectra_type="PL").ef is None
+
+
+def test_transposing_the_wiring_negates_the_field(csv_path):
+    # The whole reason the mapping cannot be defaulted: it sets the sign, and so
+    # the sign of any dipole extracted downstream.
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    kw = dict(spectra_type="PL", sweep="electric_field", geometry=geom)
+    forward = AttoCubeSpectralSweep(str(csv_path), gates=GATES, **kw)
+    swapped = AttoCubeSpectralSweep(
+        str(csv_path), gates={"top": "V_B", "bottom": "V_A"}, **kw)
+    assert np.allclose(forward.ef, -swapped.ef)
+
+
+def test_gates_are_recorded_on_the_scan(scan, unwired):
+    assert scan.gates == GATES
+    assert unwired.gates is None
+    # A copy, so the caller's dict cannot be edited into the scan afterwards.
+    scan.gates["top"] = "V_B"
+    assert scan.gates["top"] == "V_A"
+
+
+@pytest.mark.parametrize("bad, match", [
+    (("V_A", "V_B"),                  "must be a dict"),
+    ({"top": "V_A", "bot": "V_B"},    "unknown role"),
+    ({"channel": "V_B"},              "at least one gate electrode"),
+    # A lone gate cannot be told from a two-gate device whose other gate was
+    # forgotten, which is the ambiguity this argument exists to remove.
+    ({"top": "V_A"},                  "ambiguous"),
+    ({"bottom": "V_A"},               "ambiguous"),
+])
+def test_gates_rejects_an_ambiguous_declaration(csv_path, bad, match):
+    with pytest.raises(ValueError, match=match):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=bad)
+
+
+def test_gate_rows_cannot_be_set_through_curated_labels(csv_path):
+    # One fact, one spelling: two mechanisms that could disagree about the wiring
+    # is the confusion this whole contract removes.
+    for name in ("v_top", "v_bot"):
+        with pytest.raises(ValueError, match="cannot be set through curated_labels"):
+            AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                                  curated_labels={name: "V_B"})
+
+
+# ---------------------------------------------------------------------------
+# Single-gated devices: one gate plus a contact to the TMDC
+# ---------------------------------------------------------------------------
+
+# The user-facing case: one electrode drives the bottom gate, the other contacts
+# the TMDC to ground it.  "channel": None says the contact is hard-grounded with no
+# row recording it, which is what keeps the density reference fixed.
+BOTTOM_ONLY = {"bottom": "V_A", "channel": None}
+
+
+def test_single_gate_declaration_records_the_topology(csv_path):
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              gates=BOTTOM_ONLY, sweep="bottom_voltage")
+    assert s.gates == BOTTOM_ONLY
+    assert s.is_dual_gated is False
+    assert np.allclose(s.v_bot, PARAMS["V_A"])
+    assert np.allclose(s.v_channel, np.zeros(N_SWEEPS))   # hard-grounded
+    assert np.allclose(s.sweep_axis, PARAMS["V_A"])
+
+
+def test_channel_on_a_recorded_row_is_read_from_it(csv_path):
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              gates={"bottom": "V_A", "channel": "V_B"})
+    assert np.allclose(s.v_channel, PARAMS["V_B"])
+    # The channel is not a gate, so it does not enter gate_mode.
+    assert s.gate_mode == "bottom-gate only"
+
+
+def test_single_gate_device_has_no_top_gate_and_no_field(csv_path):
+    geom = DeviceGeometry.from_single("WS2", d_hbn_bottom=46)
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              gates=BOTTOM_ONLY, geometry=geom)
+    # One gate is one degree of freedom: there is no gate-to-gate difference, so
+    # no displacement field, and the error has to say that rather than just refuse.
+    for attr in ("v_top", "ef"):
+        with pytest.raises(ValueError, match="single-gated device has no"):
+            getattr(s, attr)
+
+
+def test_electric_field_sweep_refused_on_a_single_gate_device(csv_path):
+    geom = DeviceGeometry.from_single("WS2", d_hbn_bottom=46)
+    with pytest.raises(ValueError, match="does not have"):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              sweep="electric_field", geometry=geom,
+                              gates=BOTTOM_ONLY)
+
+
+def test_channel_requires_its_own_declaration(scan):
+    # A dual-gate declaration says nothing about a contact to the TMDC.
+    with pytest.raises(ValueError, match="'channel' electrode"):
+        scan.v_channel
+
+
+def test_grounded_electrode_declared_as_none_reads_as_zero(csv_path):
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    s = AttoCubeSpectralSweep(
+        str(csv_path), spectra_type="PL", geometry=geom,
+        gates={"top": None, "bottom": "V_A"},
+    )
+    assert s.is_dual_gated is True
+    assert np.allclose(s.v_top, np.zeros(N_SWEEPS))
+    assert np.allclose(s.ef, geom.electric_field(np.zeros(N_SWEEPS),
+                                                 PARAMS["V_A"]))
+    # "grounded" rather than a row name, so the repr does not invent one.
+    assert "top ← grounded" in repr(s)
+
+
+def test_sweeping_a_grounded_electrode_is_refused(csv_path):
+    # Its voltage is zero at every point, so it is not an axis.
+    with pytest.raises(ValueError, match="tied to ground"):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              sweep="top_voltage",
+                              gates={"top": None, "bottom": "V_A"})
+
+
+# ---------------------------------------------------------------------------
+# Carrier density: what a single gate actually controls
+# ---------------------------------------------------------------------------
+
+# eps_0 * 3.9 / 46 nm, the geometric gate capacitance of the fixture below.
+C_BOTTOM_46NM = 8.8541878128e-12 * 3.9 / 46e-9      # F/m^2
+
+
+def test_gate_capacitance_is_geometric_and_uses_only_that_gates_hbn():
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    assert geom.gate_capacitance("bottom") == pytest.approx(C_BOTTOM_46NM)
+    # The TMDC is the counter-electrode, not a slab inside the capacitor, so its
+    # thickness must not enter: a thicker TMDC changes nothing here.
+    thick = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46,
+                                       n_layers=5)
+    assert thick.gate_capacitance("bottom") == pytest.approx(C_BOTTOM_46NM)
+    # And the top gate's own hBN gives a different, smaller capacitance.
+    assert geom.gate_capacitance("top") < geom.gate_capacitance("bottom")
+
+
+def test_gate_capacitance_refuses_a_gate_with_no_dielectric():
+    geom = DeviceGeometry.from_single("WS2", d_hbn_bottom=46)
+    with pytest.raises(ValueError, match="d_hbn_top is None"):
+        geom.gate_capacitance("top")
+    with pytest.raises(ValueError, match="gate must be one of"):
+        geom.gate_capacitance("side")
+
+
+def test_carrier_density_per_volt_matches_the_capacitance():
+    geom = DeviceGeometry.from_single("WS2", d_hbn_bottom=46)
+    n = geom.carrier_density(v_bot=np.array([0.0, 1.0]))
+    # dn/dV = C/e, converted to cm^-2: ~4.7e11 cm^-2 per volt for 46 nm hBN.
+    per_volt = C_BOTTOM_46NM / 1.602176634e-19 * 1e-4
+    assert n[0] == pytest.approx(0.0)
+    assert n[1] == pytest.approx(per_volt, rel=1e-6)
+    assert per_volt == pytest.approx(4.7e11, rel=0.02)
+
+
+def test_carrier_density_sums_over_supplied_gates_and_shifts_with_v_ref():
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    v = np.array([0.0, 1.0])
+    both = geom.carrier_density(v_top=v, v_bot=v)
+    # Each gate injects charge through its own capacitance, so the two add.
+    assert np.allclose(both, geom.carrier_density(v_bot=v)
+                             + geom.carrier_density(v_top=v))
+    # v_ref shifts the reference gate voltage, so it offsets the whole axis.
+    shifted = geom.carrier_density(v_bot=v, v_ref=1.0)
+    assert np.allclose(shifted, geom.carrier_density(v_bot=v - 1.0))
+    with pytest.raises(ValueError, match="at least one gate voltage"):
+        geom.carrier_density()
+
+
+def test_carrier_density_axis_on_a_single_gate_device(csv_path):
+    geom = DeviceGeometry.from_single("WSe2", d_hbn_bottom=46)
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              sweep="carrier_density", geometry=geom,
+                              gates=BOTTOM_ONLY)
+    assert np.allclose(s.carrier_density,
+                       geom.carrier_density(v_bot=PARAMS["V_A"]))
+    assert np.allclose(s.sweep_axis, s.carrier_density)
+    assert s.sweep_axis_label == r"$\Delta n$ (cm$^{-2}$)"
+
+
+def test_carrier_density_needs_a_declared_channel(csv_path):
+    # Charge comes from the contact, so a density is defined against it.
+    geom = DeviceGeometry.from_single("WSe2", d_hbn_top=53, d_hbn_bottom=46)
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              geometry=geom, gates=GATES)
+    with pytest.raises(ValueError, match="'channel' electrode"):
+        s.carrier_density
+    with pytest.raises(ValueError, match="'channel' electrode"):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              sweep="carrier_density", geometry=geom, gates=GATES)
+
+
+def test_carrier_density_warns_when_the_channel_is_driven(csv_path):
+    # The density is referenced to the contact; a contact that is itself swept
+    # moves the reference under the axis, and the file cannot say whether that was
+    # a source-drain bias or a wiring mistake.
+    geom = DeviceGeometry.from_single("WSe2", d_hbn_bottom=46)
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", geometry=geom,
+                              gates={"bottom": "V_A", "channel": "V_B"})
+    with pytest.warns(UserWarning, match="reference moves with the axis"):
+        s.carrier_density
+    # A hard-grounded channel is fixed by declaration, so it must stay silent.
+    quiet = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                                  geometry=geom, gates=BOTTOM_ONLY)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        quiet.carrier_density
+
+
+def test_carrier_density_needs_a_geometry(csv_path):
+    assert AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                                 gates=BOTTOM_ONLY).carrier_density is None
+    with pytest.raises(ValueError, match="needs a DeviceGeometry"):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              sweep="carrier_density", gates=BOTTOM_ONLY)
+
+
+def test_carrier_density_sweep_needs_the_gates_hbn_thickness(csv_path):
+    # Declared a bottom gate, but the geometry gives no bottom hBN to gate through.
+    geom = DeviceGeometry.from_single("WSe2", d_hbn_top=53)
+    with pytest.raises(ValueError, match="d_hbn_bottom is None"):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                              sweep="carrier_density", geometry=geom,
+                              gates=BOTTOM_ONLY)
+
+
+def test_repr_says_when_the_wiring_is_undeclared(scan, unwired):
+    assert "top ← 'V_A'" in repr(scan)
+    assert "bottom ← 'V_B'" in repr(scan)
+    # Must render rather than raise, and say plainly that nothing was declared.
+    text = repr(unwired)
+    assert "not declared" in text
+    # No field line, whose sign would be undefined.  Matched on the line rather
+    # than on the string, which also appears in the hint above it.
+    assert not [ln for ln in text.splitlines() if ln.strip().startswith("E_F")]
 
 
 # ---------------------------------------------------------------------------

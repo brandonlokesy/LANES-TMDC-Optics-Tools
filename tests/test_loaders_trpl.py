@@ -1,4 +1,4 @@
-"""
+﻿"""
 Tests for AttoCubeTRPLSweep.
 
 The real example files are small (3 × 142 KB decays plus an 11 MB companion), so
@@ -29,6 +29,9 @@ N_BINS   = 3205
 N_SWEEPS = 3
 # V_A steps +1.68 / ~0 / -1.68 V against V_B -1.0 / ~0 / +1.0 V: a field sweep.
 V_A_EXPECTED = [1.679972, 2.325371e-06, -1.679972]
+
+# The channel-to-gate wiring the loaders refuse to assume.
+GATES = {"top": "V_A", "bottom": "V_B"}
 
 
 def _synth_decay(path, n_bins=8, t_step=4.0e-3, params=None, counts=None) -> None:
@@ -92,7 +95,7 @@ def test_directory_assembles_the_sweep():
 
 
 def test_files_ordered_by_iter_index_not_filename():
-    s = AttoCubeTRPLSweep(TRPL_DIR)
+    s = AttoCubeTRPLSweep(TRPL_DIR, gates=GATES)
     assert [f.stem[-6:] for f in s.files] == ["iter_0", "iter_1", "iter_2"]
     # Parameters must follow that order, or every decay pairs with the wrong point.
     assert np.allclose(s.v_top, V_A_EXPECTED)
@@ -129,7 +132,8 @@ def test_loading_a_directory_emits_no_warnings():
 def test_field_sweep_over_the_directory():
     geom = DeviceGeometry(tmdc_stack=[StackLayer("MoSe2"), StackLayer("WSe2")],
                           d_hbn_top=53, d_hbn_bottom=46)
-    s = AttoCubeTRPLSweep(TRPL_DIR, sweep="electric_field", geometry=geom)
+    s = AttoCubeTRPLSweep(TRPL_DIR, sweep="electric_field", geometry=geom,
+                          gates=GATES)
     assert s.sweep_axis_label == r"$E_F$ (mV/nm)"
     assert s.gate_mode == "dual-gate, anti-correlated (field-like)"
     # Symmetric about zero, and monotonic in sweep order.
@@ -197,7 +201,7 @@ def test_iter_10_sorts_after_iter_2(tmp_path):
         _synth_decay(tmp_path / f"TRPL_iter_{i}.csv",
                      params={"V_A": float(i), "Excitation Power": 1e-4})
     with pytest.warns(UserWarning, match="missing iteration"):
-        s = AttoCubeTRPLSweep(tmp_path)
+        s = AttoCubeTRPLSweep(tmp_path, gates=GATES)
     assert [f.stem for f in s.files] == ["TRPL_iter_2", "TRPL_iter_10"]
     assert np.allclose(s.v_top, [2.0, 10.0])
 
@@ -208,7 +212,7 @@ def test_consecutive_iterations_do_not_warn(tmp_path):
                      params={"V_A": float(i), "Excitation Power": 1e-4})
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        s = AttoCubeTRPLSweep(tmp_path)
+        s = AttoCubeTRPLSweep(tmp_path, gates=GATES)
     assert [str(c.message) for c in caught] == []
     assert np.allclose(s.v_top, [0.0, 1.0, 2.0])
 
@@ -262,7 +266,7 @@ def test_empty_directory_lists_what_it_looked_at(tmp_path):
 def test_prefix_filters_the_directory(tmp_path):
     _synth_decay(tmp_path / "TRPL_iter_0.csv", params={"V_A": 1.0})
     _synth_decay(tmp_path / "other_iter_0.csv", params={"V_A": 9.0})
-    s = AttoCubeTRPLSweep(tmp_path, prefix="TRPL_")
+    s = AttoCubeTRPLSweep(tmp_path, prefix="TRPL_", gates=GATES)
     assert s.n_sweeps == 1
     assert np.allclose(s.v_top, [1.0])
 

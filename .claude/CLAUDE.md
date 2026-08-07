@@ -77,8 +77,14 @@ Two block layouts, told apart by the header's field names (`_read_block_layout`)
   **content, not filename**. Order data files by the integer in `_iter_N`;
   lexicographic order puts `iter_10` before `iter_2`.
 - **A 2-D spatial raster is one flattened file** (41 X inside 51 Y for the
-  reflectance example). `sweep_grid()` detects and reports the shape; it does
-  **not** reshape — that is still open work.
+  reflectance example). `sweep_grid()` detects and reports the shape; `as_grid()`
+  reshapes it, once the nest is declared with `fast_sweep=` / `slow_sweep=` (E14).
+- **The committed reflectance export is a truncation, not a raster.**
+  `examples/data/reflectance-contrast/sample_truncated_…csv` holds the first **50**
+  points of that 41 × 51 scan — one complete X row plus 9 of the next — which the
+  filename says and the numbers above do not. So it is a real fixture for the
+  aborted-scan refusal and for nothing else: **no complete raster is committed**,
+  and a test needing one must synthesise it (`tests/test_loaders_nesting.py`).
 
 Still unknown, and no file can answer it: which acquisition software and version
 emits this, and whether the layout is version-stable.
@@ -89,15 +95,39 @@ is labelled "backward compatibility" but predates any real user base.)
 
 ## Environment
 
+Conda env `viz-sci-plot`. **Activate it before running anything that imports numpy:**
+
 ```
-Interpreter : C:\Users\Brandon\anaconda3\envs\viz-sci-plot\python.exe
+conda activate viz-sci-plot
+
 Install     : pip install -e ".[docs]"
 Docs        : python -m mkdocs build --strict
 Tests       : python -m pytest -q
 ```
 
-`pytest` **is installed** in `viz-sci-plot` (9.1.1, confirmed 2026-07-30 — the whole
-suite runs) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
+Non-interactively (scripts, agents), one-shot instead of activating — there is no
+persistent shell session to activate into:
+
+```
+conda run --no-capture-output -n viz-sci-plot python -m pytest -q
+```
+
+`--no-capture-output` matters: without it `conda run` buffers everything until the
+process exits, so a crashing or hanging suite reports nothing.
+
+**Do not invoke `C:\Users\Brandon\anaconda3\envs\viz-sci-plot\python.exe` directly.**
+It is the right interpreter, but activation is what puts the env's `Library\bin` on
+`PATH`, and conda's numpy keeps its BLAS there (`mkl_rt.3.dll`) rather than vendoring
+it next to the extension module the way a pip wheel does. Unactivated, numpy imports
+fine and then dies at the **first BLAS call** — matmul, `np.corrcoef` (so
+`gate_mode`), skimage `regionprops` (so `_fit_laser_spot`) — with `Windows fatal
+exception: code 0xc06d007f`. That is a delay-load failure: a native crash, not a test
+failure, so there is no traceback, and it lands on whichever test reaches BLAS first,
+i.e. a different one each run. Nothing is wrong with the environment when this
+happens.
+
+`pytest` **is installed** in `viz-sci-plot` (9.1.1; the whole suite runs — 336 tests
+passing as of 2026-08-06) but is **not declared** in `pyproject.toml`: there is no `test` extra, so
 the dependency exists only in this one environment. Tests are local-only by
 deliberate choice — do not add a test job to CI. CI
 (`.github/workflows/docs.yml`) builds and deploys docs only. Declaring the extra is
@@ -142,12 +172,6 @@ Thesis eq. 3.12 keeps the `+ d_2D` term but substitutes `d_TOT` for `d_hBN`, whi
 counts the TMDC twice; it is 1.29% low, i.e. *worse* than the 3.13 that follows it.
 Keeping `d_hBN` there instead makes 3.12 exact and equal to the form above.
 
-**Jacobian** — `apply_jacobian` defaults to `False` and that is intended. The
-docstrings and README still claim "True (default)"; the *docs* are wrong, not the
-code. When the Jacobian is applied, background must be subtracted in wavelength
-space **first**, because a flat pedestal `B` becomes `B·λ²/hc` — curved, not flat —
-in energy space. The loader already does this in the right order.
-
 **Reflectance contrast** — `ΔR/R₀ = (S − R)/R` against a bare-substrate
 reference (`processing.spectral_contrast`, wired as `reference=` on the loader).
 Two things about it are easy to get wrong, both recorded because both change the
@@ -190,7 +214,12 @@ contents; corrections produce new arrays (`energy_spectra`, `energy_spectra_bg`,
 TODO — provenance not yet recorded, ask before documenting or changing:
 - `power_scale = 0.303e6` ("calibrated by CdG") — when, which objective/filter set,
   does it vary per session?
-- `Scanner X` / `Scanner Y` units (code says "assumed µm, scale 1.0 until confirmed").
+- ~~`Scanner X` / `Scanner Y` units~~ **Answered 2026-08-04: volts.** The scanners
+  are piezos and the rows carry their *drive voltage*, so `scanner_x`/`scanner_y`
+  and the `piezo_x`/`piezo_y` sweep axes are in V, scale 1.0. A distance needs a
+  per-stage µm/V calibration that no file contains — supply it via
+  `curated_scales` rather than assuming one. The sweep keys were `position_*`
+  until this was settled; they are `piezo_*` because the axis is a drive level.
 - `EPS_TMDC["HS"] = 7.5` — unsourced, sits among per-material values. Note it is
   *not* the harmonic mean of a MoSe₂/WSe₂ bilayer (that is 7.299), and it exceeds
   both constituents, so it is not an average of the values above it. Also note that
@@ -203,22 +232,60 @@ TODO — provenance not yet recorded, ask before documenting or changing:
   quoted as **3.76**, and 3.9 is also the canonical SiO₂ value. Worth checking
   against the table: it propagates into `eps_stack`, though only weakly into
   `electric_field` now that the exact form is used.
-- **Gate polarity is per-session wiring, not a property of the code.** The
-  electrodes can be hooked up in either configuration, so which acquisition channel
-  drove which gate is *not* inferable and must be recorded per scan; the old MATLAB
-  used `dm(4,…)`/`dm(6,…)` with no note of which was which.
-  `electric_field(v_top=, v_bot=)` puts the mapping on the caller by design —
-  transposing them mirrors the field axis and flips the sign of any extracted
-  dipole. The senior's thesis is itself inconsistent here (eq. 3.11 carries a
-  leading minus, 3.12/3.13 do not), so don't inherit its sign.
-  *Partly addressed 2026-07-30:* `AttoCubeSpectralSweep` now **records** the
-  mapping — `curated_labels={"v_top": …, "v_bot": …}`, printed in `__repr__` as
-  `(top ← 'V_A', bottom ← 'V_B')` and written into exported HDF5 — and
-  `gate_mode` reports whether the two gates were driven anti-correlated
-  (field-like) or correlated (doping-like). What is recorded is still the
-  *channel-to-argument* mapping, not the physical wiring: the default remains
-  `V_A`→top, `V_B`→bottom, which is a convention no file confirms. Ask per
-  session; don't add a sign to the physics.
+- ~~**Gate polarity is per-session wiring**~~ **Enforced 2026-08-05 — the code no
+  longer guesses, but you still have to know.** The electrodes can be hooked up in
+  either configuration, so which acquisition channel drove which gate is *not*
+  inferable and must come from the lab notebook per session; the old MATLAB used
+  `dm(4,…)`/`dm(6,…)` with no note of which was which. The senior's thesis is itself
+  inconsistent here (eq. 3.11 carries a leading minus, 3.12/3.13 do not), so don't
+  inherit its sign, and don't add a sign to the physics.
+
+  The loaders now take `gates=` and **refuse** to produce `v_top`, `v_bot`,
+  `v_channel`, `ef`, or a `top_voltage`/`bottom_voltage`/`electric_field` sweep
+  without it — closing E7b, which was opened by exactly this going wrong on a real
+  measurement. The mapping is recorded on the scan (`scan.gates`), printed in
+  `__repr__`, and written into exported HDF5 as its own attribute so a round trip
+  cannot launder an unstated wiring into a stated one. Channel-level work needs no
+  declaration: `scan["V_A"]` and `sweep="V_A"` are unaffected. Details, including
+  what deliberately does *not* raise, are in E7b.
+
+- **`gates` declares device topology, not just wiring.** The roles *present* say
+  what the device is, and what is computable follows (E7c):
+
+  | Declaration | Device | Available |
+  |---|---|---|
+  | `{"top": "V_A", "bottom": "V_B"}` | dual-gated | `ef`, `v_top`, `v_bot` |
+  | `{"bottom": "V_A", "channel": None}` | bottom-gated, TMDC grounded | `carrier_density`, `v_bot`; `ef` raises |
+
+  `"channel"` is a contact to the TMDC itself — **not a gate**: it sits inside the
+  stack, carries no thickness, enters no field, and is excluded from `gate_mode`.
+  A value of `None` means the electrode is hard-grounded with no row recording it.
+  `is_dual_gated` is the one predicate for "a field is defined"; `plotting` branches
+  on it. At least one gate is required, and a lone gate must name its `"channel"`,
+  or a single-gated device could not be told from a forgotten second gate.
+
+  **Do not make `ef` work for a single-gated device.** Its derivation fails twice
+  there — no second equipotential to define `V_BG − V_TG`, and a grounded TMDC *is*
+  the free charge the no-free-charge assumption excludes. One gate is also one
+  degree of freedom, so field and density are locked; independent control is what
+  the dual-gate anti-symmetric sweep buys. See E7c.
+
+**Carrier density** — `DeviceGeometry.gate_capacitance(gate)` is `ε₀ε_hBN/d_hBN`.
+The TMDC is the **counter-electrode**, not a slab inside the capacitor, so neither
+its thickness nor `eps_stack` enters — that is the sign you have reached for the
+wrong tool. `carrier_density` sums `C_i(V_i − V_ref)/e` over the supplied gates,
+signed with electrons positive, in cm⁻².
+
+- **`v_ref` is a gate voltage, not a threshold**, so the result is a density
+  *difference*. Absolute `n` needs the threshold at which the channel populates —
+  a transfer curve or the PL charging step, in no file. Pass it as `v_ref` if
+  measured; don't add a guessed one.
+- Geometric only: quantum and interface-trap capacitance are in series and make the
+  effective value smaller, so this is an **upper bound**.
+- `carrier_density` warns when the declared channel's row varies — the density is
+  referenced to that contact, so a driven contact moves the reference under the
+  axis. Legitimate for a source-drain bias, wrong for a doping sweep, and no file
+  distinguishes them.
 
 **Raman — WSe₂ bilayer and monolayer example modes.** `examples/data/Raman/*.txt`
 (LabRAM export, loaded by `RamanSpectrum`) is WSe₂, bilayer or monolayer per the
@@ -347,6 +414,22 @@ What does earn a parameter:
   `animate_panels` takes a list of panel objects rather than a flag per panel type,
   so any subset, order, or combination works with no special-casing. That is the
   shape to aim for: one structural parameter absorbing a combinatorial space.
+- **Axis and colour-bar labels — semantics, not styling.** Settled 2026-08-06.
+  A label states what the numbers *are*, so a wrong one is a misread, not an
+  ugly figure — it falls under the boundary case below, not under
+  `artist.set_<thing>(value)`. **One contract, everywhere in `plotting`:
+  `None` derives the label from the scan; a string is used verbatim; nothing is
+  ever appended to a caller's string.** Derivation reads `signal_name` /
+  `signal_unit` / `contrast_label` via `_signal_name_unit`, so it follows
+  `spectra_type` and no plot hardcodes "PL". A `normalized` flag **substitutes**
+  the unit and never adds one — a ratio such as ΔR/R₀ already reads as
+  normalised, so `$\Delta R/R_0$ (norm.)` states it twice. The append is what the rule
+  forbids: composing `caller_string + " (counts)"` forces a "pass it without a
+  unit" convention that is undocumentable at the call site and has already
+  shipped `"PL intensity (norm.) (norm.)"` once. The signal side gets **no**
+  loader-level override — `spectra_type` is a closed validated vocabulary
+  (G1); the sweep side does, and declares it once via `sweep=` /
+  `sweep_label=` / `sweep_unit=`.
 
 Why this is a library rule and not a matter of taste: **every parameter is a
 promise.** It needs a docstring entry, it constrains refactoring, its default reads
@@ -452,6 +535,33 @@ from a docstring into a comment two lines below has not fixed anything.
 - Evidence for the implementation — *"verified against the committed pair"*,
   *"measured at 13.8 s against 10.7 s"*. Comment or audit.
 
+**One file is not the format.** Every figure in the AttoCube record above came from
+one particular export, and the next one will differ — different raster dimensions,
+different sweep length, different file size, possibly a different acquisition
+version. So docstrings *and* comments describe the **shape of the thing** — that
+the exporter declares twice as many blocks as it writes, that a raster arrives
+flattened, that exports are large enough to make a one-line read worth it — and
+never present one file's numbers as what a caller should expect.
+
+- **Generalise the mechanism, not the measurement.** *"declares twice as many
+  blocks as it writes"* is behaviour, holds across every export seen, and is what
+  the code keys on; *"a 2091-point raster exported with 4182 blocks"* is one file's
+  arithmetic. State the first, drop the second. Where the prose is more specific
+  than the logic, the prose is wrong.
+- **Where an illustration genuinely helps, make the numbers obvious stand-ins.**
+  Symbolic is best (*"an `n_x` × `n_y` raster gives `n_x·n_y` points"*); round and
+  small is fine (*"e.g. 10 × 10 exported as 100 points"*). A figure that matches
+  the committed data reads as a specification, not an example — and a doctest whose
+  expected output is one file's value (`(12.817, 3)`) is a specification with a
+  test attached.
+- **Exact figures from real files belong in the record** — the AttoCube section of
+  this file, or `dev/audit-2026-07.md`. There they are dated, attached to the file
+  they came from, and correctable when the next acquisition version disagrees. Same
+  split as *evidence for the implementation* above.
+- **They rot, and silently.** `_read_block_layout` already says a raster is 314 MB
+  while the comment four lines below it says 300 MB. Nothing failed, no test caught
+  it, and the reader now has two facts about a file they do not have.
+
 **Cross-references: does it help the reader act?**
 
 `See Also`, *"the maths lives in `processing.spectral_contrast`"*, *"pass this to
@@ -543,97 +653,110 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 - `diffusion._binary_area` has a wrong MATLAB `bwarea` weight table (diagonal pairs
   0.5, should be 0.75; 3-pixel patterns 0.75, should be 0.875), biasing cloud areas
   low. Parked pending a decision on whether bwarea semantics are wanted at all.
-  *(The `AttoCubePLVabScan` `_CURATED` fail-fast that used to sit here was fixed
-  by the 2026-07-30 rewrite — see below.)*
 
-**Fixed — don't re-report:**
-- `processing.remove_cosmic_rays` (A1, fixed 2026-07-28). Was uncallable
-  (`UnboundLocalError`), and its iteration was a no-op. Now works, takes 2-D
-  `(n_pixels, n_sweeps)` input, and has `cross_sweep_veto=` plus a persistent-flag
-  warning. Covered by `tests/test_processing_cosmic_rays.py`.
-- `DeviceGeometry.eps_hs` / `__repr__` (A2, fixed 2026-07-30). `eps_hs` iterated
-  `_slabs()`'s `(d, ε)` tuples as `StackLayer` objects, so `print(geom)` raised for
-  every geometry. Now unpacks the tuples — `_slabs()` returning tuples is the
-  convention, not something to change: hBN gate flakes are ~50 nm, not *n*
-  monolayers, and hBN's ε lives in `EPS_HBN`, not `EPS_TMDC`, so wrapping them in
-  `StackLayer` would require asserting a false `n_layers`.
-- `DeviceGeometry.optical_thickness` **deleted** (A2, 2026-07-30). It returned
-  `d_tot × ε_2D` — full-stack thickness times a TMDC-only ε — under a local
-  variable misleadingly named `d_2d`. It was neither an optical path length
-  (`Σ nᵢdᵢ`, which these static out-of-plane ε values cannot give: TMDC in-plane
-  `n ≈ 4–5` near resonance against `√7.2 ≈ 2.7`) nor any capacitive thickness
-  (capacitance goes as `ε/d`; `d/ε` is what adds in series). It was a fragment of
-  the pre-2026-07-30 `electric_field` denominator with `ε_hBN` not yet divided out,
-  had no callers, and the name would have actively misled the planned
-  reflectance/cavity work. Do not reinstate it — the future optics code needs
-  dispersive `n(λ)` data of its own, not `EPS_TMDC`.
-- Laser circle in `animate_real_space_PL_map` (A3, fixed 2026-07-30). Passed the
-  `matplotlib.patheffects` *module* to `set_path_effects`, which raises
-  `AttributeError` at **draw** time, not at call time. The hand-rolled block was
-  replaced by `_draw_laser_circle(ax, scan.laser_ref, ls="--")`, so two drawers now
-  remain for D2 rather than three. New code annotating a laser spot should call that
-  helper, not build a `patches.Circle`. Covered by
-  `tests/test_plotting_laser_circle.py` — the suite's first plotting tests, which
-  force the `Agg` backend and assert on a real `fig.canvas.draw()`. Any future test
-  of an artist's styling must render too; building the figure proves nothing.
+**Fixed — don't re-report.** `remove_cosmic_rays` (A1), `DeviceGeometry.eps_hs` /
+`__repr__` and `optical_thickness` (A2), the `animate_real_space_PL_map` laser
+circle (A3), zero-filled blocks loaded as sweep points (A6), the silent sawtooth
+sweep axis on a raster (A8), the zero-mean overflow in `varying_parameters` (A10),
+the `_CURATED`
+fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), nested
+sweeps (E14), and the
+2026-07-30 rewrite — `AttoCubeSpectralSweep`, `hdf5.py`, `AttoCubeTRPLSweep`
+(G1–G4). Diagnosis, fix and tests for each are in the audit.
 
-- **`AttoCubePLVabScan` → `AttoCubeSpectralSweep`** (2026-07-30). Renamed and
-  rewritten; the old name survives as a deprecated subclass that emits
-  `FutureWarning` (**not** `DeprecationWarning` — Python filters that out by
-  default outside `__main__`, so a library raising one warns nobody). What
-  changed, and what to not re-litigate:
-  - `spectra_type=` is **required, keyword-only, no default**. It is written into
-    exported metadata and trusted thereafter, so a default would let a guess
-    outlive the session. Use `scan.signal_label` instead of hardcoding "PL".
-  - One `sweep=` argument takes a `_SWEEP_TYPES` key *or* any raw CSV row label.
-    Undeclared → the sweep axis is the sweep **index**, never an auto-detected
-    parameter: mislabelling an axis is worse than not labelling one, and
-    `V_A`+`V_B` both varying is ambiguous between a field sweep and independent
-    gating. `varying_parameters()` and `gate_mode` return the evidence instead.
-  - `gate_axis` / `gate_axis_label` are kept as aliases of `sweep_axis` /
-    `sweep_axis_label` so existing plotting keeps working. Don't delete them
-    without updating `plot_pl_map_Vab_scan`.
-  - E1 fixed: **no curated row is mandatory.** A file missing `Scanner X` loads;
-    the property raises only if accessed. The one remaining fail-fast is the row
-    the *declared* `sweep` needs — the requirement follows the declaration.
-  - The eight `*_label` / `power_scale` arguments collapsed into two dicts,
-    `curated_labels=` / `curated_scales=`.
-  - Both ROIs are always loaded (`spectra_roi1`/`spectra_roi2`); `roi=` only
-    chooses what `spectra` points at.
-  - `SPECTROSCOPY_TYPES` **moved** from `reference/loader.py` to `constants.py`
-    (with `"RC"` added) and is re-exported there. One vocabulary — don't fork it.
-  - Covered by `tests/test_loaders.py` (now against the new class, plus shim
-    tests) and `tests/test_hdf5_roundtrip.py`.
-- **HDF5 storage** (`hdf5.py`, 2026-07-30). `scan.to_hdf5(path)`; the loader
-  accepts `.h5`/`.hdf5` and dispatches on suffix, so **one class serves both
-  formats** — do not add a second loader class for HDF5. The file stores raw
-  signal arrays (both ROIs for a spectral sweep), every parameter row verbatim,
-  and the measurement metadata. It deliberately does **not** store the energy
-  axis, the energy-space spectra, or the sweep axis: all are derivable, and
-  freezing them would put one session's corrections into the archive. Corrections
-  — `apply_jacobian`, `bg_region_nm`/`_ns`, and the `bg_spectrum` / `reference`
-  arrays — are recorded as provenance in `scan.source_metadata` and are **never
-  replayed on read**; loading is not deciding. The auxiliary spectra are stored as
-  *arrays not paths* so a contrast can still be rebuilt from the archive alone.
-  `FORMAT_VERSION` 1.1 added the temporal axis kind (additive). A 4.59 MB PL CSV
-  writes as 0.14 MB; the 4-file 11.57 MB TRPL sweep as 0.069 MB.
-- **`AttoCubeTRPLSweep`** (2026-07-30). Sibling of `AttoCubeSpectralSweep` over a
-  shared private base `_AttoCubeSweep`. Accepts one file *or* a directory. Do not
-  merge it back into one class with a mode flag: a single decay is just
-  `n_sweeps == 1`, but `energy = hc/t` is meaningless and divides by zero at
-  `t = 0`, so a mode flag would leave a third of the public API conditionally
-  meaningful. It has no `spectra` attribute **on purpose**, so a TRPL sweep handed
-  to a spectral plot raises instead of drawing time as wavelength.
-- **The TRPL metadata companion is evidence, not the source.** Parameters come
-  from each data file's own snapshot, contemporaneous with its decay, so a sweep
-  loads without the companion at all. The companion supplies `n_declared_sweeps`
-  (an aborted sweep is then visible) and its table is exposed as
-  `declared_parameters`. Its values are **deliberately not** cross-checked row by
-  row: it is written seconds after the last decay, so drifting channels genuinely
-  disagree — the leakage currents and `Fianium_Select_A6` do, while the swept
-  gates agree to seven figures. Nothing in the file says which channels are
-  stable, so a value check would fire on every real sweep, which is how warnings
-  get ignored. Don't add one back.
+**Settled — don't re-litigate, and don't "helpfully" restore.** Each line is a
+decision; the argument for it is in the audit under the ID given.
+
+- `DeviceGeometry.optical_thickness` is **deleted**; do not reinstate it. Optics
+  code needs dispersive `n(λ)`, not `EPS_TMDC`. (A2)
+- `_slabs()` returns `(d, ε)` **tuples**, not `StackLayer` — wrapping an hBN flake
+  would assert a false `n_layers`. (A2)
+- Annotate a laser spot with `_draw_laser_circle`, never a hand-built
+  `patches.Circle`. Two drawers remain to unify. (A3, D2)
+- `spectra_type=` is **required, keyword-only, no default**. (G1)
+- An undeclared `sweep=` means the sweep **index** — never an auto-detected
+  parameter. (G1)
+- `gate_axis` / `gate_axis_label` stay as aliases until `plot_pl_map_Vab_scan` is
+  updated. (G1, E12)
+- `SPECTROSCOPY_TYPES` lives in `constants.py`. One vocabulary — don't fork it. (G1)
+- One loader class reads both CSV and HDF5; don't add a second for HDF5. (G2)
+- HDF5 stores no derived arrays, and never replays corrections on read. (G2)
+- `AttoCubeTRPLSweep` stays a separate class and has no `spectra` attribute. (G3)
+- No row-by-row value check against the TRPL metadata companion. (G4)
+- The `AttoCubePLVabScan` shim raises `FutureWarning`, not `DeprecationWarning`. (G1)
+- Background is subtracted in wavelength space **before** the Jacobian. (G5)
+- The channel-to-gate mapping is declared through **`gates=` and nowhere else**;
+  `v_top` / `v_bot` are rejected as `curated_labels` keys. One fact, one spelling.
+  (E7b)
+- **`v_top` / `v_bot` / `top_voltage` / `bottom_voltage` keep naming physical
+  roles** — don't rename them to `V_A` / `V_B`. Asked and settled 2026-08-05: the
+  role layer is where the field's sign convention lives, so channel names there
+  would make `electric_field` unambiguous-looking and still wrong half the time,
+  moving the ambiguity out of a recorded mapping and into the researcher's head.
+  Channels are already reachable as raw rows. (E7b)
+- `gate_mode` and `__repr__` **never raise** for an undeclared mapping, and
+  `ef` returns `None` rather than raising when no geometry was supplied. A
+  diagnostic that dies is no diagnostic. (E7b)
+- **`"channel"` is a `gates` role, not a third gate.** Asked and settled
+  2026-08-05: it records the contact that grounds the TMDC, so it makes a
+  single-gate declaration unambiguous and is what a density is referenced to. It
+  is excluded from `gate_mode` and from every field. (E7c)
+- **`carrier_density` returns a density *difference*, referenced to a gate
+  voltage.** Absolute `n` needs a threshold no file records; don't default one.
+  (E7c)
+- **Cosmic-ray repair is a load-time `cosmic_rays=` dict, run first in the
+  wavelength-space chain** — not a plotting argument and not a third flag with its
+  own energy-space arrays. It feeds the background estimate, the contrast and the
+  fits; `spectra` stays the file's own counts, `spectra_cr` holds the repair and
+  `cosmic_ray_mask` says what moved. (E13)
+- **Nested sweeps are declared with `fast_sweep=` / `slow_sweep=`, which are not
+  aliases of `sweep=`.** Settled 2026-08-06, superseding the `grid=(inner, outer)`
+  tuple. Everywhere in this package **"sweep" means the flattened measurement
+  point** — `n_sweeps`, `sweep_index`, `sweep_mask`, and `sweep_axis` (an array *of
+  length `n_sweeps`*). So `sweep=` answers *"which array labels each flat point"*
+  and the nest declaration is a separate statement, *"those points are `n_fast`
+  inside `n_slow`"*. Don't redefine `sweep=` to mean the fast axis: it would be the
+  one place in the package the word meant an axis, two lines from `n_sweeps` still
+  meaning the other thing. On a nested scan `sweep=` is normally omitted, so
+  `sweep_axis` is the flat index. (E14)
+- **Both nest axes resolve through `_resolve_sweep`, so a derived quantity can be
+  an axis.** This is the point of the whole design: with both gates moved together
+  to sweep the field, each gate row takes a different value at every point, so no
+  row can be the axis while `electric_field` takes exactly `n_fast`.
+  `sweep_grid()` still detects on raw rows only and so reports the channels — it
+  says what to declare, as `gate_mode` does for `gates=`. It also returns the
+  *first* pair that verifies, and on a raster taken during an anti-symmetric gate
+  sweep two pairs verify equally well, so it may name the gates rather than the
+  scanners. Not a defect to chase: nothing in the rows says which pair the
+  experiment was about. (E14, A10)
+- **`spectra` keeps shape `(n_points, n_sweeps)` whether or not a nest is
+  declared**; the grid is a view from `as_grid(array)`. A declaration must not
+  change the rank of an attribute — `n_sweeps` is `spectra.shape[1]`, and every
+  consumer would have to branch on `is_nested`. Accessor results are views too,
+  which is why the selectors are ints and slices rather than fancy indexing. (E14)
+- **`axis=` locates a point by a quantity other than the declared sweep axis** —
+  `get_spectrum_at(15.0, axis="top_voltage")` on a field sweep driven by both
+  gates. Fourth entry point onto the same `_resolve_sweep` vocabulary; a
+  parameter, not a `get_spectrum_from_parameter` sibling. **Flat sweeps only, and
+  don't extend it to nests:** there an arbitrary quantity matches `n_slow` points
+  or one depending on how the scan was driven, so the return rank would follow the
+  data rather than the call. Declare `fast_sweep=` in the coordinate you want
+  instead. (E14)
+- **An ambiguous coordinate is warned by `nearest_index` and *refused* by the
+  accessors.** Not an inconsistency: a single `int` is all `nearest_index` can
+  return, whereas `get_spectrum_at` returns data and the API already has the
+  complete answer — a declared nest gives every match at once through
+  `fast=`/`slow=`, so handing back one of four would be a silent partial answer.
+  Matches are compared on the coordinate, not the distance, so a request landing
+  midway between two distinct points is not a tie. (E14)
+- **The sweep axis must label each point individually, and the loader warns when
+  it does not.** Asked as *"how many different values does this axis take?"*, not
+  *"is it monotonic?"* — the latter is a side effect that catches a nest's inner
+  quantity (sawtooth) and misses its outer one (staircase), which is the worse
+  failure of the two. **No grid guard:** `sweep_grid()` returns `None` for a field
+  × power nest, so a guarded check would be silent on exactly the case E14 exists
+  for. Deliberate repeat measurements warn too — their map collapses the same way.
+  (A8, E14)
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
@@ -641,16 +764,13 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 - README §5/§6 reference APIs that don't exist (`AttoCubePLScan`, `plot_pl_map`,
   `bg_region=` on `fit_scan_peak`). The `__init__.py` quick-start was corrected on
   2026-07-30 as part of the rename.
-- `plotting.py` hardcodes "PL intensity" in ~6 places and
-  `plot_pl_map_Vab_scan` / `plot_current(ef_axis=)` are named for the gate-sweep
-  era. Nothing breaks — `scan.signal_label` and `scan.sweep_axis` exist for them —
-  but a plotting pass is owed. See E12.
-- **A declared 1-D sweep on a raster gives a sawtooth axis, silently** (A8).
-  `sweep="position_x"` on the reflectance raster succeeds and returns `Scanner X`
-  repeated 51 times, non-monotonic; `__repr__` prints only min and max so it looks
-  fine, and any plot against it overplots 51 times. `sweep_grid()` already detects
-  the raster, so the fix is to compare the two and warn. Don't make it an error —
-  one axis of a raster is legitimate when slicing a single row.
+- `plot_current(ef_axis=)` is still named for the gate-sweep era, as is
+  `plot_spectrum`'s hand-rolled `E_F` legend default and `SpectrumLinePanel`'s
+  `sweep_attr="scanner_y"` / `sweep_unit="V"`. Nothing breaks —
+  `scan.sweep_axis` / `sweep_axis_label` exist for them — but the rename half of
+  E12 is owed. The hardcoded-"PL intensity" half is **done** (2026-08-06); see
+  *parameters earn their place* for the label contract that replaced it, and
+  `dev/plan-E12.md` Step 3 for what remains.
 - **`_is_image_csv` accepts a two-row spectrum as an image** (A9), because it only
   tests whether the first line parses as floats — and a `SingleSpectrum`'s first row
   is its wavelength axis. A directory of single spectra therefore loads as 2×N
@@ -665,19 +785,10 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
   (`contour_*`, `centroid_*`, `roi_color`, `bg_region_color`, `laser_*`,
   `xlabel`/`ylabel`, `colorbar_label`) and return its artists instead of only
   `result`. Signature change, acceptable pre-adoption. See E11.
-- **An x/y raster gets a grid API, not a `_SWEEP_TYPES` entry.** Asked and settled
-  2026-07-31, so don't re-propose `"position_xy"`: that registry answers *"which 1-D
-  array of length `n_sweeps` is the sweep axis"*, and `sweep_axis` returns exactly one
-  array that plotting calls `.min()`/`.max()` on. A raster has two axes, so there is
-  nothing single to return — a tuple breaks the contract, a flat index is already
-  `sweep=None`, and one-of-the-two is already `position_x`/`position_y`. What is
-  missing is the **reshape** to `(n_points, n_y, n_x)` plus map plotting, on top of
-  the shape `sweep_grid()` already reports. Give it an explicit
-  `grid=("Scanner X", "Scanner Y")` declaration, **inner axis first**: detection needs
-  `n_inner × n_outer == n_sweeps` exactly and so fails on an aborted scan with a
-  partial final row, and declaring it settles the x/y loop-order flip by statement
-  rather than inference — the same "put it on the caller" pattern as `sweep=` and gate
-  polarity.
+- ~~An x/y raster gets a `grid=(inner, outer)` declaration~~ **Built 2026-08-06 as
+  `fast_sweep=` / `slow_sweep=` (E14).** The "not a `_SWEEP_TYPES` entry" half of the
+  2026-07-31 decision stands — don't re-propose a `"piezo_xy"`. The tuple spelling
+  does not: see *nested sweeps* below.
 
 ## Working style
 

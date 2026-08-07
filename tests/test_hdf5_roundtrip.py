@@ -1,4 +1,4 @@
-"""
+﻿"""
 Round-trip tests for tmdc_optics_tools.hdf5.
 
 The point of storing metadata alongside the data is that a re-read reproduces the
@@ -21,7 +21,7 @@ from tmdc_optics_tools.loaders import (
     StackLayer,
 )
 
-from test_loaders import N_SWEEPS, PARAMS, make_spectral_csv
+from test_loaders import GATES, N_SWEEPS, PARAMS, make_spectral_csv
 
 
 @pytest.fixture
@@ -40,6 +40,7 @@ def scan(tmp_path, geom):
     make_spectral_csv(csv)
     return AttoCubeSpectralSweep(
         str(csv), spectra_type="PL", sweep="electric_field", geometry=geom,
+        gates=GATES,
     )
 
 
@@ -113,7 +114,8 @@ def test_geometry_with_no_top_hbn_round_trips(tmp_path):
     single = DeviceGeometry(tmdc_stack=[StackLayer("WSe2")],
                             d_hbn_top=None, d_hbn_bottom=50.0)
     scan = AttoCubeSpectralSweep(str(csv), spectra_type="PL",
-                                 sweep="bottom_voltage", geometry=single)
+                                 sweep="bottom_voltage", geometry=single,
+                                 gates=GATES)
     scan.to_hdf5(tmp_path / "single.h5")
     back = AttoCubeSpectralSweep(tmp_path / "single.h5")
 
@@ -129,16 +131,33 @@ def test_curated_overrides_restored(tmp_path, geom):
     make_spectral_csv(csv)
     scan = AttoCubeSpectralSweep(
         str(csv), spectra_type="PL", sweep="electric_field", geometry=geom,
-        curated_labels={"v_top": "V_B", "v_bot": "V_A"},
+        gates={"top": "V_B", "bottom": "V_A"},
         curated_scales={"power": 1.0},
     )
     scan.to_hdf5(tmp_path / "wired.h5")
     back = AttoCubeSpectralSweep(tmp_path / "wired.h5")
 
+    assert back.gates == {"top": "V_B", "bottom": "V_A"}
     assert back.curated_parameters["v_top"][0] == "V_B"
     assert back.curated_parameters["v_bot"][0] == "V_A"
     assert back.curated_parameters["power"][1] == 1.0
     assert np.allclose(back.ef, scan.ef)
+
+
+def test_undeclared_wiring_stays_undeclared_on_read(tmp_path):
+    # The curated dump always carries a resolved label for both gate rows, so
+    # without a separate record a round trip would turn an unstated wiring into a
+    # stated one -- laundering the assumption into provenance.
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    scan = AttoCubeSpectralSweep(str(csv), spectra_type="PL")
+    assert scan.gates is None
+    scan.to_hdf5(tmp_path / "unwired.h5")
+    back = AttoCubeSpectralSweep(tmp_path / "unwired.h5")
+
+    assert back.gates is None
+    with pytest.raises(ValueError, match="not declared"):
+        back.v_top
 
 
 def test_raw_row_sweep_metadata_restored(tmp_path):
@@ -171,7 +190,7 @@ def test_corrections_are_not_replayed_on_read(tmp_path, geom):
     make_spectral_csv(csv)
     corrected = AttoCubeSpectralSweep(
         str(csv), spectra_type="PL", sweep="electric_field", geometry=geom,
-        bg_region_nm=(806.0, 809.0), apply_jacobian=True,
+        gates=GATES, bg_region_nm=(806.0, 809.0), apply_jacobian=True,
     )
     corrected.to_hdf5(tmp_path / "corrected.h5")
     back = AttoCubeSpectralSweep(tmp_path / "corrected.h5")
@@ -190,7 +209,7 @@ def test_stored_spectra_are_raw(tmp_path, geom):
     make_spectral_csv(csv)
     corrected = AttoCubeSpectralSweep(
         str(csv), spectra_type="PL", sweep="electric_field", geometry=geom,
-        bg_region_nm=(806.0, 809.0), apply_jacobian=True,
+        gates=GATES, bg_region_nm=(806.0, 809.0), apply_jacobian=True,
     )
     corrected.to_hdf5(tmp_path / "corrected.h5")
     back = AttoCubeSpectralSweep(tmp_path / "corrected.h5")
@@ -202,7 +221,7 @@ def test_reapplying_corrections_on_read_reproduces_them(tmp_path, geom):
     csv = tmp_path / "scan.csv"
     make_spectral_csv(csv)
     kwargs = dict(spectra_type="PL", sweep="electric_field", geometry=geom,
-                  bg_region_nm=(806.0, 809.0), apply_jacobian=True)
+                  gates=GATES, bg_region_nm=(806.0, 809.0), apply_jacobian=True)
     original = AttoCubeSpectralSweep(str(csv), **kwargs)
     original.to_hdf5(tmp_path / "scan.h5")
     back = AttoCubeSpectralSweep(tmp_path / "scan.h5", **kwargs)
@@ -253,7 +272,8 @@ def test_unknown_suffix_names_the_supported_formats(tmp_path):
 
 def test_trpl_sweep_round_trips(tmp_path):
     # An assembled 4-file directory collapses to one self-describing archive.
-    trpl = AttoCubeTRPLSweep("examples/data/TRPL", bg_region_ns=(0.0, 1.0))
+    trpl = AttoCubeTRPLSweep("examples/data/TRPL", bg_region_ns=(0.0, 1.0),
+                             gates=GATES)
     out  = trpl.to_hdf5(tmp_path / "trpl.h5")
     back = AttoCubeTRPLSweep(out)
 
@@ -334,6 +354,63 @@ def test_reference_stored_as_an_array_not_a_path(tmp_path, geom):
         bg_spectrum=back.source_metadata["bg_spectrum"],
     )
     assert np.allclose(again.contrast, scan.contrast)
+
+
+def test_auxiliary_spectra_live_beside_the_signal(tmp_path):
+    # They are measured arrays on the file's own axis, not descriptions of the
+    # measurement, so /auxiliary is their home rather than /metadata.
+    h5py = pytest.importorskip("h5py")
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    ref  = np.linspace(50.0, 60.0, 10)
+    scan = AttoCubeSpectralSweep(str(csv), spectra_type="RC", reference=ref,
+                                 reference_scale=2.0,
+                                 bg_spectrum=np.full(10, 2.0))
+
+    with h5py.File(scan.to_hdf5(tmp_path / "rc.h5"), "r") as hf:
+        assert set(hf["auxiliary"]) == {"bg_spectrum", "reference"}
+        assert "bg_spectrum" not in hf["metadata"]
+        assert "reference"   not in hf["metadata"]
+
+        # The two scalars a contrast depends on hang off the array they qualify,
+        # and the stored values already carry the scaling the name reports.
+        stored = hf["auxiliary/reference"]
+        assert stored.attrs["contrast_mode"] == "contrast"
+        assert stored.attrs["scale_applied"] == 2.0
+        assert np.allclose(stored[()], ref * 2.0)
+        assert "reference_scale" not in hf["metadata"].attrs
+
+
+def test_no_auxiliary_group_when_no_auxiliary_spectra(scan, tmp_path):
+    h5py = pytest.importorskip("h5py")
+    with h5py.File(scan.to_hdf5(tmp_path / "plain.h5"), "r") as hf:
+        assert "auxiliary" not in hf
+
+
+def test_reference_attrs_come_back_as_provenance(tmp_path):
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    ref  = np.linspace(50.0, 60.0, 10)
+    scan = AttoCubeSpectralSweep(str(csv), spectra_type="RC", reference=ref,
+                                 reference_scale=2.0)
+    meta = hdf5.read_sweep(scan.to_hdf5(tmp_path / "rc.h5"))["metadata"]
+    assert meta["contrast_mode"]   == "contrast"
+    assert meta["reference_scale"] == 2.0
+    assert np.allclose(meta["reference"], ref * 2.0)
+
+
+def test_older_major_format_version_is_refused(scan, tmp_path):
+    # A 1.x file kept the auxiliary spectra somewhere this reader does not look,
+    # so a tolerant read would drop a recorded reference without saying so.
+    h5py = pytest.importorskip("h5py")
+    out = scan.to_hdf5(tmp_path / "scan.h5")
+    with h5py.File(out, "r+") as hf:
+        hf.attrs["format_version"] = "1.1"
+
+    with pytest.raises(ValueError, match="format_version"):
+        hdf5.read_sweep(out)
+    with pytest.raises(ValueError, match="format_version"):
+        AttoCubeSpectralSweep(out)
 
 
 def test_read_sweep_returns_the_payload_contract(scan, tmp_path):

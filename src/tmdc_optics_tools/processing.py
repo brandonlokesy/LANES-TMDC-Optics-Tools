@@ -124,6 +124,8 @@ def subtract_background(
     mask = (x >= bg_region[0]) & (x <= bg_region[1])
     if not mask.any():
         raise ValueError(f"No pixels found in bg_region {bg_region}.")
+    # Extract rows/columns from spectra along the spectral axis provided by the mask
+    # Then take the average of the masked background region
     bg = np.take(spectra, np.where(mask)[0], axis=axis).mean(axis=axis, keepdims=True)
     return spectra - bg
 
@@ -192,8 +194,8 @@ def subtract_spectrum(
 # ---------------------------------------------------------------------------
 
 _CONTRAST_MODES = {
-    "contrast": "(S - R) / R",
-    "ratio":    "S / R",
+    "contrast": "(R - R_0) / R_0",
+    "ratio":    "R / R_0",
 }
 
 
@@ -204,13 +206,12 @@ def spectral_contrast(
     min_reference : float = None,
     axis          : int = 0,
 ) -> tuple:
-    """
+    r"""
     Divide spectra by a reference spectrum, as reflectance contrast or a ratio.
 
     For reflectance the sample and a bare-substrate reference give
 
-    .. math :: \\frac{\\Delta R}{R_0} = \\frac{S - R}{R}
-               \\qquad\\text{or}\\qquad \\frac{R}{R_0} = \\frac{S}{R}
+    .. math :: \\frac{\\Delta R}{R_0} = \\frac{R - R_0}{R_0} = \\frac{S - R}{R}
 
     Both are standard read-outs, which is why both modes exist and no others: an
     absorbance mode would be an untested promise until absorption data has a
@@ -224,7 +225,7 @@ def spectral_contrast(
     reference : np.ndarray, shape (n_pixels,) or matching *spectra*
         Reference spectrum on the **same** x-axis, likewise background-subtracted.
     mode : {"contrast", "ratio"}
-        ``"contrast"`` gives ``(S - R) / R``; ``"ratio"`` gives ``S / R``.
+        ``"contrast"`` gives ``(R - R_0) / R_0``; ``"ratio"`` gives ``R / R_0``.
     min_reference : float, optional
         Reference pixels at or below this value are treated as unusable and come
         back as ``NaN``.  ``None`` (default) guards only non-positive pixels: a
@@ -432,11 +433,27 @@ def jacobian_correction_wvl2E(
     wavelength_nm : np.ndarray,
     axis          : int = 0,
 ) -> np.ndarray:
-    """
+    r"""
     Apply the Jacobian correction when converting PL from wavelength to energy.
 
     When replotting on an energy axis, the spectral density must be
-    multiplied by dλ/dE = λ²/(hc) to conserve integrated intensity.
+    multiplied by :math:`\mathrm{d}\lambda/\mathrm{d}E = \lambda^2/(hc)` to conserve integrated intensity.
+
+    .. note::
+        We are measuring spectral density: how many counts per wavelength interval. We demand that the integrated
+        spectral density in wavelength and energy must be the same:
+
+        .. math:: \int S(\lambda) \mathrm{d}\lambda = \int S(E) \mathrm{d}E
+
+        The counts per wavelength interval must be equal to the counts per energy interval (because this is what is measured).
+
+        .. math:: I_E(E) = I_\lambda(\lambda) \frac{\mathrm{d}\lambda}{\mathrm{d}E} = I_\lambda(\lambda) \frac{\lambda^2}{hc}
+
+        We drop the negative sign associated with the Jacobian because we absorb this sign flip by reversing the array.
+
+        It is important to note that for a spectral value B, applying the Jacobian scales the value to :math:`B \lambda^2/(hc)`.
+        This means that a non-zero background signal is scaled. For this reason, it is important to apply a background
+        correction window before applying the Jacobian correction.
 
     Parameters
     ----------

@@ -23,11 +23,15 @@ Layout
     ├── metadata/                  attrs: spectra_type, axis_kind, sweep_type,
     │   │                                 sweep_label, sweep_unit, source_file,
     │   │                                 curated_labels, curated_scales,
+    │   │                                 gates, fast_sweep, slow_sweep,
+    │   │                                 cosmic_rays (each only if declared),
     │   │                                 + provenance (see below)
-    │   ├── geometry/              attrs: d_hbn_top, d_hbn_bottom, eps_hbn, label
-    │   │   └── tmdc_stack         structured dataset, one row per layer
-    │   ├── bg_spectrum            (n_points,)  optional
-    │   └── reference              (n_points,)  optional
+    │   └── geometry/              attrs: d_hbn_top, d_hbn_bottom, eps_hbn, label
+    │       └── tmdc_stack         structured dataset, one row per layer
+    ├── auxiliary/                 written only if either spectrum was supplied
+    │   ├── bg_spectrum            (n_points,)  attrs: units
+    │   └── reference              (n_points,)  attrs: units, contrast_mode,
+    │                                                 scale_applied
     ├── axes/
     │   └── wavelength | time      (n_points,)          float64, attrs: units
     ├── parameters/                one dataset per instrument row,
@@ -58,21 +62,40 @@ Everything derivable from what is:
   rather than properties of the measurement.  Writing them would freeze one
   session's choices into the archive, and a later reader could not tell the
   stored array from a raw one.
+* **The cosmic-ray-repaired spectra** — the same argument, and the reason the
+  stored ``spectra`` is the array the source file held.
 * **The sweep axis** — a field axis is ``eps_stack``-weighted arithmetic on
   ``V_A``/``V_B`` and the geometry, all of which are stored.
+* **The nest coordinates** — ``fast_sweep`` / ``slow_sweep`` record the two axis
+  *names*, and the values come back off the parameter rows the same way they were
+  read the first time.  A stored copy could disagree with the rows beside it.
 
-So ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``, and the ``bg_spectrum``
-/ ``reference`` spectra *are* recorded, but as provenance of the session that
-wrote the file, exposed on read as
+A declaration is a different thing from a correction, and the two are stored the
+same way but read back differently.  ``gates`` and ``fast_sweep`` / ``slow_sweep``
+say what the measurement *was* — how it was wired, how it was nested — and are
+**replayed**, because losing them would turn a stated fact back into an unknown
+one.  So ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``, ``cosmic_rays``, and
+the ``bg_spectrum`` / ``reference`` spectra *are* recorded, but as provenance of
+the session that wrote the file, exposed on read as
 :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.source_metadata`.  They
 are **not** replayed: re-applying a correction because a file mentions one would
 make loading a decision, which is the one thing loading must not be.  Raw arrays
 in, corrections opt-in — the same rule as everywhere else in the package.
 
-The auxiliary spectra are stored as **arrays rather than paths**, so the archive
-stands alone once the substrate CSV has moved: a contrast can be rebuilt from the
-``.h5`` by passing ``reference=scan.source_metadata["reference"]`` back in, which
-keeps the not-replayed rule while losing nothing.
+The auxiliary spectra — a measured background, and a bare-substrate reference —
+have their own group rather than sitting under ``metadata/``: they are measured
+arrays on the file's own axis, in the same units as the signal, and not
+descriptions of the measurement.  The two scalars that qualify a reference,
+``contrast_mode`` and ``scale_applied``, are attributes **of the reference
+dataset**, so the factor a contrast depends on travels with the array it applies
+to.  ``scale_applied`` records a scaling already present in the stored values.
+
+Both are stored as **arrays rather than paths**, so the archive stands alone once
+the substrate CSV has moved: a contrast can be rebuilt from the ``.h5`` by passing
+``reference=scan.source_metadata["reference"]`` back in, which keeps the
+not-replayed rule while losing nothing.  Do not pass ``reference_scale`` alongside
+it — the stored values already carry that factor, and supplying it again applies
+it twice.
 
 Functions
 ---------
@@ -97,10 +120,14 @@ import numpy as np
 from . import __version__
 
 # Bump the minor when a field is added (readers stay compatible); bump the major
-# only for a change that an older reader would mis-read.  1.1 added the temporal
-# axis kind alongside the spectral one, which is purely additive.
+# only for a change that an older reader would mis-read.  2.0 moved the auxiliary
+# spectra out of /metadata into /auxiliary, which is exactly such a change: a
+# reader that looks in the old place finds nothing there and drops a recorded
+# reference without erroring.  Hence the major gate on read — a silently missing
+# reference is worse than a refused file.
 FORMAT_NAME    = "tmdc_optics_tools.attocube_sweep"
-FORMAT_VERSION = "1.1"
+FORMAT_VERSION = "2.1"
+_FORMAT_MAJOR  = FORMAT_VERSION.split(".")[0]
 
 # Files written before the module served both axis kinds carry the old name.
 _LEGACY_FORMAT_NAMES = ("tmdc_optics_tools.spectral_sweep",)
@@ -121,7 +148,7 @@ _CLASS_FOR_AXIS_KIND = {
 }
 
 # Keys stored as JSON strings because HDF5 attributes have no mapping type.
-_JSON_ATTRS = ("curated_labels", "curated_scales")
+_JSON_ATTRS = ("curated_labels", "curated_scales", "gates", "cosmic_rays")
 
 # Structured dtype for the TMDC stack: one row per layer, so layer *order* — the
 # physical stacking sequence — is carried by the dataset rather than by dataset
@@ -264,19 +291,39 @@ def write_sweep(
         meta.attrs["sweep_unit"]     = scan.sweep_unit
         meta.attrs["source_file"]    = scan.path
 
-        # The resolved curated map, so an unusual gate wiring or power scale is
-        # restored rather than silently reverting to the class defaults.
+        # The resolved curated map, so an unusual power scale is restored rather
+        # than silently reverting to the class defaults.
         curated = scan.curated_parameters
         meta.attrs["curated_labels"] = json.dumps(
             {name: cfg[0] for name, cfg in curated.items()})
         meta.attrs["curated_scales"] = json.dumps(
             {name: cfg[1] for name, cfg in curated.items()})
 
+        # The channel-to-gate mapping, written *only* when the writing session
+        # declared it.  The curated dump above always carries a resolved label for
+        # both gate rows and so cannot distinguish a declared mapping from a
+        # defaulted one; keeping this separate is what stops a round trip turning
+        # an unstated wiring into a stated one.
+        if scan.gates is not None:
+            meta.attrs["gates"] = json.dumps(scan.gates)
+
+        # The 2-D nest, written only when the writing session declared one — a
+        # declaration like `gates`, replayed on read, not provenance.  Only the two
+        # axis *names* are stored: the coordinates are re-derived from the
+        # parameter rows, and a second copy could disagree with them.
+        if scan.nesting is not None:
+            meta.attrs["fast_sweep"] = scan.nesting.fast_type
+            meta.attrs["slow_sweep"] = scan.nesting.slow_type
+
         # Provenance of the writing session's loading choices — recorded, and
         # deliberately not replayed on read.  See the module docstring.
         if scan._LAYOUT_KIND == "spectral":
             meta.attrs["roi"]            = int(scan.roi)
             meta.attrs["apply_jacobian"] = bool(scan.apply_jacobian)
+            # The declaration, not the repaired array: `spectra` is written as the
+            # source file had it, so a reader that wants the repair asks for it.
+            if scan.cosmic_rays is not None:
+                meta.attrs["cosmic_rays"] = json.dumps(scan.cosmic_rays)
             if scan.bg_region_nm is not None:
                 meta.attrs["bg_region_nm"] = np.asarray(scan.bg_region_nm,
                                                         dtype=float)
@@ -295,15 +342,27 @@ def write_sweep(
         # the archive should stand alone.  Like the other corrections they are
         # recorded, not replayed — but keeping the values means a contrast can be
         # rebuilt from the .h5 alone.
-        for name in ("bg_spectrum", "reference"):
-            values = getattr(scan, name, None)
-            if values is not None:
-                dset = meta.create_dataset(name, data=np.asarray(values, float))
+        aux_spectra = {name: getattr(scan, name, None)
+                       for name in ("bg_spectrum", "reference")}
+        if any(values is not None for values in aux_spectra.values()):
+            aux = hf.create_group("auxiliary")
+            for name, values in aux_spectra.items():
+                if values is None:
+                    continue
+                dset = aux.create_dataset(name, data=np.asarray(values, float))
                 dset.attrs["units"] = "counts"
-        if getattr(scan, "reference", None) is not None:
-            meta.attrs["contrast_mode"] = scan.contrast_mode
-            if scan.reference_scale is not None:
-                meta.attrs["reference_scale"] = float(scan.reference_scale)
+
+            if aux_spectra["reference"] is not None:
+                # Both scalars qualify this one array, so they hang off it rather
+                # than off /metadata: an unmatched exposure biases a contrast, and
+                # the factor that accounts for it is worthless separated from the
+                # values it was applied to.  scan.reference already carries the
+                # scaling (loaders applies it at construction), so the name says
+                # applied — a reader must not multiply by it again.
+                ref = aux["reference"]
+                ref.attrs["contrast_mode"] = scan.contrast_mode
+                if scan.reference_scale is not None:
+                    ref.attrs["scale_applied"] = float(scan.reference_scale)
 
         # Axis dataset named for the physical quantity it holds, so `h5ls` says
         # what the file is; metadata/axis_kind records it authoritatively too.
@@ -367,14 +426,18 @@ def read_sweep(path) -> dict:
         ``metadata`` : dict of the recorded measurement metadata —
             ``spectra_type``, ``sweep``, ``sweep_label``, ``sweep_unit``, ``roi``,
             ``geometry`` (a rebuilt :class:`DeviceGeometry` or absent),
-            ``curated_labels``, ``curated_scales``, plus the writing session's
+            ``curated_labels``, ``curated_scales``, ``gates`` (the declared
+            channel-to-gate mapping, or ``None`` if the writer never declared
+            one), plus the writing session's
             ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``,
-            ``bg_spectrum``, ``reference`` and ``source_files`` as provenance.
+            ``cosmic_rays``, ``bg_spectrum``, ``reference`` and ``source_files``
+            as provenance.
 
     Raises
     ------
     ValueError
-        If the file is not in this format, or a required group is missing.
+        If the file is not in this format, was written by a different major
+        format version, or is missing a required group.
     """
     path = Path(path)
     with h5py.File(path, "r") as hf:
@@ -385,6 +448,20 @@ def read_sweep(path) -> dict:
                 f"Reference datasets in reference/data/ use a different layout "
                 f"and are read by tmdc_optics_tools.reference instead."
             )
+        # Refuse a major-version mismatch rather than read around it: the groups
+        # this reader looks in are not where an older writer put them, so a
+        # tolerant read would return a scan missing its reference and say nothing.
+        stored_version = _as_str(hf.attrs.get("format_version")) or ""
+        if stored_version.split(".")[0] != _FORMAT_MAJOR:
+            raise ValueError(
+                f"'{path}' is format_version {stored_version!r}; this reader "
+                f"requires {_FORMAT_MAJOR}.x. Version {_FORMAT_MAJOR}.0 moved the "
+                f"auxiliary spectra (bg_spectrum, reference) from /metadata to "
+                f"/auxiliary, so reading this file here would silently drop any it "
+                f"records. Rewrite the archive from its source CSV with "
+                f"scan.to_hdf5(path, overwrite=True)."
+            )
+
         for group in ("metadata", "axes", "parameters"):
             if group not in hf:
                 raise ValueError(
@@ -400,11 +477,11 @@ def read_sweep(path) -> dict:
             "sweep"          : _as_str(m.get("sweep_type")),
             "sweep_label"    : _as_str(m.get("sweep_label")),
             "sweep_unit"     : _as_str(m.get("sweep_unit")),
+            # Already named for the constructor arguments they replay.
+            "fast_sweep"     : _as_str(m.get("fast_sweep")),
+            "slow_sweep"     : _as_str(m.get("slow_sweep")),
             "roi"            : int(m["roi"]) if "roi" in m else None,
             "source_file"    : _as_str(m.get("source_file")),
-            "contrast_mode"  : _as_str(m.get("contrast_mode")),
-            "reference_scale": (float(m["reference_scale"])
-                                if "reference_scale" in m else None),
             "apply_jacobian" : bool(m["apply_jacobian"]) if "apply_jacobian" in m
                                else None,
             "bg_region_nm"   : tuple(np.asarray(m["bg_region_nm"], dtype=float))
@@ -419,10 +496,21 @@ def read_sweep(path) -> dict:
 
         # The auxiliary spectra come back as arrays so a contrast can be rebuilt
         # from the archive alone.  Like every other correction they are provenance
-        # here: the loader does not re-apply them.
-        for name in ("bg_spectrum", "reference"):
-            if name in hf["metadata"]:
-                metadata[name] = hf[f"metadata/{name}"][()]
+        # here: the loader does not re-apply them.  They are reported inside
+        # `metadata` because that is what the loader consumes as source_metadata —
+        # the file groups them by what they are, the payload by what reads them.
+        if "auxiliary" in hf:
+            aux = hf["auxiliary"]
+            for name in ("bg_spectrum", "reference"):
+                if name in aux:
+                    metadata[name] = aux[name][()]
+            if "reference" in aux:
+                ref = aux["reference"].attrs
+                metadata["contrast_mode"] = _as_str(ref.get("contrast_mode"))
+                # Already folded into the stored values; reported so the archive
+                # says what was done, not so a reader can apply it.
+                if "scale_applied" in ref:
+                    metadata["reference_scale"] = float(ref["scale_applied"])
 
         # Drop keys the file did not record so the loader's "argument > file >
         # default" resolution sees an absence, not an explicit None.

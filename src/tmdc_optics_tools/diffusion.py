@@ -27,7 +27,6 @@ from skimage import filters, measure
 from skimage.morphology import label
 from os import PathLike
 from pathlib import Path
-import matplotlib.patches as patches
 
 
 from . import processing
@@ -555,16 +554,3 @@ def _binary_area(mask: np.ndarray) -> float:
     weights[15] = 1.0
 
     return float(np.sum(weights[pattern]))
-
-def _draw_region_box(ax, region, color, label=None, lw=1.2, ls="-"):
-    if region is None:
-        return None
-    row_slice, col_slice = region
-    x0, y0 = (col_slice.start or 0) - 0.5, (row_slice.start or 0) - 0.5
-    width  = col_slice.stop - (col_slice.start or 0)
-    height = row_slice.stop - (row_slice.start or 0)
-    rect = patches.Rectangle((x0, y0), width, height, edgecolor=color,
-                              facecolor="none", linewidth=lw, linestyle=ls,
-                              label=label, zorder=4)
-    ax.add_patch(rect)
-    return rect

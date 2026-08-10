@@ -1504,9 +1504,15 @@ class NormalizedSpectrumPanel(AnimationPanel):
         Add the other of energy/wavelength as a secondary top axis, via
         :func:`~tmdc_optics_tools.processing.energy_to_wavelength` /
         :func:`~tmdc_optics_tools.processing.wavelength_to_energy`.
-    cmap : str
+    cmap : str or None
         Colormap name passed to :func:`get_cmap`, mapping each frame's peak
-        intensity to a line colour.
+        intensity to a line colour, with a colorbar showing that scale.
+        ``None`` turns this encoding off entirely: no colorbar, and the line
+        keeps whatever colour :func:`set_style`/rcParams (or a caller
+        restyling the line returned by :meth:`update`) gives it, rather than
+        this panel overriding it every frame. This is a *different* setting
+        from a plain colour: ``cmap`` says a data channel (peak intensity) is
+        drawn through colour, ``None`` says it isn't — not a colour name.
     smooth_window, smooth_poly : int or None
         Forwarded to :func:`~tmdc_optics_tools.processing.smooth_savgol`,
         run once per spectrum before either the colour metric or the
@@ -1514,12 +1520,25 @@ class NormalizedSpectrumPanel(AnimationPanel):
         data rather than two disagreeing versions of it. ``smooth_window=None``
         skips smoothing.
     colorbar_label : str
+        Ignored when ``cmap=None``. Labelled as the *peak* of each frame,
+        not the trace's own intensity scale: the colour (and this colorbar)
+        is normalized over each frame's own maximum, not over the full
+        y-axis range the trace itself spans, so the two are different
+        quantities even though they share a unit.
     sweep_attrs : str or list of str, optional
         Per-sweep attribute name(s) shown in the frame label — e.g.
         ``"scanner_y"``, or ``["scanner_x", "scanner_y"]`` for a 2-D
         position scan. ``None`` (default) shows no label.
     sweep_units : str or list of str
         Matching unit(s) for *sweep_attrs*.
+
+    Attributes
+    ----------
+    colorbar : matplotlib.colorbar.Colorbar or None
+        Set by :meth:`init_artists`; ``None`` until then, and always
+        ``None`` when ``cmap=None``. Restyle through this handle (e.g.
+        ``panel.colorbar.set_label(...)``) rather than adding a parameter
+        for it.
 
     Examples
     --------
@@ -1549,7 +1568,7 @@ class NormalizedSpectrumPanel(AnimationPanel):
         self.scan             = scan
         self.x_axis           = x_axis
         self.secondary_x_axis = secondary_x_axis
-        self.cmap             = get_cmap(cmap)
+        self.cmap             = get_cmap(cmap) if cmap is not None else None
         self.smooth_window    = smooth_window
         self.smooth_poly      = smooth_poly
         self.colorbar_label   = colorbar_label
@@ -1561,11 +1580,12 @@ class NormalizedSpectrumPanel(AnimationPanel):
         self.sweep_attrs = attrs
         self.sweep_units = units
 
-        self._line       = None
-        self._norm       = None
-        self._normalized = None
-        self._peaks      = None
-        self._sweep_vals = None
+        self.colorbar     = None
+        self._line        = None
+        self._norm        = None
+        self._normalized  = None
+        self._peaks       = None
+        self._sweep_vals  = None
 
     @property
     def n_frames(self) -> int:
@@ -1581,13 +1601,23 @@ class NormalizedSpectrumPanel(AnimationPanel):
 
         self._peaks      = raw.max(axis=0)
         self._normalized = processing.normalise_minmax(raw, axis=0)
-        self._norm       = Normalize(vmin=self._peaks.min(), vmax=self._peaks.max())
         self._sweep_vals = [np.asarray(getattr(self.scan, attr))[:n_frames]
                              for attr in self.sweep_attrs]
 
-        sm = ScalarMappable(cmap=self.cmap, norm=self._norm)
-        sm.set_array([])
-        ax.figure.colorbar(sm, ax=ax, pad=0.02, label=self.colorbar_label)
+        # A previous init_artists call (re-using this panel instance) would
+        # otherwise leave its colorbar in place, stacking a second one onto
+        # the figure alongside the new one.
+        if self.colorbar is not None:
+            self.colorbar.remove()
+            self.colorbar = None
+
+        if self.cmap is not None:
+            self._norm = Normalize(vmin=self._peaks.min(), vmax=self._peaks.max())
+            sm = ScalarMappable(cmap=self.cmap, norm=self._norm)
+            sm.set_array([])
+            self.colorbar = ax.figure.colorbar(sm, ax=ax, pad=0.02, label=self.colorbar_label)
+        else:
+            self._norm = None
 
         ax.set_xlim(x.min(), x.max())
         ax.set_ylim(0.0, 1.0)
@@ -1610,12 +1640,16 @@ class NormalizedSpectrumPanel(AnimationPanel):
             secax = ax.secondary_xaxis("top", functions=(convert, convert))
             secax.set_xlabel(other_label)
 
-        color0 = self.cmap(self._norm(self._peaks[0]))
-        (self._line,) = ax.plot(x, self._normalized[:, 0], color=color0)
+        if self.cmap is not None:
+            (self._line,) = ax.plot(x, self._normalized[:, 0],
+                                     color=self.cmap(self._norm(self._peaks[0])))
+        else:
+            (self._line,) = ax.plot(x, self._normalized[:, 0])
 
     def update(self, frame: int) -> tuple:
         self._line.set_ydata(self._normalized[:, frame])
-        self._line.set_color(self.cmap(self._norm(self._peaks[frame])))
+        if self.cmap is not None:
+            self._line.set_color(self.cmap(self._norm(self._peaks[frame])))
         return (self._line,)
 
     def frame_label(self, frame: int):

@@ -810,6 +810,29 @@ _BLOCK_FIELD_INDEX = re.compile(r"_?\d+$")
 _BLOCK_START = re.compile(r"^Par_?\d+$")
 
 
+def _n_rows_upto(fh, limit: int) -> int:
+    """
+    Count the non-blank lines remaining in *fh*, reading no further than *limit*.
+
+    Bounded so classifying a file costs one short read however large it is.  The
+    result is therefore **not** the file's row count and must not be reported as
+    one — only the comparison against *limit* is meaningful.
+
+    Parameters
+    ----------
+    fh : file object
+        Open text handle, read from its current position.
+    limit : int
+        Stop after this many lines, blank ones included.
+
+    Returns
+    -------
+    int
+        Non-blank lines seen, at most *limit*.
+    """
+    return sum(1 for _, line in zip(range(limit), fh) if line.strip())
+
+
 def _read_block_layout(path) -> dict:
     """
     Determine an export's block layout from its **header line alone**.
@@ -841,10 +864,9 @@ def _read_block_layout(path) -> dict:
     """
     with open(path, "r") as fh:
         header = fh.readline() # Reads the header
-        # Only whether a third row exists matters, and bounding the read keeps this
-        # cheap on a 300 MB export.  The count is therefore not the file's row
-        # count and must not be reported as one.
-        two_rows_only = sum(1 for _, line in zip(range(2), fh) if line.strip()) < 2 # Reads the next two rows -> returns number of non-empty rows
+        # Only whether a third row exists matters, so two lines past the header
+        # settle it.
+        two_rows_only = _n_rows_upto(fh, 2) < 2
     names = [name.strip() for name in header.split(",")] # Splits into the column names
 
     # Every block starts with a Par column, so the Par positions give both the
@@ -4714,14 +4736,41 @@ class SingleSpectrum:
 # AttoCubePLScanRealSpace
 # ---------------------------------------------------------------------------
 
+# Rows a bare numeric grid needs before it counts as a frame.  Two rows is a
+# single spectrum (row 0 wavelength, row 1 counts), which is numeric on its first
+# line exactly like an image and so cannot be told apart by parsing that line.
+_IMAGE_MIN_ROWS = 3
+
+# What each _classify_csv kind is, and where it should go instead — shared by the
+# "nothing usable here" error and the "these were skipped" warning so one file
+# kind is described one way.  The two _BLOCK_LAYOUTS kinds take their class name
+# from _CLASS_FOR_KIND rather than repeating it.
+_CSV_KIND_REASON = {
+    "spectrum"     : "a two-row single spectrum (row 0 wavelength in nm, row 1 "
+                     "counts) — load it with SingleSpectrum",
+    "spectral"     : f"a spectral export — load it with {_CLASS_FOR_KIND['spectral']}",
+    "temporal"     : f"a temporal export — load it with {_CLASS_FOR_KIND['temporal']}",
+    "too_short"    : "a single row of numbers",
+    "unrecognised" : "headed, but by no known AttoCube block layout",
+    "unreadable"   : "empty or unreadable",
+}
+
+# Kinds that belong in an image directory and are therefore dropped in silence: an
+# acquisition writes its parameter export alongside the frames every time.  Every
+# other kind is named in a warning, having no routine reason to be there.
+_EXPECTED_NON_IMAGE_KINDS = frozenset(_CLASS_FOR_KIND)
+
+
 class AttoCubePLScanRealSpace:
     """
     Loader for a gate-dependent sequence of real-space PL images from the
     AttoCube cryogenic confocal.
 
-    Files must be pure numeric CSVs (no header row) matching the pattern
-    ``{prefix}*.csv`` in *path*. Files that contain a text header (e.g. a
-    spectral scan file) are automatically excluded.
+    Frames are the pure numeric CSVs (no header row) matching ``{prefix}*.csv``
+    in *path*, and must have **at least three rows** — a two-row grid is a single
+    spectrum rather than an image, and is excluded along with anything carrying a
+    text header.  An excluded file is named in a warning unless it is an AttoCube
+    export, which an acquisition routinely writes beside its frames.
 
     Frames are ordered by the integer in their ``_iter_N`` filename suffix, so
     ``iter_10`` follows ``iter_2`` rather than preceding it.  A file with no such
@@ -4757,12 +4806,27 @@ class AttoCubePLScanRealSpace:
         self.bg_stat   = bg_stat
 
         candidates = sorted(Path(path).glob(f"{prefix}*.csv"))
-        images     = [f for f in candidates if self._is_image_csv(f)]
+        kinds      = {f: self._classify_csv(f) for f in candidates}
+        images     = [f for f, kind in kinds.items() if kind == "image"]
+        skipped    = {f: kind for f, kind in kinds.items() if kind != "image"}
         if not images:
             raise ValueError(
                 f"No real-space image CSV files found with prefix '{prefix}' in '{path}'. "
-                f"Found {len(candidates)} candidate(s) but none passed the numeric-grid check "
-                f"(spectral scan files with header rows are excluded automatically)."
+                f"Found {len(candidates)} candidate(s), none of them an image of at "
+                f"least {_IMAGE_MIN_ROWS} rows:\n"
+                + self._describe_skipped(skipped)
+            )
+        # An export beside the frames is the expected case and says nothing; a
+        # spectrum or an unreadable file among them means the directory is not
+        # what the caller thinks it is, and silently dropping it is how a
+        # half-loaded sequence reaches a diffusion fit.
+        unexpected = {f: kind for f, kind in skipped.items()
+                      if kind not in _EXPECTED_NON_IMAGE_KINDS}
+        if unexpected:
+            warnings.warn(
+                f"Skipped {len(unexpected)} file(s) in '{path}' that are not "
+                f"real-space images:\n" + self._describe_skipped(unexpected),
+                stacklevel=2,
             )
         # Acquisition order, read from `_iter_N` — not the glob's lexicographic
         # order, which puts iter_10 before iter_2 on any export whose padding is
@@ -4773,18 +4837,72 @@ class AttoCubePLScanRealSpace:
         self.files = _order_by_iter(images, path, stacklevel=3)
 
     @staticmethod
-    def _is_image_csv(path: Path) -> bool:
+    def _classify_csv(path: Path) -> str:
         """
-        Return True if the first line of *path* is parseable as floats.
-        Spectral scan files begin with a text header and return False.
+        Name what kind of CSV *path* is, from its opening lines alone.
+
+        Cheap enough to run over a whole directory: at most three lines are read,
+        so a multi-hundred-MB export costs the same as a small one.
+
+        Parameters
+        ----------
+        path : Path
+
+        Returns
+        -------
+        str
+            ``"image"`` for a numeric grid of at least three rows;
+            ``"spectrum"`` for one of exactly two (a wavelength axis and its
+            counts); ``"too_short"`` for one of a single row; ``"spectral"`` or
+            ``"temporal"`` for an AttoCube export, named as in its header;
+            ``"unrecognised"`` for a header matching no known block layout; and
+            ``"unreadable"`` for an empty or unopenable file.
+
+        See Also
+        --------
+        _read_block_layout : names the two export layouts, and is what this
+            defers to once a text header is seen.
         """
         try:
             with open(path, "r") as fh:
                 first_line = fh.readline()
-            float(first_line.strip().split(",")[0])
-            return True
-        except (ValueError, OSError):
-            return False
+                if not first_line.strip():
+                    return "unreadable"
+                try:
+                    # Only the first field, and split no further: a frame's row is
+                    # wide, and one field is all that separates a numeric grid from
+                    # a header whose leading column reads "Parameters Labels".
+                    float(first_line.split(",", 1)[0].strip())
+                except ValueError:
+                    header = True
+                else:
+                    header = False
+                    # The handle sits on row 1, so two more lines settle whether a
+                    # third exists.  Nothing beyond _IMAGE_MIN_ROWS is read, so this
+                    # is a threshold test and not a row count.
+                    n_rows = 1 + _n_rows_upto(fh, _IMAGE_MIN_ROWS - 1)
+        except OSError:
+            return "unreadable"
+
+        if not header:
+            if n_rows >= _IMAGE_MIN_ROWS:
+                return "image"
+            return "spectrum" if n_rows == 2 else "too_short"
+
+        # Headed files are classified where every other loader classifies them,
+        # so "spectral" and "temporal" keep meaning the block layouts they name.
+        try:
+            return _read_block_layout(path)["kind"]
+        except ValueError:
+            return "unrecognised"
+
+    @staticmethod
+    def _describe_skipped(skipped: dict) -> str:
+        """One indented ``name — why`` line per entry of a ``{Path: kind}`` map."""
+        return "\n".join(
+            f"  {f.name} — {_CSV_KIND_REASON.get(kind, kind)}"
+            for f, kind in skipped.items()
+        )
 
     def load_frame(self, idx: int) -> np.ndarray:
         """Load and return a single frame as a 2-D NumPy array."""

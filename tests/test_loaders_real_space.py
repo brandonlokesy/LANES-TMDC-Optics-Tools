@@ -8,6 +8,7 @@ landed at an index rather than merely how many there are.  The committed
 sequences then pin that the padded case still loads silently.
 """
 
+import shutil
 import warnings
 
 import numpy as np
@@ -24,10 +25,29 @@ REAL_PREFIX  = "PL-dual-gate-sweep_"
 REAL_FRAMES  = 11
 REAL_SPECTRAL = "PL-dual-gate-sweep_26_05_15_14_03_18_iter_0.csv"
 
+# The only committed two-row file, used as a real-width negative case.
+REAL_SPECTRUM = "examples/data/single-spectra/ref_single_spectrum_26_07_01_14_42_47.csv"
+
 
 def _frame(tmp_path, name, fill) -> None:
     """Write one numeric-grid frame, filled with *fill* so it is identifiable."""
     np.savetxt(tmp_path / name, np.full(SHAPE, float(fill)), delimiter=",")
+
+
+def _spectrum(tmp_path, name) -> None:
+    """Write a two-row single spectrum: row 0 a wavelength axis, row 1 counts."""
+    np.savetxt(tmp_path / name, np.vstack([np.linspace(650, 700, 8),
+                                           np.arange(8.0)]), delimiter=",")
+
+
+def _export(tmp_path, name, roles) -> None:
+    """Write a one-block AttoCube export header, *roles* naming its columns."""
+    header = ",".join(["Parameters Labels"] + list(roles))
+    (tmp_path / name).write_text(f"{header}\nTemperature,4.2,0.0,0.0\n")
+
+
+SPECTRAL_ROLES = ("Par_0", "Wavelength0", "ExpROI1_0", "ExpROI2_0")
+TEMPORAL_ROLES = ("Par_0", "Wavelength0", "Exp_0")
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +173,103 @@ def test_committed_sequence_loads_without_warnings():
     assert scan.n_frames == REAL_FRAMES
     assert scan.files[0].stem.endswith("iter_0000")
     assert scan.files[-1].stem.endswith("iter_0010")
+
+
+def test_committed_single_spectrum_is_not_an_image(tmp_path):
+    # The real committed two-row file, at its real width. Its first row is a
+    # wavelength axis, so a first-line float test takes it for a frame.
+    shutil.copy(REAL_SPECTRUM, tmp_path / "pl_iter_0.csv")
+
+    assert AttoCubePLScanRealSpace._classify_csv(tmp_path / "pl_iter_0.csv") == "spectrum"
+
+
+# ---------------------------------------------------------------------------
+# Classification by row count and header
+# ---------------------------------------------------------------------------
+
+
+def test_three_rows_is_the_image_boundary(tmp_path):
+    # A grid is an image from three rows up; two rows is a spectrum and one is
+    # neither. All three are numeric on their first line, which is why the row
+    # count has to do the work.
+    for n_rows, expected in ((3, "image"), (2, "spectrum"), (1, "too_short")):
+        name = f"grid_{n_rows}.csv"
+        np.savetxt(tmp_path / name, np.ones((n_rows, 5)), delimiter=",")
+        assert AttoCubePLScanRealSpace._classify_csv(tmp_path / name) == expected
+
+
+def test_exports_are_named_by_their_block_layout(tmp_path):
+    # Both are headed files that are not frames, but they are not the same file:
+    # naming a TRPL export "spectral" would fork the layout vocabulary.
+    _export(tmp_path, "pl_spectral.csv", SPECTRAL_ROLES)
+    _export(tmp_path, "pl_temporal.csv", TEMPORAL_ROLES)
+    _export(tmp_path, "pl_unknown.csv", ("Par_0", "Wavelength0", "Foo_0"))
+
+    classify = AttoCubePLScanRealSpace._classify_csv
+    assert classify(tmp_path / "pl_spectral.csv") == "spectral"
+    assert classify(tmp_path / "pl_temporal.csv") == "temporal"
+    assert classify(tmp_path / "pl_unknown.csv") == "unrecognised"
+
+
+def test_directory_of_single_spectra_raises(tmp_path):
+    # The A9 failure: every file here used to load as a 2xN "frame" and reach the
+    # diffusion routines as one.
+    for i in (0, 1, 2):
+        _spectrum(tmp_path, f"pl_iter_{i}.csv")
+    with pytest.raises(ValueError) as excinfo:
+        AttoCubePLScanRealSpace(tmp_path, prefix="pl_")
+
+    message = str(excinfo.value)
+    assert "SingleSpectrum" in message          # says where to take them instead
+    assert "pl_iter_1.csv" in message           # and which files it means
+
+
+def test_temporal_export_alone_names_the_trpl_loader(tmp_path):
+    _export(tmp_path, "pl_iter_0.csv", TEMPORAL_ROLES)
+    with pytest.raises(ValueError, match="AttoCubeTRPLSweep"):
+        AttoCubePLScanRealSpace(tmp_path, prefix="pl_")
+
+
+# ---------------------------------------------------------------------------
+# What is said about the files that were skipped
+# ---------------------------------------------------------------------------
+
+
+def test_stray_spectrum_among_frames_is_excluded_and_named(tmp_path):
+    for i in (0, 1, 2):
+        _frame(tmp_path, f"pl_iter_{i}.csv", i)
+    _spectrum(tmp_path, "pl_ref.csv")
+    with pytest.warns(UserWarning, match="not real-space images") as caught:
+        scan = AttoCubePLScanRealSpace(tmp_path, prefix="pl_")
+
+    assert "pl_ref.csv" in str(caught[0].message)
+    assert [f.stem for f in scan.files] == ["pl_iter_0", "pl_iter_1", "pl_iter_2"]
+
+
+def test_export_among_frames_is_excluded_in_silence(tmp_path):
+    # An acquisition writes its parameter export beside the frames every time, so
+    # warning here would fire on every legitimate load.
+    for i in (0, 1, 2):
+        _frame(tmp_path, f"pl_iter_{i}.csv", i)
+    _export(tmp_path, "pl_params.csv", SPECTRAL_ROLES)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        scan = AttoCubePLScanRealSpace(tmp_path, prefix="pl_")
+
+    assert [str(c.message) for c in caught] == []
+    assert scan.n_frames == 3
+
+
+def test_skip_warning_points_at_the_caller(tmp_path):
+    # stacklevel=2, measured rather than read off the call stack: the warning is
+    # useless if it blames a line inside loaders.py.
+    for i in (0, 1):
+        _frame(tmp_path, f"pl_iter_{i}.csv", i)
+    _spectrum(tmp_path, "pl_ref.csv")
+    with pytest.warns(UserWarning) as caught:
+        AttoCubePLScanRealSpace(tmp_path, prefix="pl_")
+
+    assert caught[0].filename == __file__
 
 
 def test_spectral_companion_excluded_despite_iter_0_collision():

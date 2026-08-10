@@ -356,7 +356,8 @@ What does earn a parameter:
 - **Corrections and processing** — `median_kernel`, `threshold="1/e"`, `smooth_sigma`,
   `keep_largest`, `bg_stat`, `rescale_img`. These change the numbers, and are governed
   by *corrections are opt-in* above.
-- **Which data is shown** — `x_axis`, `spectra_source`, `sweep_index`, `normalize`.
+- **Which data is shown** — `x_axis`, `spectra_source`, `normalize`, and the point
+  selectors `value` / `index`, whose contract is under *Settled* below.
 - **Physical context the function cannot infer** — `pixel_scale`, `origin`,
   `laser_ref`. The caller knows the µm/px; the array does not.
 - **Composition and structure** — `panels`, `ax`, `n_frames`, `save`.
@@ -675,8 +676,9 @@ decision; the argument for it is in the audit under the ID given.
 - **Nested sweeps are declared with `fast_sweep=` / `slow_sweep=`, which are not
   aliases of `sweep=`.** Settled 2026-08-06, superseding the `grid=(inner, outer)`
   tuple. Everywhere in this package **"sweep" means the flattened measurement
-  point** — `n_sweeps`, `sweep_index`, `sweep_mask`, and `sweep_axis` (an array *of
-  length `n_sweeps`*). So `sweep=` answers *"which array labels each flat point"*
+  point** — `n_sweeps`, `sweep_mask`, `sweep_axis` (an array *of length
+  `n_sweeps`*), and the `index=` that the accessors and `plot_spectrum` take. So
+  `sweep=` answers *"which array labels each flat point"*
   and the nest declaration is a separate statement, *"those points are `n_fast`
   inside `n_slow`"*. Don't redefine `sweep=` to mean the fast axis: it would be the
   one place in the package the word meant an axis, two lines from `n_sweeps` still
@@ -712,6 +714,26 @@ decision; the argument for it is in the audit under the ID given.
   `fast=`/`slow=`, so handing back one of four would be a silent partial answer.
   Matches are compared on the coordinate, not the distance, so a request landing
   midway between two distinct points is not a tie. (E14)
+- **`plot_spectrum` selects a point the way the accessors do, and resolves it
+  through them.** Settled 2026-08-10. Researchers name a setting, not a column, so
+  the coordinate takes the positional slot: `plot_spectrum(scan, 2.5)`. Six
+  keyword-only selectors in two exclusive spellings — `value`/`fast`/`slow` are
+  coordinates, `index`/`index_fast`/`index_slow` are positions — so the two never
+  share a keyword and a request cannot be half of each. Naming both ways, or
+  neither, raises; `axis=` applies to coordinates only.
+
+  **Selection is not re-implemented in `plotting`.** `_select_sweep_point` forwards
+  to `_sweep_selector`, so the settled policies above reach the figure unchanged:
+  an ambiguous coordinate is refused rather than drawn, and a distant one warns.
+  Composing `nearest_index` at the call site was rejected for exactly this — it
+  *warns* where the accessors *refuse*, so recommending it as the idiom would route
+  every value-based plot around the refusal.
+
+  A free nest axis is **refused**, not drawn as N lines: it selects a spectrum per
+  point, and the return contract is one artist. The legend names the coordinate
+  addressed — both, for a nest, where the declared sweep axis is the flat index and
+  says nothing. `_coordinate_text` reuses `sweep_axis_label`'s composition, so
+  existing legends are unchanged and a raw-row axis correctly shows no unit.
 - **The sweep axis must label each point individually, and the loader warns when
   it does not.** Asked as *"how many different values does this axis take?"*, not
   *"is it monotonic?"* — the latter is a side effect that catches a nest's inner
@@ -767,7 +789,18 @@ decision; the argument for it is in the audit under the ID given.
   repeats**, because Python's default filter shows a warning once per location, so
   many scans warning from one library line print one message. Its own pass, not a
   character changed while passing through — A7 deliberately left TRPL's 4 alone so
-  its existing tests stay honest.
+  its existing tests stay honest, and `plot_spectrum` left its own inherited chain
+  alone on 2026-08-10 for the same reason.
+
+  **Trace these by measuring, not by reading `def` lines.** The second confirmed
+  chain is `get_spectrum_at`, which needs 6 and passes 5, and the uncounted frame
+  is a **lambda** — `_sweep_selector` wraps `_index_for_value` in a closure before
+  calling it, and a closure is a real frame with no `def` to scroll past. Anything
+  routing through `_sweep_selector` inherits the miscount and adds its own depth:
+  `plot_spectrum` needs 7. `nearest_index` is correct. A
+  `catch_warnings(record=True)` harness asserting `caught[0].filename` settles each
+  chain in one run; reading the call stack by eye is what produced the wrong values
+  in the first place.
 
 **Decided but not yet implemented:**
 - `plot_pl_map_Vab_scan`'s `median_kernel` should default to `1` (off). The current

@@ -107,7 +107,7 @@ def test_colorbar_follows_spectra_type(csv_path, spectra_type):
 @pytest.mark.parametrize("spectra_type", sorted(SIGNAL_LABELS))
 def test_ylabel_follows_spectra_type(csv_path, spectra_type):
     scan = _scan(csv_path, spectra_type)
-    _, ax, _ = plotting.plot_spectrum(scan, 0)
+    _, ax, _ = plotting.plot_spectrum(scan, index=0)
     assert ax.get_ylabel() == scan.signal_label
 
 
@@ -156,7 +156,7 @@ def test_spectral_map_override_is_verbatim(csv_path, rescale_img):
 @pytest.mark.parametrize("normalize", [False, True])
 def test_spectrum_override_is_verbatim(csv_path, normalize):
     scan = _scan(csv_path, "PL")
-    _, ax, _ = plotting.plot_spectrum(scan, 0, ylabel=CUSTOM,
+    _, ax, _ = plotting.plot_spectrum(scan, index=0, ylabel=CUSTOM,
                                       normalize=normalize)
     assert ax.get_ylabel() == CUSTOM
 

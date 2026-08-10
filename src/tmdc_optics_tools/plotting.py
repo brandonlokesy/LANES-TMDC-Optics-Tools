@@ -362,32 +362,157 @@ def plot_pl_map_Vab_scan(*args, **kwargs) -> tuple:
 # Spectrum plots
 # ---------------------------------------------------------------------------
 
+def _coordinate_text(label: str, value: float, unit: str) -> str:
+    """
+    ``"Top gate (V) = 1.5"`` — one coordinate named, with its unit when known.
+
+    The same composition ``sweep_axis_label`` uses, so every legend this module
+    writes reads the same whichever axis the point was addressed on.
+    """
+    named = f"{label} ({unit})" if unit else label
+    return f"{named} = {float(value):.4g}"
+
+
+def _select_sweep_point(scan, value, axis, index, fast, slow,
+                        index_fast, index_slow, what: str) -> int:
+    """
+    Resolve one point request into a single integer sweep position.
+
+    Mirrors the loader's two accessors: *value* / *fast* / *slow* are
+    coordinates and *index* / *index_fast* / *index_slow* are integer positions,
+    so the two spellings never share a keyword and a request cannot be half of
+    each.  The lookup itself is the scan's, so an ambiguous coordinate is refused
+    and a distant one warns exactly as they do for ``get_spectrum_at``.
+    """
+    named_by_value = [n for n, v in (("value", value), ("fast", fast),
+                                     ("slow", slow)) if v is not None]
+    named_by_index = [n for n, v in (("index", index),
+                                     ("index_fast", index_fast),
+                                     ("index_slow", index_slow)) if v is not None]
+
+    if named_by_value and named_by_index:
+        raise ValueError(
+            f"{what}: name the point by value ({', '.join(named_by_value)}) or "
+            f"by position ({', '.join(named_by_index)}), not both."
+        )
+    if not named_by_value and not named_by_index:
+        raise ValueError(
+            f"{what} needs a point. Give a coordinate positionally, or index= "
+            f"for a flat sweep; for a declared nest give fast= and slow= "
+            f"(coordinates) or index_fast= and index_slow= (positions)."
+        )
+    if named_by_index and axis != "sweep":
+        raise ValueError(
+            f"{what}: axis={axis!r} names the quantity a *coordinate* is read "
+            f"against, so it does not apply to {', '.join(named_by_index)}. "
+            f"Give the point as a value, or drop axis=."
+        )
+
+    if named_by_value:
+        selector = scan._sweep_selector(value, axis=axis, fast=fast, slow=slow,
+                                        by_value=True, what=what)
+    else:
+        selector = scan._sweep_selector(index, fast=index_fast, slow=index_slow,
+                                        by_value=False, what=what)
+
+    # A slice means one nest axis was left free, so the accessor would hand back
+    # (n_pixels, n) — a line per point along it, which this function has no
+    # return contract for.  Naming both axes pins the single spectrum it draws.
+    if not isinstance(selector, (int, np.integer)):
+        raise ValueError(
+            f"{what}: leaving one nest axis free selects every point along the "
+            f"other, which is more than one spectrum. Name both axes to pin "
+            f"one, or take the block from scan.get_spectrum_at() and plot its "
+            f"columns."
+        )
+    return int(selector)
+
+
+def _sweep_point_label(scan, idx: int, axis: str) -> str:
+    """
+    Legend text naming the coordinate a point was addressed on.
+
+    A point on a nest is named by both its coordinates and one reached through
+    *axis* by that quantity, so the legend states what was asked for.  On a nest
+    the declared sweep axis is normally the flat index, which would say nothing.
+    """
+    if scan.is_nested:
+        nest = scan.nesting
+        # Points run n_fast inside n_slow, so the flat position divides back onto
+        # the grid — the same arithmetic the selector used to build it.
+        i_slow, i_fast = divmod(idx, nest.n_fast)
+        return (f"{_coordinate_text(nest.fast_label, nest.fast_axis[i_fast], nest.fast_unit)}, "
+                f"{_coordinate_text(nest.slow_label, nest.slow_axis[i_slow], nest.slow_unit)}")
+
+    if axis != "sweep":
+        values, lbl, unit = scan._lookup_axis(axis)
+        return _coordinate_text(lbl, values[idx], unit)
+
+    # Fall back to whatever the scan says it swept rather than to a gate
+    # voltage: a gate role needs a declared wiring, and the sweep axis is
+    # already the scan's own answer to "what varied", labelled and in its own
+    # units.  A field needs a geometry and two declared gates, so check the
+    # device first — reading scan.ef without them raises.
+    if scan.is_dual_gated and scan.ef is not None:
+        return f"$E_F$ = {scan.ef[idx]:.1f} mV/nm"
+    return _coordinate_text(scan.sweep_label, scan.sweep_axis[idx],
+                            scan.sweep_unit)
+
+
 def plot_spectrum(
     scan,
-    sweep_index : int,
-    ax          = None,
-    figsize     : tuple = (5, 3),
-    dpi         : int   = None,
-    x_axis      : str  = "energy",
-    normalize   : bool = False,
-    label       : str  = None,
-    ylabel      : str  = None,
+    value      : float = None,
+    *,
+    axis       : str   = "sweep",
+    index      : int   = None,
+    fast       : float = None,
+    slow       : float = None,
+    index_fast : int   = None,
+    index_slow : int   = None,
+    ax         = None,
+    figsize    : tuple = (5, 3),
+    dpi        : int   = None,
+    x_axis     : str   = "energy",
+    normalize  : bool  = False,
+    label      : str   = None,
+    ylabel     : str   = None,
     **line_kwargs,
 ) -> tuple:
     """
-    Plot one spectrum from a sweep.
+    Plot one spectrum from a sweep, chosen by coordinate or by position.
+
+    The point is named the way the measurement was: ``plot_spectrum(scan, 2.5)``
+    takes the sweep point nearest 2.5 in the sweep axis's own units.  Integer
+    positions remain available through *index*.
 
     Parameters
     ----------
     scan : AttoCubeSpectralSweep
-    sweep_index : int
-        Index of the sweep point to plot.
+    value : float, optional
+        Coordinate on the sweep axis, in that axis's units.  For a flat sweep;
+        a nest is addressed with *fast* and *slow*.
+    axis : str
+        Which quantity *value* is read against, spelled as ``sweep=`` spells it:
+        a registry key such as ``"top_voltage"`` or a raw row label such as
+        ``"V_A"``.  The default searches the declared sweep axis.  Use it when a
+        sweep is declared in one coordinate and you want a point in another — a
+        field sweep driven by both gates at a fixed ratio can be addressed by
+        ``axis="top_voltage"``.  Applies to coordinates only.
+    index : int, optional
+        Position on the sweep axis.  Negative counts from the end.  For a flat
+        sweep; a nest is addressed with *index_fast* and *index_slow*.
+    fast, slow : float, optional
+        Coordinates on the nest axes.  Give both — one spectrum is drawn, so
+        leaving an axis free is refused.
+    index_fast, index_slow : int, optional
+        Positions on the nest axes, the integer spelling of *fast* / *slow*.
     ax : matplotlib.axes.Axes, optional
     x_axis : {"energy", "wavelength"}
     normalize : bool
         Normalise spectrum to its peak value.
     label : str, optional
-        Legend label. Defaults to the gate voltage / field value.
+        Legend label.  Defaults to the coordinate the point was addressed on,
+        with its unit; both coordinates for a nest.
     ylabel : str, optional
         Y-axis label.  Derived from the scan's measurement type when ``None``,
         so a reflectance sweep is not labelled as PL.  A string is used
@@ -398,7 +523,39 @@ def plot_spectrum(
     Returns
     -------
     fig, ax, line
+
+    Raises
+    ------
+    ValueError
+        If the point is named both ways at once, or not at all; if a coordinate
+        names more than one sweep point, since drawing one of them would drop
+        the rest without saying so; or if one nest axis is left free, which
+        selects more than one spectrum.
+
+    Warns
+    -----
+    UserWarning
+        When a requested coordinate is further than half a step from any real
+        point.  A nearest-value lookup cannot fail, so it returns a real
+        spectrum from somewhere else; the warning names what was used.
+
+    See Also
+    --------
+    tmdc_optics_tools.loaders.AttoCubeSpectralSweep.get_spectrum_at :
+        the same selection, returning the array instead of drawing it.
+    plot_single_spectrum : plot a spectrum that is not part of a sweep.
+
+    Examples
+    --------
+    >>> plot_spectrum(scan, 2.5)                          # doctest: +SKIP
+    >>> plot_spectrum(scan, 15.0, axis="top_voltage")     # doctest: +SKIP
+    >>> plot_spectrum(scan, index=-1)                     # doctest: +SKIP
+    >>> plot_spectrum(scan, fast=2.5, slow=100.0)         # doctest: +SKIP
     """
+    sweep_index = _select_sweep_point(
+        scan, value, axis, index, fast, slow, index_fast, index_slow,
+        what="plot_spectrum()")
+
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     else:
@@ -413,16 +570,7 @@ def plot_spectrum(
         y = y / y.max()
 
     if label is None:
-        # Fall back to whatever the scan says it swept rather than to a gate
-        # voltage: a gate role needs a declared wiring, and the sweep axis is
-        # already the scan's own answer to "what varied", labelled and in its own
-        # units.  A field needs a geometry and two declared gates, so check the
-        # device first — reading scan.ef without them raises.
-        if scan.is_dual_gated and scan.ef is not None:
-            label = f"$E_F$ = {scan.ef[sweep_index]:.1f} mV/nm"
-        else:
-            label = (f"{scan.sweep_axis_label} = "
-                     f"{scan.sweep_axis[sweep_index]:.4g}")
+        label = _sweep_point_label(scan, sweep_index, axis)
 
     line, = ax.plot(x, y, label=label, **line_kwargs)
     ax.set_xlabel(xlabel)

@@ -374,16 +374,17 @@ def _coordinate_text(label: str, value: float, unit: str) -> str:
 
 
 # The coordinate each position keyword pairs with, for messages that offer the
-# other spelling.  `index` pairs with the positional argument, which has no name.
+# other spelling.
 _COORDINATE_FOR_POSITION = {
-    "index":      "the coordinate positionally",
+    "index":      "value=",
     "index_fast": "fast=",
     "index_slow": "slow=",
 }
 
 
 def _select_sweep_point(scan, value, axis, index, fast, slow,
-                        index_fast, index_slow, what: str) -> int:
+                        index_fast, index_slow, what: str,
+                        passthrough: dict = None) -> int:
     """
     Resolve one point request into a single integer sweep position.
 
@@ -392,6 +393,11 @@ def _select_sweep_point(scan, value, axis, index, fast, slow,
     so the two spellings never share a keyword and a request cannot be half of
     each.  The lookup itself is the scan's, so an ambiguous coordinate is refused
     and a distant one warns exactly as they do for ``get_spectrum_at``.
+
+    *passthrough* is the caller's unmatched keyword dict, named in the no-point
+    error.  A selector spelled wrongly is absorbed there rather than rejected, so
+    without this the caller is told they named no point while looking at the one
+    they thought they had named.
     """
     # None is the unspecified default, not a quantity to look up. Without this it
     # would reach the scan, which reads an undeclared axis as the flat index — so
@@ -413,10 +419,19 @@ def _select_sweep_point(scan, value, axis, index, fast, slow,
             f"by position ({', '.join(index_names)}), not both."
         )
     if not named_by_value and not named_by_index:
+        # Every selector is keyword-only, so a misspelt or renamed one lands in
+        # the style passthrough instead of raising. Name what arrived: the usual
+        # cause of "no point" is a point named under a keyword that is not one.
+        stray = ""
+        if passthrough:
+            listed = ", ".join(f"{k}={v!r}" for k, v in passthrough.items())
+            stray = (f" Received {listed}, which names no point — forwarded to "
+                     f"ax.plot as a line property.")
         raise ValueError(
-            f"{what} needs a point. Give a coordinate positionally, or index= "
-            f"for a flat sweep; for a declared nest give fast= and slow= "
-            f"(coordinates) or index_fast= and index_slow= (positions)."
+            f"{what} needs a point: value= for a coordinate on the sweep axis, "
+            f"or index= for a position. For a declared nest give fast= and "
+            f"slow= (coordinates) or index_fast= and index_slow= (positions)."
+            f"{stray}"
         )
     if named_by_index and axis != "sweep":
         raise ValueError(
@@ -510,8 +525,8 @@ def _sweep_point_label(scan, idx: int, axis: str) -> str:
 
 def plot_spectrum(
     scan,
-    value      : float = None,
     *,
+    value      : float = None,
     axis       : str   = "sweep",
     index      : int   = None,
     fast       : float = None,
@@ -530,9 +545,14 @@ def plot_spectrum(
     """
     Plot one spectrum from a sweep, chosen by coordinate or by position.
 
-    The point is named the way the measurement was: ``plot_spectrum(scan, 2.5)``
-    takes the sweep point nearest 2.5 in the sweep axis's own units.  Integer
-    positions remain available through *index*.
+    The point is named the way the measurement was:
+    ``plot_spectrum(scan, value=2.5)`` takes the sweep point nearest 2.5 in the
+    sweep axis's own units.  Integer positions remain available through *index*.
+
+    Every selector is keyword-only, so a call always states which kind it means.
+    A bare number could be either, and on a sweep whose coordinates span the same
+    range as its positions — a power sweep in µW, say — neither the value nor a
+    warning would reveal which was taken.
 
     Parameters
     ----------
@@ -571,7 +591,8 @@ def plot_spectrum(
         so a reflectance sweep is not labelled as PL.  A string is used
         **verbatim**, so include the unit.
     **line_kwargs
-        Passed directly to ``ax.plot``.
+        Passed directly to ``ax.plot``.  A keyword that is not a selector lands
+        here, so the no-point error names whatever arrived.
 
     Returns
     -------
@@ -586,7 +607,8 @@ def plot_spectrum(
         without saying so; or if one nest axis is left free, which selects more
         than one spectrum.
     TypeError
-        If a position is not a whole number.
+        If a position is not a whole number, or if the point is given
+        positionally rather than as ``value=`` or ``index=``.
 
     Warns
     -----
@@ -603,14 +625,20 @@ def plot_spectrum(
 
     Examples
     --------
-    >>> plot_spectrum(scan, 2.5)                          # doctest: +SKIP
-    >>> plot_spectrum(scan, 15.0, axis="top_voltage")     # doctest: +SKIP
-    >>> plot_spectrum(scan, index=-1)                     # doctest: +SKIP
-    >>> plot_spectrum(scan, fast=2.5, slow=100.0)         # doctest: +SKIP
+    >>> plot_spectrum(scan, value=2.5)                     # doctest: +SKIP
+    >>> plot_spectrum(scan, value=15.0, axis="top_voltage")  # doctest: +SKIP
+    >>> plot_spectrum(scan, index=-1)                      # doctest: +SKIP
+    >>> plot_spectrum(scan, fast=2.5, slow=100.0)          # doctest: +SKIP
     """
+    # Resolved before the label is built as well as before the lookup: an
+    # unresolved None reads as the flat index there too, and would name the
+    # legend after an axis that was never searched.
+    if axis is None:
+        axis = "sweep"
+
     sweep_index = _select_sweep_point(
         scan, value, axis, index, fast, slow, index_fast, index_slow,
-        what="plot_spectrum()")
+        what="plot_spectrum()", passthrough=line_kwargs)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)

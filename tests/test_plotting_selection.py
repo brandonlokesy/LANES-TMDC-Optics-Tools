@@ -83,13 +83,13 @@ def _ydata(line) -> np.ndarray:
 @pytest.mark.parametrize("i", range(len(PARAMS["Scanner Y"])))
 def test_a_coordinate_selects_the_point_holding_it(flat, i):
     """Scanner Y = 7.5 must draw the same line as index 1."""
-    _, _, by_value = plotting.plot_spectrum(flat, PARAMS["Scanner Y"][i])
+    _, _, by_value = plotting.plot_spectrum(flat, value=PARAMS["Scanner Y"][i])
     _, _, by_index = plotting.plot_spectrum(flat, index=i)
     assert np.array_equal(_ydata(by_value), _ydata(by_index))
 
 
 def test_the_selected_spectrum_is_the_scans_own_column(flat):
-    _, _, line = plotting.plot_spectrum(flat, 8.0)
+    _, _, line = plotting.plot_spectrum(flat, value=8.0)
     assert np.array_equal(_ydata(line), flat.best_energy_spectra[:, 2])
 
 
@@ -99,13 +99,13 @@ def test_a_negative_index_counts_from_the_end(flat):
 
 
 def test_wavelength_axis_selects_the_same_column(flat):
-    _, _, line = plotting.plot_spectrum(flat, 8.0, x_axis="wavelength")
+    _, _, line = plotting.plot_spectrum(flat, value=8.0, x_axis="wavelength")
     assert np.array_equal(_ydata(line), flat.spectra[:, 2].astype(float))
 
 
 def test_a_coordinate_can_be_read_against_another_quantity(flat):
     """The sweep is declared in piezo_y; the point is asked for in V_A."""
-    _, _, line = plotting.plot_spectrum(flat, 1.0, axis="V_A")
+    _, _, line = plotting.plot_spectrum(flat, value=1.0, axis="V_A")
     assert np.array_equal(_ydata(line), flat.best_energy_spectra[:, 2])
 
 
@@ -140,7 +140,7 @@ def test_a_free_nest_axis_is_refused(nested):
 
 def test_a_flat_coordinate_on_a_nest_is_refused(nested):
     with pytest.raises(ValueError, match="does not locate a point"):
-        plotting.plot_spectrum(nested, 2.0)
+        plotting.plot_spectrum(nested, value=2.0)
 
 
 def test_the_nest_axes_need_a_declared_nest(flat):
@@ -154,7 +154,7 @@ def test_the_nest_axes_need_a_declared_nest(flat):
 
 def test_naming_a_point_both_ways_is_refused(flat):
     with pytest.raises(ValueError, match="not both"):
-        plotting.plot_spectrum(flat, 7.5, index=0)
+        plotting.plot_spectrum(flat, value=7.5, index=0)
 
 
 def test_naming_no_point_is_refused(flat):
@@ -177,8 +177,8 @@ def test_axis_none_searches_the_declared_sweep_axis(flat):
     Left to reach the scan, an undeclared axis reads as the flat index, so the
     coordinate would be searched against 0, 1, 2, ... instead of the sweep.
     """
-    _, _, explicit = plotting.plot_spectrum(flat, 8.0, axis="sweep")
-    _, _, defaulted = plotting.plot_spectrum(flat, 8.0, axis=None)
+    _, _, explicit = plotting.plot_spectrum(flat, value=8.0, axis="sweep")
+    _, _, defaulted = plotting.plot_spectrum(flat, value=8.0, axis=None)
     assert np.array_equal(_ydata(defaulted), _ydata(explicit))
     assert np.array_equal(_ydata(defaulted), flat.best_energy_spectra[:, 2])
 
@@ -187,6 +187,72 @@ def test_axis_none_is_accepted_alongside_a_position(flat):
     """The same word cannot be the default in one spelling and refused in the other."""
     _, _, line = plotting.plot_spectrum(flat, index=0, axis=None)
     assert np.array_equal(_ydata(line), flat.best_energy_spectra[:, 0])
+
+
+def test_axis_none_labels_the_axis_that_was_searched(flat):
+    """
+    The legend is built from the axis name too, so an unresolved None names the
+    point after an axis that was never searched even when the data is right.
+    """
+    _, _, line = plotting.plot_spectrum(flat, value=8.0, axis=None)
+    assert line.get_label() == r"Piezo $y$ (V) = 8"
+    assert "Sweep index" not in line.get_label()
+
+
+# ---------------------------------------------------------------------------
+# A point is never given positionally
+# ---------------------------------------------------------------------------
+
+def test_a_bare_number_is_refused(flat):
+    """
+    Ambiguous by construction: on a sweep whose coordinates span its positions,
+    neither the result nor a warning would say which was taken.
+    """
+    with pytest.raises(TypeError, match="positional"):
+        plotting.plot_spectrum(flat, 7.5)
+
+
+def test_both_spellings_state_which_they_mean(flat):
+    """value= and index= are symmetric — neither gets the shorter call."""
+    _, _, by_value = plotting.plot_spectrum(flat, value=7.5)
+    _, _, by_index = plotting.plot_spectrum(flat, index=1)
+    assert np.array_equal(_ydata(by_value), _ydata(by_index))
+
+
+# ---------------------------------------------------------------------------
+# A selector under a keyword that is not one
+# ---------------------------------------------------------------------------
+
+def test_the_no_point_error_names_what_arrived(flat):
+    """
+    Every selector is keyword-only, so a renamed or misspelt one is absorbed by
+    the style passthrough. Reporting "no point" without naming it leaves the
+    caller looking at the point they thought they had given.
+    """
+    with pytest.raises(ValueError) as exc:
+        plotting.plot_spectrum(flat, sweep_index=1)
+    msg = str(exc.value)
+    assert "sweep_index=1" in msg
+    assert "names no point" in msg
+    assert "value=" in msg and "index=" in msg
+
+
+def test_an_unrecognised_selector_of_any_name_is_named(flat):
+    """Not keyed to one renamed parameter — any stray keyword is reported."""
+    with pytest.raises(ValueError, match=r"indx=3"):
+        plotting.plot_spectrum(flat, indx=3)
+
+
+def test_style_kwargs_are_not_reported_when_a_point_was_given(flat):
+    """The passthrough is only named when it is the likely cause."""
+    _, _, line = plotting.plot_spectrum(flat, value=7.5, color="k", lw=2)
+    assert line.get_color() == "k"
+
+
+def test_a_stray_keyword_alongside_a_point_still_reaches_matplotlib(flat):
+    """With a point named, an unknown property is matplotlib's to reject."""
+    with pytest.raises(AttributeError, match="sweep_index"):
+        plotting.plot_spectrum(flat, value=7.5, sweep_index=1)
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +328,7 @@ def test_following_the_advice_selects_what_was_asked_for(nested):
 
 def test_a_coordinate_far_from_any_point_warns(flat):
     with pytest.warns(UserWarning, match="found no point there"):
-        plotting.plot_spectrum(flat, 500.0)
+        plotting.plot_spectrum(flat, value=500.0)
 
 
 def test_an_ambiguous_coordinate_is_refused(tmp_path):
@@ -275,13 +341,13 @@ def test_an_ambiguous_coordinate_is_refused(tmp_path):
     scan = AttoCubeSpectralSweep(str(path), spectra_type="PL", sweep="V_A")
 
     with pytest.raises(ValueError, match="4"):
-        plotting.plot_spectrum(scan, 4.0)
+        plotting.plot_spectrum(scan, value=4.0)
 
 
 def test_an_exact_coordinate_does_not_warn(flat):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        plotting.plot_spectrum(flat, 7.5)
+        plotting.plot_spectrum(flat, value=7.5)
 
 
 # ---------------------------------------------------------------------------
@@ -289,13 +355,13 @@ def test_an_exact_coordinate_does_not_warn(flat):
 # ---------------------------------------------------------------------------
 
 def test_the_legend_names_the_declared_sweep_axis(flat):
-    _, _, line = plotting.plot_spectrum(flat, 7.5)
+    _, _, line = plotting.plot_spectrum(flat, value=7.5)
     assert line.get_label() == r"Piezo $y$ (V) = 7.5"
 
 
 def test_the_legend_names_the_axis_that_was_searched(flat):
     """Addressed in V_A, so labelling it with piezo_y would misreport it."""
-    _, _, line = plotting.plot_spectrum(flat, 1.0, axis="V_A")
+    _, _, line = plotting.plot_spectrum(flat, value=1.0, axis="V_A")
     assert line.get_label().startswith("V_A = 1")
 
 
@@ -318,5 +384,5 @@ def test_an_undeclared_sweep_is_labelled_by_index(undeclared):
 
 
 def test_a_supplied_label_is_used_verbatim(flat):
-    _, _, line = plotting.plot_spectrum(flat, 7.5, label="my spectrum")
+    _, _, line = plotting.plot_spectrum(flat, value=7.5, label="my spectrum")
     assert line.get_label() == "my spectrum"

@@ -169,6 +169,94 @@ def test_axis_does_not_apply_to_a_position(flat):
 
 
 # ---------------------------------------------------------------------------
+# axis=None is the default, not a quantity
+# ---------------------------------------------------------------------------
+
+def test_axis_none_searches_the_declared_sweep_axis(flat):
+    """
+    Left to reach the scan, an undeclared axis reads as the flat index, so the
+    coordinate would be searched against 0, 1, 2, ... instead of the sweep.
+    """
+    _, _, explicit = plotting.plot_spectrum(flat, 8.0, axis="sweep")
+    _, _, defaulted = plotting.plot_spectrum(flat, 8.0, axis=None)
+    assert np.array_equal(_ydata(defaulted), _ydata(explicit))
+    assert np.array_equal(_ydata(defaulted), flat.best_energy_spectra[:, 2])
+
+
+def test_axis_none_is_accepted_alongside_a_position(flat):
+    """The same word cannot be the default in one spelling and refused in the other."""
+    _, _, line = plotting.plot_spectrum(flat, index=0, axis=None)
+    assert np.array_equal(_ydata(line), flat.best_energy_spectra[:, 0])
+
+
+# ---------------------------------------------------------------------------
+# A position must be a whole number
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("kwargs", [
+    {"index": 1.9},
+    {"index": 1.0},                            # integral, but still not an int
+    {"index_fast": 1.9, "index_slow": 0},
+    {"index_fast": 1, "index_slow": 0.5},
+])
+def test_a_fractional_position_is_refused_not_truncated(nested, flat, kwargs):
+    scan = nested if any("fast" in k or "slow" in k for k in kwargs) else flat
+    with pytest.raises(TypeError, match="needs an integer"):
+        plotting.plot_spectrum(scan, **kwargs)
+
+
+def test_the_fractional_position_message_offers_the_coordinate(nested):
+    """1.9 on a position keyword is far more likely a coordinate misfiled."""
+    with pytest.raises(TypeError, match=r"pass it as fast="):
+        plotting.plot_spectrum(nested, index_fast=1.9, index_slow=0)
+
+
+def test_numpy_integers_are_still_positions(nested):
+    """An index out of argmin/argmax is np.int64, not int."""
+    _, _, line = plotting.plot_spectrum(nested, index_fast=np.int64(1),
+                                        index_slow=np.int64(2))
+    assert np.array_equal(_ydata(line),
+                          nested.best_energy_spectra[:, 2 * N_FAST + 1])
+
+
+# ---------------------------------------------------------------------------
+# A wrong position spelling is refused in this function's own vocabulary
+# ---------------------------------------------------------------------------
+
+def test_a_flat_position_on_a_nest_names_the_position_keywords(nested):
+    """
+    The scan's own message says "fast= and/or slow=", which here are *coordinates*
+    — following it selects a different point and draws it without complaint.
+    """
+    with pytest.raises(ValueError) as exc:
+        plotting.plot_spectrum(nested, index=3)
+    msg = str(exc.value)
+    assert "index_fast= and index_slow=" in msg
+    assert "Name the axes: fast= and/or slow=." not in msg
+
+
+def test_nest_positions_on_a_flat_sweep_name_index(flat):
+    """The scan offers "the index positionally"; here the positional slot is a value."""
+    with pytest.raises(ValueError) as exc:
+        plotting.plot_spectrum(flat, index_fast=1, index_slow=0)
+    msg = str(exc.value)
+    assert "Use index=" in msg
+    assert "positionally" not in msg
+
+
+def test_following_the_advice_selects_what_was_asked_for(nested):
+    """The point of the re-wording: the remedy it names must be the right one."""
+    with pytest.raises(ValueError) as exc:
+        plotting.plot_spectrum(nested, index=3)
+    assert "index_fast=" in str(exc.value)
+
+    # 3 = slow 0, fast 3 in a 4-fast nest; the coordinate spelling of the same
+    # request would be fast=6.0, and fast=3 would land somewhere else entirely.
+    _, _, line = plotting.plot_spectrum(nested, index_fast=3, index_slow=0)
+    assert np.array_equal(_ydata(line), nested.best_energy_spectra[:, 3])
+
+
+# ---------------------------------------------------------------------------
 # The lookup is the scan's own, so its policies reach the plot
 # ---------------------------------------------------------------------------
 

@@ -373,6 +373,15 @@ def _coordinate_text(label: str, value: float, unit: str) -> str:
     return f"{named} = {float(value):.4g}"
 
 
+# The coordinate each position keyword pairs with, for messages that offer the
+# other spelling.  `index` pairs with the positional argument, which has no name.
+_COORDINATE_FOR_POSITION = {
+    "index":      "the coordinate positionally",
+    "index_fast": "fast=",
+    "index_slow": "slow=",
+}
+
+
 def _select_sweep_point(scan, value, axis, index, fast, slow,
                         index_fast, index_slow, what: str) -> int:
     """
@@ -384,16 +393,24 @@ def _select_sweep_point(scan, value, axis, index, fast, slow,
     each.  The lookup itself is the scan's, so an ambiguous coordinate is refused
     and a distant one warns exactly as they do for ``get_spectrum_at``.
     """
+    # None is the unspecified default, not a quantity to look up. Without this it
+    # would reach the scan, which reads an undeclared axis as the flat index — so
+    # a coordinate would be silently searched against 0, 1, 2, … instead.
+    if axis is None:
+        axis = "sweep"
+
     named_by_value = [n for n, v in (("value", value), ("fast", fast),
                                      ("slow", slow)) if v is not None]
-    named_by_index = [n for n, v in (("index", index),
-                                     ("index_fast", index_fast),
-                                     ("index_slow", index_slow)) if v is not None]
+    named_by_index = [(n, v) for n, v in (("index", index),
+                                          ("index_fast", index_fast),
+                                          ("index_slow", index_slow))
+                      if v is not None]
+    index_names = [n for n, _ in named_by_index]
 
     if named_by_value and named_by_index:
         raise ValueError(
             f"{what}: name the point by value ({', '.join(named_by_value)}) or "
-            f"by position ({', '.join(named_by_index)}), not both."
+            f"by position ({', '.join(index_names)}), not both."
         )
     if not named_by_value and not named_by_index:
         raise ValueError(
@@ -404,8 +421,40 @@ def _select_sweep_point(scan, value, axis, index, fast, slow,
     if named_by_index and axis != "sweep":
         raise ValueError(
             f"{what}: axis={axis!r} names the quantity a *coordinate* is read "
-            f"against, so it does not apply to {', '.join(named_by_index)}. "
+            f"against, so it does not apply to {', '.join(index_names)}. "
             f"Give the point as a value, or drop axis=."
+        )
+
+    for name, given in named_by_index:
+        # A position must be exact. The scan would take int(1.9) and plot point 1
+        # without comment, and a fractional position is far more likely to be a
+        # coordinate that reached the wrong keyword.
+        if not isinstance(given, (int, np.integer)):
+            raise TypeError(
+                f"{what}: {name}={given!r} selects by position, which needs an "
+                f"integer. {given!r} looks like a coordinate — pass it as "
+                f"{_COORDINATE_FOR_POSITION[name]} to look it up by value, or "
+                f"round it if you did mean a position."
+            )
+
+    # The scan's own refusals for these two are written for its accessors, where
+    # fast=/slow= are whichever spelling that method takes. Here they are always
+    # coordinates, so its advice would name the wrong keyword — and following it
+    # succeeds, selecting a different point in silence. Refuse first, in this
+    # function's vocabulary.
+    if index is not None and scan.is_nested:
+        raise ValueError(
+            f"{what}: this sweep is a declared nest ({scan.nesting}), so a "
+            f"single position does not locate a point. Name both axes with "
+            f"index_fast= and index_slow=, or address it by coordinate with "
+            f"fast= and slow=."
+        )
+    if (index_fast is not None or index_slow is not None) and not scan.is_nested:
+        raise ValueError(
+            f"{what}: index_fast= and index_slow= need a declared nest, and this "
+            f"sweep is flat ({scan.n_sweeps} points). Use index= for a position "
+            f"on the sweep axis, or declare the nest with fast_sweep= and "
+            f"slow_sweep= at load time."
         )
 
     if named_by_value:
@@ -497,7 +546,8 @@ def plot_spectrum(
         ``"V_A"``.  The default searches the declared sweep axis.  Use it when a
         sweep is declared in one coordinate and you want a point in another — a
         field sweep driven by both gates at a fixed ratio can be addressed by
-        ``axis="top_voltage"``.  Applies to coordinates only.
+        ``axis="top_voltage"``.  Applies to coordinates only; ``None`` means the
+        default.
     index : int, optional
         Position on the sweep axis.  Negative counts from the end.  For a flat
         sweep; a nest is addressed with *index_fast* and *index_slow*.
@@ -506,6 +556,9 @@ def plot_spectrum(
         leaving an axis free is refused.
     index_fast, index_slow : int, optional
         Positions on the nest axes, the integer spelling of *fast* / *slow*.
+        A position must be a whole number; a fractional one is refused rather
+        than truncated, since it is more likely a coordinate that reached the
+        wrong keyword.
     ax : matplotlib.axes.Axes, optional
     x_axis : {"energy", "wavelength"}
     normalize : bool
@@ -527,10 +580,13 @@ def plot_spectrum(
     Raises
     ------
     ValueError
-        If the point is named both ways at once, or not at all; if a coordinate
-        names more than one sweep point, since drawing one of them would drop
-        the rest without saying so; or if one nest axis is left free, which
-        selects more than one spectrum.
+        If the point is named both ways at once, or not at all; if a position
+        spelling does not match the sweep's shape; if a coordinate names more
+        than one sweep point, since drawing one of them would drop the rest
+        without saying so; or if one nest axis is left free, which selects more
+        than one spectrum.
+    TypeError
+        If a position is not a whole number.
 
     Warns
     -----

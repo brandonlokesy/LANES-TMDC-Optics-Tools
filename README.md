@@ -155,7 +155,7 @@ Name the point the way you took the measurement — a coordinate on the sweep ax
 ```python
 fig, ax, line = plotting.plot_spectrum(
     scan,
-    2.5,                           # sweep axis units: V, mV/nm, µW, …
+    value     = 2.5,               # sweep axis units: V, mV/nm, µW, …
     x_axis    = "energy",
     normalize = True,
 )
@@ -164,18 +164,20 @@ ax.set_xlim(1.30, 1.45)
 
 The nearest sweep point is used, and a request that lands far from any real point warns rather than failing silently. A coordinate matching several points is refused — declare the nest and address it below, or pick the point by position.
 
-Integer positions still work, and a 2-D sweep is addressed on both of its axes:
+Integer positions work the same way, and a 2-D sweep is addressed on both of its axes:
 
 ```python
-plotting.plot_spectrum(scan, index = 50)                  # by position
-plotting.plot_spectrum(scan, index = -1)                  # last point
+plotting.plot_spectrum(scan, index = 50)                      # by position
+plotting.plot_spectrum(scan, index = -1)                      # last point
 
-plotting.plot_spectrum(scan, 15.0, axis = "top_voltage")  # by another quantity
+plotting.plot_spectrum(scan, value = 15.0, axis = "top_voltage")  # by another quantity
 
 # a nest declared with fast_sweep= / slow_sweep= at load time
 plotting.plot_spectrum(scan, fast = 2.5, slow = 100.0)        # by coordinate
 plotting.plot_spectrum(scan, index_fast = 3, index_slow = 1)  # by position
 ```
+
+**Every selector is keyword-only** — `plot_spectrum(scan, 50)` is a `TypeError`, not a guess. A bare number could be a coordinate or a position, and on a sweep whose coordinates span the same range as its positions (a power sweep in µW, say) neither the result nor a warning would tell you which was taken.
 
 ---
 

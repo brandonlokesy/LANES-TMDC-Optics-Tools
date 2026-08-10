@@ -715,11 +715,26 @@ decision; the argument for it is in the audit under the ID given.
   midway between two distinct points is not a tie. (E14)
 - **`plot_spectrum` selects a point the way the accessors do, and resolves it
   through them.** Settled 2026-08-10. Researchers name a setting, not a column, so
-  the coordinate takes the positional slot: `plot_spectrum(scan, 2.5)`. Six
-  keyword-only selectors in two exclusive spellings — `value`/`fast`/`slow` are
-  coordinates, `index`/`index_fast`/`index_slow` are positions — so the two never
-  share a keyword and a request cannot be half of each. Naming both ways, or
-  neither, raises; `axis=` applies to coordinates only.
+  a coordinate is the primary spelling: `plot_spectrum(scan, value=2.5)`. Six
+  selectors in two exclusive spellings — `value`/`fast`/`slow` are coordinates,
+  `index`/`index_fast`/`index_slow` are positions — so the two never share a
+  keyword and a request cannot be half of each. Naming both ways, or neither,
+  raises; `axis=` applies to coordinates only, and `axis=None` means the default
+  rather than reaching the scan, which reads an undeclared axis as the flat index.
+
+  **Every selector is keyword-only, and `value` has no positional slot.** The
+  accessors can afford `get_spectrum_at(2.5)` because the *method name* says which
+  kind of selection it is; `plot_spectrum` merges both methods into one function,
+  so that disambiguation has nowhere to live but the keyword. A bare number is
+  therefore refused. This is not pedantry: on a sweep whose coordinates span the
+  same range as its positions — a power sweep in µW — `plot_spectrum(scan, 50)`
+  would take 50 µW with no warning, because 50 is a real coordinate. Keyword-only
+  is what turns that silent misread into a `TypeError`.
+
+  **Positions must be whole numbers**, and a fractional one is refused rather than
+  truncated — `int(1.9)` plotting point 1 is silent, and a fractional position is
+  far likelier a coordinate that reached the wrong keyword. `np.integer` passes,
+  so an index out of `argmin` is unaffected.
 
   **Selection is not re-implemented in `plotting`.** `_select_sweep_point` forwards
   to `_sweep_selector`, so the settled policies above reach the figure unchanged:
@@ -733,6 +748,16 @@ decision; the argument for it is in the audit under the ID given.
   addressed — both, for a nest, where the declared sweep axis is the flat index and
   says nothing. `_coordinate_text` reuses `sweep_axis_label`'s composition, so
   existing legends are unchanged and a raw-row axis correctly shows no unit.
+
+  **A wrong-shape position request is refused in `plotting`'s own vocabulary, not
+  the loader's.** The scan's messages are written for its accessors, where
+  `fast=`/`slow=` are whichever spelling that method takes; here they are always
+  coordinates, so its advice names the wrong keyword — and following it *succeeds*,
+  selecting a different point in silence. Pre-empt those two cases rather than
+  forwarding them. Same reasoning for the no-point error naming the style
+  passthrough: with every selector keyword-only, a renamed or misspelt one is
+  absorbed by `**line_kwargs` instead of raising, so the error reports what
+  arrived. Keyed to nothing — don't replace it with a list of old parameter names.
 - **The sweep axis must label each point individually, and the loader warns when
   it does not.** Asked as *"how many different values does this axis take?"*, not
   *"is it monotonic?"* — the latter is a side effect that catches a nest's inner

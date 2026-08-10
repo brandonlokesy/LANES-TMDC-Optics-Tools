@@ -775,6 +775,99 @@ def locate_residual_peak(result: FitResult, search_range: tuple) -> tuple:
     return float(x_in_range[idx]), float(residual_in_range[idx])
 
 
+def _n_peaks(result: FitResult) -> int:
+    return sum(1 for key in result.params if key.startswith("center_"))
+
+
+def find_extra_peaks(
+    x,
+    y,
+    base_result : FitResult,
+    max_new     : int   = 6,
+    snr         : float = 5.0,
+    min_gap     : float = None,
+    edge_margin : float = None,
+) -> FitResult:
+    """
+    Iteratively seed and fit additional Voigt peaks from a fit's own residual.
+
+    Generalises the single, once-only lookup :func:`locate_residual_peak`
+    already does for :func:`fit_raman_modes`'s unseeded shoulder mode: the
+    same idea (find the residual's biggest remaining peak, seed a new Voigt
+    component there, refit) repeats here rather than stopping after one, so
+    it covers a fit missing one more feature or several without knowing the
+    count ahead of time.
+
+    Parameters
+    ----------
+    x, y : array-like
+        The same arrays *base_result* was fit to.
+    base_result : FitResult
+        A previous :func:`fit_multi_voigt` result, or a wrapper's (e.g.
+        :func:`fit_raman_modes`, :func:`fit_pl_peaks`), to extend.
+    max_new : int
+        Upper bound on how many peaks may be added.
+    snr : float
+        A candidate peak must exceed ``snr`` times the residual's MAD (a
+        robust noise estimate) to be accepted.
+    min_gap, edge_margin : float, optional
+        Minimum distance, in *x*'s own units, a candidate must keep from an
+        existing peak's center, and from the data's own edges, respectively.
+        ``None`` (default) derives both from the fit's x-range — ``min_gap``
+        2% of it, ``edge_margin`` 5% — scale-relative so the same defaults
+        suit a Raman shift (cm⁻¹) window or a PL energy (eV) one without a
+        domain-specific number. A small ``min_gap`` matters: two genuinely
+        distinct features can sit only a few percent of the window apart,
+        and excluding that whole neighbourhood as "too close to an existing
+        peak" silently discards a real, resolvable feature. ``edge_margin``
+        matters separately: a multi-Voigt fit is least constrained at the
+        boundary of what it was fit to, so a residual "peak" sitting exactly
+        at the data's edge is far more often that boundary effect than a
+        real feature.
+
+    Returns
+    -------
+    FitResult
+        *base_result* unchanged if nothing was added, otherwise a new
+        :func:`fit_multi_voigt` result with *base_result*'s peaks first, in
+        their original order, followed by however many were added.
+    """
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    span = x.max() - x.min()
+    if min_gap is None:
+        min_gap = 0.02 * span
+    if edge_margin is None:
+        edge_margin = 0.05 * span
+
+    result = base_result
+    n_start = _n_peaks(result)
+    lo_edge, hi_edge = x.min() + edge_margin, x.max() - edge_margin
+
+    while _n_peaks(result) - n_start < max_new:
+        mask = (result.x_fit >= lo_edge) & (result.x_fit <= hi_edge)
+        x_fit, residual = result.x_fit[mask], result.residuals[mask]
+        noise = 1.4826 * np.median(np.abs(residual - np.median(residual)))
+
+        n = _n_peaks(result)
+        centers = [result.params[f"center_{i}"] for i in range(n)]
+        far_enough = np.all([np.abs(x_fit - c) > min_gap for c in centers], axis=0)
+        if not np.any(far_enough):
+            break
+
+        idx = np.argmax(np.where(far_enough, residual, -np.inf))
+        peak_x, peak_h = x_fit[idx], residual[idx]
+        if peak_h < snr * noise:
+            break
+
+        p0 = [(result.params[f"amp_{i}"], result.params[f"center_{i}"],
+               result.params[f"fwhm_g_{i}"], result.params[f"fwhm_l_{i}"])
+              for i in range(n)]
+        p0.append((peak_h, peak_x, span / 20, span / 20))
+        result = fit_multi_voigt(x, y, p0=p0)
+
+    return result
+
+
 def extract_fit_param_map(
     results_grid : np.ndarray,
     param_key     : str,
@@ -984,6 +1077,88 @@ def fit_raman_modes(
     full_p0 = known_p0[:shoulder_index] + [shoulder_p0] + known_p0[shoulder_index:]
 
     return fit_multi_voigt(x, y, p0=full_p0, bounds=_bounds(modes, full_p0))
+
+
+def fit_pl_peaks(
+    x,
+    y,
+    material   : str,
+    fit_window : tuple = None,
+    seeds      : dict  = None,
+) -> FitResult:
+    """
+    Fit a material's known PL peaks.
+
+    Same shape as :func:`fit_raman_modes`: peak identities, seed positions,
+    and fit tolerances come from :data:`constants.PL_PEAKS` rather than being
+    encoded here, so a new material is a data addition, not a new function.
+    Unlike :func:`fit_raman_modes`, every peak is seeded directly — there is
+    no residual-located "shoulder" step, since :data:`constants.PL_PEAKS`
+    carries no ``"shoulder_mode"`` the way :data:`constants.RAMAN_MODES`
+    does: none of a material's listed peaks is assumed unresolved ahead of
+    time. Smaller features the seeded peaks miss are a separate, composable
+    step — see :func:`find_extra_peaks`.
+
+    Parameters
+    ----------
+    x, y : array-like
+        Spectral axis (energy or wavelength) and intensity.
+    material : str
+        Key into :data:`constants.PL_PEAKS`, e.g. ``"WSe2"``.
+    fit_window : tuple of (x_min, x_max), optional
+        Overrides the config's default.
+    seeds : dict, optional
+        ``{peak_name: seed_position}`` overriding the config's seed for one
+        or more peaks — e.g. a strained or gated sample whose peaks sit
+        measurably off the config's defaults. Only the seed position is
+        overridden; that peak's ``fwhm_seed`` and ``center_tol`` still come
+        from the config.
+
+    Returns
+    -------
+    FitResult
+        An N-peak :func:`fit_multi_voigt` result, N =
+        ``len(constants.PL_PEAKS[material]["peaks"])``. ``center_0``/
+        ``amp_0``/… is ``constants.PL_PEAKS[material]["peaks"][0]``, and so
+        on in that same order.
+
+    Raises
+    ------
+    KeyError
+        If *material* has no entry in :data:`constants.PL_PEAKS`.
+
+    See Also
+    --------
+    find_extra_peaks : locate and fit smaller features the seeded peaks miss,
+        composable on this function's result.
+    fit_raman_modes : same shape, for Raman modes instead of PL peaks.
+    fit_multi_voigt : the general-purpose fitter this wraps.
+    """
+    config = constants.PL_PEAKS[material]
+    peaks, peak_config = config["peaks"], config["peak_config"]
+    fit_window = fit_window if fit_window is not None else config["fit_window"]
+    seed_overrides = seeds or {}
+
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    mask = (x >= fit_window[0]) & (x <= fit_window[1])
+    x_win, y_win = x[mask], y[mask]
+
+    p0, lo, hi = [], [], []
+    for peak in peaks:
+        seed = seed_overrides.get(peak, peak_config[peak]["seed"])
+        fwhm_seed = peak_config[peak]["fwhm_seed"]
+        tol = peak_config[peak]["center_tol"]
+        # Max within +/- tol of the seed, not the single nearest-grid-point
+        # value -- missing the true peak by one bin would underestimate the
+        # amplitude seed enough that the fit below fails to converge (same
+        # reasoning as fit_raman_modes's amplitude seeding).
+        window = (x_win >= seed - tol) & (x_win <= seed + tol)
+        amp = y_win[window].max() - y_win.min() if np.any(window) else y_win.max() - y_win.min()
+        p0.append((amp, seed, fwhm_seed, fwhm_seed))
+        lo += [0.0, seed - tol, 0.002, 0.002]
+        hi += [np.inf, seed + tol, 0.15, 0.15]
+
+    return fit_multi_voigt(x_win, y_win, p0=p0, bounds=(lo, hi))
 
 
 def fit_scan_peak(

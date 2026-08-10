@@ -2059,6 +2059,12 @@ class _AttoCubeSweep:
         (1340, 51, 41)
         >>> scan.as_grid(scan["Scanner X"]).shape        # doctest: +SKIP
         (51, 41)
+
+        See Also
+        --------
+        tmdc_optics_tools.processing.reorder_grid : flatten a grid built by
+            this method back into a sequence, in a chosen traversal order
+            and direction rather than only the one it was written in.
         """
         nest  = self._require_nesting("as_grid()")
         array = np.asarray(array)
@@ -2072,6 +2078,39 @@ class _AttoCubeSweep:
                 f"be put onto."
             )
         return array.reshape(array.shape[:-1] + nest.shape)
+
+    def as_image_grid(self, image_scan) -> np.ndarray:
+        """
+        Reshape an image sequence's frames onto this sweep's declared nest.
+
+        :meth:`as_grid` only accepts a 1-D or 2-D array; an image stack is
+        3-D, so this flattens it to ``(height * width, n_frames)`` first and
+        reshapes back after. :meth:`as_grid`'s own frame-count check still
+        does the real work: this raises exactly the error it would for a
+        spectral array if ``image_scan.n_frames != self.n_sweeps`` — not a
+        second, differently-worded one written just for images.
+
+        Parameters
+        ----------
+        image_scan : object exposing ``n_frames`` and ``load_frame(idx)``
+            E.g. :class:`AttoCubePLScanRealSpace`, or anything else
+            :class:`~tmdc_optics_tools.plotting.ImageSequencePanel` accepts.
+
+        Returns
+        -------
+        np.ndarray
+            ``(height, width, n_slow, n_fast)``.
+
+        Raises
+        ------
+        ValueError
+            If no nest was declared, or if ``image_scan.n_frames`` does not
+            equal :attr:`n_sweeps` — see :meth:`as_grid`.
+        """
+        frames = [image_scan.load_frame(i) for i in range(image_scan.n_frames)]
+        height, width = frames[0].shape
+        flat = np.stack(frames, axis=-1).reshape(height * width, image_scan.n_frames)
+        return self.as_grid(flat).reshape(height, width, *self.nesting.shape)
 
     # --- Locating a sweep point ----------------------------------------------
 

@@ -226,6 +226,53 @@ def test_as_grid_refuses_a_mismatched_trailing_axis(nested):
         nested.as_grid(nested.wavelength)
 
 
+# ---------------------------------------------------------------------------
+# as_image_grid
+# ---------------------------------------------------------------------------
+
+
+class _FakeImageScan:
+    """A minimal ImageSequencePanel-shaped stand-in: n_frames + load_frame(idx)."""
+
+    def __init__(self, frames):
+        self._frames = frames
+
+    @property
+    def n_frames(self):
+        return len(self._frames)
+
+    def load_frame(self, idx):
+        return self._frames[idx]
+
+
+def test_as_image_grid_reshapes_a_stack_of_frames(nested):
+    # Each frame is filled with its own flat sweep index, so the grid
+    # position a value ends up at can be checked directly.
+    frames = [np.full((2, 3), i, dtype=float) for i in range(N_SWEEPS)]
+    image_scan = _FakeImageScan(frames)
+
+    grid = nested.as_image_grid(image_scan)
+
+    assert grid.shape == (2, 3, N_SLOW, N_FAST)
+    for slow in range(N_SLOW):
+        for fast in range(N_FAST):
+            flat_index = slow * N_FAST + fast
+            assert np.all(grid[:, :, slow, fast] == flat_index)
+
+
+def test_as_image_grid_refuses_a_frame_count_mismatch(nested):
+    frames = [np.zeros((2, 3)) for _ in range(N_SWEEPS + 1)]  # one too many
+    with pytest.raises(ValueError, match="last axis"):
+        nested.as_image_grid(_FakeImageScan(frames))
+
+
+def test_as_image_grid_refuses_without_a_nest_and_points_at_the_declaration(flat):
+    frames = [np.zeros((2, 3)) for _ in range(N_SWEEPS)]
+    with pytest.raises(ValueError) as exc:
+        flat.as_image_grid(_FakeImageScan(frames))
+    assert "fast_sweep=" in str(exc.value)
+
+
 def test_declaring_a_nest_does_not_reshape_the_stored_arrays(nested, flat):
     """The shape-polymorphism guard: `spectra` means the same thing either way."""
     assert nested.spectra.shape == flat.spectra.shape == (nested.n_pixels,

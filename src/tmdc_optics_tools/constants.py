@@ -114,6 +114,35 @@ BANDGAP_ENERGY_BULK = {
     "WSe2" : 1.2,  #  J. Phys. Chem. 86, 463–467 (1982)
 }
 
+# ----- PL peak seeds, by material (eV) ----- #
+# Approximate starting positions for fitting.fit_multi_voigt's p0 -- there is
+# no fit_pl_peaks wrapper the way RAMAN_MODES feeds fitting.fit_raman_modes,
+# so a caller reads "peak_config" directly into p0/bounds at the call site.
+# "seed" is a starting guess, not a measured value: the fit is free to move
+# each center by "center_tol" during fitting. General lab knowledge rather
+# than a literature citation -- note EXCITON_ENERGY["WSe2"]["XA0"] above
+# (1.75 eV, Nature Nanotechnology 8, 634-638 (2013)) is a different figure
+# for the same neutral intralayer exciton; the two were not reconciled here.
+#
+# Three features, by mechanism:
+#   X0 -- intralayer, neutral exciton.
+#   XT -- intralayer, trion (charged exciton); sits below X0 by its binding
+#         energy, seeded here ~20 meV lower.
+#   IX -- interlayer hybrid exciton(s); occupies a broader, less resolved
+#         range than X0/XT, seeded as one wide peak rather than a resolved
+#         substructure.
+PL_PEAKS = {
+    "WSe2": {
+        "peaks": ["X0", "XT", "IX"],  # order = param index order for fit_multi_voigt
+        "peak_config": {
+            "X0": {"seed": 1.70, "fwhm_seed": 0.02, "center_tol": 0.03},
+            "XT": {"seed": 1.68, "fwhm_seed": 0.02, "center_tol": 0.03},
+            "IX": {"seed": 1.55, "fwhm_seed": 0.05, "center_tol": 0.05},
+        },
+        "fit_window": (1.45, 1.80),
+    },
+}
+
 # ----- Raman modes, by material and layer count ----- #
 # Feeds fitting.fit_raman_modes: one entry per mode gives its seed position
 # ("seed", omitted for the mode located from a fit's own residual instead --

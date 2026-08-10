@@ -407,10 +407,9 @@ order of how much they cost:
 
 - **Search for the concept before writing it.** The second copy is the bug, not
   merely a maintenance burden: if a helper is wanted in two modules, the first one is
-  in the wrong place — move it and import, don't fork it. `_draw_region_box` exists
-  verbatim in both `processing.py` and `diffusion.py` (D1), and there are three
-  laser-circle drawers with different styling defaults (D2). That is how 6k lines
-  becomes 10k.
+  in the wrong place — move it and import, don't fork it. The live example is the
+  three laser-circle drawers with different styling defaults (D2). That is how 6k
+  lines becomes 10k.
 - **Prefer composing an existing entry point over adding a near-duplicate one.**
   `animate_wl_pl_spectra` builds its panels and returns `animate_panels(...)` — a new
   public function, no new engine. That is the shape to copy. For contrast,

@@ -608,7 +608,8 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 circle (A3), zero-filled blocks loaded as sweep points (A6), the silent sawtooth
 sweep axis on a raster (A8), the zero-mean overflow in `varying_parameters` (A10),
 the lexicographic frame order in `AttoCubePLScanRealSpace` (A7), a two-row
-spectrum accepted as a real-space frame (A9), duplicate
+spectrum accepted as a real-space frame (A9), a real-space `bg_region` stored and
+never applied (B1), duplicate
 iteration indices passing unreported (A12), a valid nest refused because a
 read-back level was wider than the axis tolerance (A13), the `_CURATED`
 fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), nested
@@ -793,8 +794,26 @@ decision; the argument for it is in the audit under the ID given.
   export beside the frames is dropped **in silence** — an acquisition writes one
   every time, and every committed example directory has one, so warning there fires
   on every legitimate load. Every other skipped kind is named. (A9)
+- **`load_frame` is the file's own counts; `load_frame_bg` carries the background
+  correction.** Do not "finish" this by making `load_frame` subtract when a
+  `bg_region` was given — that is the whole point of the design.
+  `analyse_diffusion_sequence` calls `load_frame(i)` and forwards `bg_region` to
+  `analyse_diffusion_cloud`, so a subtracting `load_frame` makes every such call
+  subtract twice, and `DiffusionCloudPanel` a third time; `diffusion.py` has **no
+  tests** to catch it. Same `spectra` / `spectra_bg` split, same *raw arrays are never
+  mutated after load* rule. The viewers choose with
+  `frame_source={"best"|"raw"|"bg"}` through `_resolve_frame` — a string after
+  `spectra_source=`, **not** a `raw=` boolean, so the package keeps one name for
+  "which version of the data is this". `"best"` means corrected when a `bg_region`
+  was set and raw otherwise: the opt-in is `bg_region=None` at the loader, so a plot
+  honouring it is the `best_energy_spectra` rule, not a second silent decision. There
+  is deliberately **no `_FRAME_SOURCE_LABELS`** — nothing would read it, as nothing
+  reads the spectral one. (B1)
 
 **Open, not yet fixed:**
+- **`_SPECTRA_SOURCE_LABELS` (`loaders.py`) is dead** — imported by `plotting.py` and
+  read nowhere. A B-section deletion: the dict and the import. Found while deciding
+  not to add a frame-side twin of it.
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
   that already had `bg_region` applied at load.
 - README §5/§6 reference APIs that don't exist (`AttoCubePLScan`, `plot_pl_map`,
@@ -813,12 +832,14 @@ decision; the argument for it is in the audit under the ID given.
   breaking changes to one function, so land them together. The other two renames
   break nothing and can wait. Details and the corrected before-signature are in
   `dev/plan-E12.md` Step 3.
-- **`AttoCubePLScanRealSpace(bg_region=, bg_stat=)` are stored and never used** (B1)
-  — `load_frame` returns `np.loadtxt(...)` untouched, so animations and diffusion
-  sequences get un-subtracted frames. Either apply `processing._apply_bg_region` as
-  `_AttoCubeImage.__init__` does, or delete the parameters; the class docstring
-  documents neither, so whichever way it goes the Parameters block is owed. Last of
-  the `AttoCubePLScanRealSpace` pass, after A7 and A9.
+- **`plot_diffusion_cloud` can subtract the background twice** (A5) — it pulls
+  `image.img`, which `_AttoCubeImage` already subtracted, then forwards `bg_region`
+  to `analyse_diffusion_cloud`, which subtracts again. `diffusion._load_image` has
+  the guard (it deliberately reads `img_raw`) but is bypassed because a bare ndarray
+  is handed in, not the object. Display and analysis then disagree about which image
+  they describe. **Take it with E11**, which rewrites that signature and return
+  anyway — fixing it alone means two breaking changes to one function. Wants the
+  repo's first `diffusion` tests; there are none.
 - **Every `stacklevel` in `loaders.py` is unverified** (A11) — 15 `warnings.warn`
   calls, values 2 through 5, no test pinning where any of them points. The TRPL chain
   is confirmed wrong: it needs 6 and passes 4, so those warnings blame

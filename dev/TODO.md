@@ -45,8 +45,11 @@
       malformed file to happen. ~~**A9** (`_is_image_csv` takes a two-row spectrum for
       an image)~~ **fixed 2026-08-10** — `_classify_csv` replaces it, requires three
       rows for a frame, and defers a headed file to `_read_block_layout` so a TRPL
-      export is named `temporal` rather than `spectral`. **B1** (`bg_region` ignored
-      in `load_frame`) is the last of this class's pass and is still open.
+      export is named `temporal` rather than `spectral`. ~~**B1** (`bg_region` ignored
+      in `load_frame`)~~ **fixed 2026-08-10** — `load_frame` still returns the file's
+      counts and `load_frame_bg` carries the correction, so `diffusion` keeps
+      subtracting exactly once; the viewers pick with
+      `frame_source={"best","raw","bg"}`. That completes this class's pass.
 - Position in scans (x,y).
     - ~~for x (..) for y (...) can be flipped to for y (...) for x (..)~~ **settled
       2026-07-31, built 2026-08-06 (E14).** The flip is settled *by statement*, not

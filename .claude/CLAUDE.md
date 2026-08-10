@@ -607,7 +607,8 @@ Full audit with fix sketches: `dev/audit-2026-07.md`
 `__repr__` and `optical_thickness` (A2), the `animate_real_space_PL_map` laser
 circle (A3), zero-filled blocks loaded as sweep points (A6), the silent sawtooth
 sweep axis on a raster (A8), the zero-mean overflow in `varying_parameters` (A10),
-the lexicographic frame order in `AttoCubePLScanRealSpace` (A7), duplicate
+the lexicographic frame order in `AttoCubePLScanRealSpace` (A7), a two-row
+spectrum accepted as a real-space frame (A9), duplicate
 iteration indices passing unreported (A12), a valid nest refused because a
 read-back level was wider than the axis tolerance (A13), the `_CURATED`
 fail-fast (E1), the silently-defaulted channel-to-gate mapping (E7b), nested
@@ -783,6 +784,15 @@ decision; the argument for it is in the audit under the ID given.
   don't re-file this under A9. `stacklevel` is a required argument because the two
   callers sit at different depths — see A11 before trusting any warning's line
   number. (A7, A12)
+- **A real-space frame is a numeric grid of at least three rows, and a headed file
+  is classified by `_read_block_layout`.** `_classify_csv` replaces the old
+  `_is_image_csv` predicate and returns the kind, since a bool cannot say why a file
+  was skipped. Don't have it name a header kind itself: `"spectral"` and
+  `"temporal"` are the two `_BLOCK_LAYOUTS` entries, so a second, wider meaning for
+  `"spectral"` forks the vocabulary and mislabels every TRPL export. An AttoCube
+  export beside the frames is dropped **in silence** — an acquisition writes one
+  every time, and every committed example directory has one, so warning there fires
+  on every legitimate load. Every other skipped kind is named. (A9)
 
 **Open, not yet fixed:**
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
@@ -803,13 +813,12 @@ decision; the argument for it is in the audit under the ID given.
   breaking changes to one function, so land them together. The other two renames
   break nothing and can wait. Details and the corrected before-signature are in
   `dev/plan-E12.md` Step 3.
-- **`_is_image_csv` accepts a two-row spectrum as an image** (A9), because it only
-  tests whether the first line parses as floats — and a `SingleSpectrum`'s first row
-  is its wavelength axis. A directory of single spectra therefore loads as 2×N
-  "images". `_read_block_layout` already draws this distinction correctly (two rows →
-  `SingleSpectrum`, more → image sequence); copy that rule. Now the whole of the
-  `AttoCubePLScanRealSpace` pass, since A7 landed without it; take **B1**
-  (`bg_region`/`bg_stat` ignored in `load_frame`) with it, and second.
+- **`AttoCubePLScanRealSpace(bg_region=, bg_stat=)` are stored and never used** (B1)
+  — `load_frame` returns `np.loadtxt(...)` untouched, so animations and diffusion
+  sequences get un-subtracted frames. Either apply `processing._apply_bg_region` as
+  `_AttoCubeImage.__init__` does, or delete the parameters; the class docstring
+  documents neither, so whichever way it goes the Parameters block is owed. Last of
+  the `AttoCubePLScanRealSpace` pass, after A7 and A9.
 - **Every `stacklevel` in `loaders.py` is unverified** (A11) — 15 `warnings.warn`
   calls, values 2 through 5, no test pinning where any of them points. The TRPL chain
   is confirmed wrong: it needs 6 and passes 4, so those warnings blame

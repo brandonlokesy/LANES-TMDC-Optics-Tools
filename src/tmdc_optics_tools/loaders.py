@@ -765,6 +765,71 @@ def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
     return np.asarray(arr, dtype=float)
 
 
+# Mapping of string names → the accessor that reads a real-space frame.  The
+# frame counterpart of _SPECTRA_SOURCES, and `None` is the same sentinel: "best"
+# is resolved at call time because which array it names depends on how the scan
+# was loaded.
+_FRAME_SOURCES = {
+    "best" : None,             # bg-subtracted where available, else raw
+    "raw"  : "load_frame",
+    "bg"   : "load_frame_bg",
+}
+
+# Statistics _apply_bg_region can estimate a pedestal with.  Kept next to the
+# sources because the two together are the whole frame-correction vocabulary.
+_BG_STATS = ("median", "mean")
+
+
+def _resolve_frame(scan, idx: int, frame_source: str = "best") -> np.ndarray:
+    """
+    Return frame *idx* of *scan* as the array *frame_source* names.
+
+    Reads *scan* by accessor name, so it serves anything exposing
+    ``load_frame(idx)`` — a scan that offers no background-corrected frames is
+    not an error under ``"best"``, it simply has one fewer array to choose from.
+
+    Parameters
+    ----------
+    scan : AttoCubePLScanRealSpace or object exposing ``load_frame(idx)``
+    idx : int
+        Frame index.
+    frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+        ``"raw"`` is the file's own counts; ``"bg"`` is background-subtracted;
+        ``"best"`` gives ``"bg"`` when a *bg_region* was set at load time and
+        ``"raw"`` otherwise.
+
+    Returns
+    -------
+    np.ndarray
+        2-D frame, ``float``.
+
+    Raises
+    ------
+    ValueError
+        If *frame_source* is not recognised, or if ``"bg"`` is asked for on a
+        scan carrying no *bg_region*.
+    """
+    src = frame_source.lower()
+    if src not in _FRAME_SOURCES:
+        raise ValueError(
+            f"frame_source {src!r} is not recognised. "
+            f"Choose from: {list(_FRAME_SOURCES)}."
+        )
+
+    # "best" prefers the corrected frame; asking for it by name makes it required.
+    attr   = _FRAME_SOURCES["bg"] if src == "best" else _FRAME_SOURCES[src]
+    getter = getattr(scan, attr, None)
+    if src != "raw" and (getter is None or getattr(scan, "bg_region", None) is None):
+        if src == "bg":
+            raise ValueError(
+                f"frame_source={src!r} is not available on this scan.  "
+                f"Check that bg_region was set at load time."
+            )
+        getter = getattr(scan, _FRAME_SOURCES["raw"])
+
+    return np.asarray(getter(idx), dtype=float)
+
+
 # Recognised input formats, dispatched on the file suffix.
 _CSV_SUFFIXES  = (".csv",)
 _HDF5_SUFFIXES = (".h5", ".hdf5", ".he5")
@@ -4788,6 +4853,14 @@ class AttoCubePLScanRealSpace:
         compute a field axis (gate voltages are not embedded in these files).
     laser_ref : AttoCubeLaserReferenceImage, optional
         Laser spot reference, used for annotation in animations.
+    bg_region : tuple of (row_slice, col_slice), optional
+        Pixel-space patch of signal-free detector used to estimate a dark
+        pedestal, e.g. ``(slice(0, 40), slice(0, 40))`` for a corner.  Supplying
+        it makes :meth:`load_frame_bg` available; :meth:`load_frame` is
+        unaffected and always returns the file's own counts.
+    bg_stat : {``"median"``, ``"mean"``}
+        Statistic used to reduce *bg_region* to the pedestal.  ``"median"``
+        survives a cosmic ray inside the patch; ``"mean"`` does not.
     """
 
     def __init__(
@@ -4799,6 +4872,14 @@ class AttoCubePLScanRealSpace:
         bg_region : tuple = None,
         bg_stat   : str   = "median",
     ):
+        if bg_stat not in _BG_STATS:
+            # _apply_bg_region falls through to the mean for anything that is not
+            # "median", so an unchecked typo silently changes the estimator.
+            raise ValueError(
+                f"bg_stat {bg_stat!r} is not recognised. "
+                f"Choose from: {list(_BG_STATS)}."
+            )
+
         self.path      = str(path)
         self.geometry  = geometry
         self.laser_ref = laser_ref
@@ -4905,18 +4986,65 @@ class AttoCubePLScanRealSpace:
         )
 
     def load_frame(self, idx: int) -> np.ndarray:
-        """Load and return a single frame as a 2-D NumPy array."""
+        """
+        Load frame *idx* as a 2-D array of the file's own counts.
+
+        Never background-corrected, whatever was passed as *bg_region* — see
+        :meth:`load_frame_bg` for that.
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(ny, nx)``.
+        """
         return np.loadtxt(self.files[idx], delimiter=",")
+
+    def load_frame_bg(self, idx: int) -> np.ndarray:
+        """
+        Load frame *idx* with the *bg_region* pedestal subtracted.
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(ny, nx)``.  A new array; :meth:`load_frame` is unaffected.
+
+        Raises
+        ------
+        ValueError
+            If no *bg_region* was supplied at load time.  There is no pedestal
+            to estimate, and returning the raw frame would silently answer a
+            different question.
+        """
+        if self.bg_region is None:
+            raise ValueError(
+                f"No background-corrected frames on this scan: '{self.path}' was "
+                f"loaded without a bg_region. Pass bg_region=(row_slice, col_slice) "
+                f"to the constructor, or use load_frame() for the raw counts."
+            )
+        return processing._apply_bg_region(
+            self.load_frame(idx), self.bg_region, self.bg_stat
+        )
 
     @property
     def n_frames(self) -> int:
         """Number of frames loaded."""
         return len(self.files)
 
-    def preview_image(self, idx: int, cmap = "gray") -> tuple:
-        """Plot a single frame and return (fig, ax)."""
+    def preview_image(self, idx: int, cmap = "gray", frame_source: str = "best") -> tuple:
+        """
+        Plot a single frame and return ``(fig, ax)``.
+
+        Parameters
+        ----------
+        idx : int
+            Frame index.
+        cmap : str or Colormap
+        frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+            Which frame to draw.  ``"best"`` is background-corrected when a
+            *bg_region* was supplied at load time, and raw otherwise.
+        """
         fig, ax = plt.subplots()
-        ax.imshow(self.load_frame(idx), cmap)
+        ax.imshow(_resolve_frame(self, idx, frame_source), cmap)
         ax.axis("off")
         return fig, ax
 

@@ -14,7 +14,7 @@ import warnings
 import numpy as np
 import pytest
 
-from tmdc_optics_tools.loaders import AttoCubePLScanRealSpace
+from tmdc_optics_tools.loaders import AttoCubePLScanRealSpace, _resolve_frame
 
 SHAPE = (4, 5)                      # (ny, nx) — small; no frame content is analysed
 
@@ -48,6 +48,34 @@ def _export(tmp_path, name, roles) -> None:
 
 SPECTRAL_ROLES = ("Par_0", "Wavelength0", "ExpROI1_0", "ExpROI2_0")
 TEMPORAL_ROLES = ("Par_0", "Wavelength0", "Exp_0")
+
+# A signal-free corner whose four values are [1, 1, 1, 21]: median 1, mean 6.  The
+# two statistics therefore give distinguishable pedestals, which a constant-filled
+# frame could not show.
+BG_REGION   = (slice(0, 2), slice(0, 2))
+BG_MEDIAN   = 1.0
+BG_MEAN     = 6.0
+SIGNAL_FILL = 100.0
+
+
+def _pedestal_frame(tmp_path, name) -> None:
+    """Write a frame sitting on a pedestal, with a signal-free corner to measure it."""
+    img = np.full(SHAPE, SIGNAL_FILL)
+    img[BG_REGION] = [[1.0, 1.0], [1.0, 21.0]]
+    np.savetxt(tmp_path / name, img, delimiter=",")
+
+
+def _pedestal_scan(tmp_path, **kwargs):
+    """
+    A two-frame scan of pedestal frames, built with *kwargs* on the loader.
+
+    Creates *tmp_path*, so a test wanting two independently-loaded scans can pass
+    two subdirectories of its own ``tmp_path``.
+    """
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for i in (0, 1):
+        _pedestal_frame(tmp_path, f"pl_iter_{i}.csv")
+    return AttoCubePLScanRealSpace(tmp_path, prefix="pl_", **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +298,84 @@ def test_skip_warning_points_at_the_caller(tmp_path):
         AttoCubePLScanRealSpace(tmp_path, prefix="pl_")
 
     assert caught[0].filename == __file__
+
+
+# ---------------------------------------------------------------------------
+# Background subtraction
+# ---------------------------------------------------------------------------
+
+
+def test_load_frame_is_raw_even_when_a_bg_region_was_given(tmp_path):
+    # The rule this class shares with the spectral loaders: the file's own counts
+    # stay reachable, and the correction is a separate array.
+    scan = _pedestal_scan(tmp_path, bg_region=BG_REGION)
+
+    assert scan.load_frame(0)[BG_REGION].tolist() == [[1.0, 1.0], [1.0, 21.0]]
+    assert np.allclose(scan.load_frame(0).max(), SIGNAL_FILL)
+
+
+def test_load_frame_bg_subtracts_the_region_statistic(tmp_path):
+    # median and mean differ by construction, so this pins which one ran rather
+    # than merely that something was subtracted.
+    med  = _pedestal_scan(tmp_path / "a", bg_region=BG_REGION)
+    mean = _pedestal_scan(tmp_path / "b", bg_region=BG_REGION, bg_stat="mean")
+
+    assert np.allclose(med.load_frame_bg(0).max(),  SIGNAL_FILL - BG_MEDIAN)
+    assert np.allclose(mean.load_frame_bg(0).max(), SIGNAL_FILL - BG_MEAN)
+
+
+def test_load_frame_bg_raises_without_a_bg_region(tmp_path):
+    # Returning the raw frame would answer a different question in silence.
+    scan = _pedestal_scan(tmp_path)
+    with pytest.raises(ValueError, match="without a bg_region"):
+        scan.load_frame_bg(0)
+
+
+def test_unrecognised_bg_stat_is_rejected_at_construction(tmp_path):
+    # _apply_bg_region falls through to the mean for anything but "median", so an
+    # unchecked typo would silently change the estimator.
+    with pytest.raises(ValueError, match="bg_stat 'mediam' is not recognised"):
+        _pedestal_scan(tmp_path, bg_region=BG_REGION, bg_stat="mediam")
+
+
+# ---------------------------------------------------------------------------
+# _resolve_frame
+# ---------------------------------------------------------------------------
+
+
+def test_best_follows_whether_a_bg_region_was_set(tmp_path):
+    with_bg    = _pedestal_scan(tmp_path / "a", bg_region=BG_REGION)
+    without_bg = _pedestal_scan(tmp_path / "b")
+
+    assert np.allclose(_resolve_frame(with_bg, 0, "best").max(),
+                       SIGNAL_FILL - BG_MEDIAN)
+    assert np.allclose(_resolve_frame(without_bg, 0, "best").max(), SIGNAL_FILL)
+
+
+def test_raw_ignores_a_bg_region_and_bg_requires_one(tmp_path):
+    with_bg    = _pedestal_scan(tmp_path / "a", bg_region=BG_REGION)
+    without_bg = _pedestal_scan(tmp_path / "b")
+
+    assert np.allclose(_resolve_frame(with_bg, 0, "raw").max(), SIGNAL_FILL)
+    with pytest.raises(ValueError, match="not available on this scan"):
+        _resolve_frame(without_bg, 0, "bg")
+
+
+def test_unrecognised_frame_source_names_the_choices(tmp_path):
+    scan = _pedestal_scan(tmp_path)
+    with pytest.raises(ValueError, match=r"is not recognised.*'best'"):
+        _resolve_frame(scan, 0, "subtracted")
+
+
+def test_an_object_with_only_load_frame_degrades_to_raw():
+    # The published duck-type is load_frame(idx) + n_frames, so "best" must not
+    # require an accessor a stand-in has no reason to implement.
+    class _Minimal:
+        n_frames = 1
+        def load_frame(self, idx):
+            return np.full(SHAPE, SIGNAL_FILL)
+
+    assert np.allclose(_resolve_frame(_Minimal(), 0, "best").max(), SIGNAL_FILL)
 
 
 def test_spectral_companion_excluded_despite_iter_0_collision():

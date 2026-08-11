@@ -1007,15 +1007,25 @@ auxiliary spectra out of `/metadata`, which an old reader would silently drop).
 
 ## `processing` — arrays in, arrays out
 
-No objects, no files, no matplotlib. Everything takes an `axis=` and respects the
-`(n_points, n_sweeps)` convention.
+No objects, no files. Everything takes an `axis=` and respects the
+`(n_points, n_sweeps)` convention. The one exception to "no matplotlib" is
+`_draw_region_box`, which lives here so that `loaders` and `diffusion` share one
+drawer instead of forking it (D1).
 
 ```
 normalise_peak / normalise_area      subtract_background / subtract_spectrum
-smooth_median / smooth_savgol        crop
+smooth_median / smooth_savgol        crop / _window_slice
 wavelength_to_energy / energy_to_wavelength / jacobian_correction_wvl2E
 spectral_contrast                    remove_cosmic_rays
 ```
+
+`_window_slice` turns a `(lo, hi)` window on a measured axis into a `slice`, so the
+axis and the signal are cut by one object and both stay views. It is what
+`AttoCubeSpectralSweep.pixel_slice` and `fitting.fit_scan_peak` are both built on, and
+it refuses an empty window and warns on a clipped bound — which is why it sits next to
+`crop`, the remaining spelling of the same window that does neither. (The third is
+`plot_power_series`'s inline mask.) Unifying `crop` on it would make it raise where it
+now returns an empty array, so that is its own change.
 
 `spectral_contrast` returns `(contrast, reference_guarded)` — the second is the
 reference actually used, so the caller can see what it divided by. That is the

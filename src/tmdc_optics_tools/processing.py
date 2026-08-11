@@ -343,6 +343,83 @@ def smooth_savgol(
 # Spectral operations
 # ---------------------------------------------------------------------------
 
+def _window_slice(values: np.ndarray, x_range, *, axis: str, unit: str,
+                  what: str, stacklevel: int) -> slice:
+    """
+    Contiguous run of *values* lying inside *x_range*, as a ``slice``.
+
+    *values* is a measured axis, one entry per point along the axis being
+    windowed; *x_range* is a ``(lo, hi)`` pair in its units.  Bounds are
+    inclusive, and their order carries no information — a window is a set — so a
+    reversed pair reads as the same window.
+
+    A ``slice`` rather than a boolean mask, so that indexing with the result
+    views the array rather than copying it.  That needs the selected points to be
+    consecutive, which holds for an ordered axis; a non-monotonic one raises
+    rather than quietly widening the window to bridge the gaps.
+
+    *axis*, *unit* and *what* appear in the messages: the name of the axis being
+    windowed, its unit, and the calling function spelled ``"pixel_slice()"``.
+
+    *stacklevel* is a required argument because callers sit at different depths,
+    and a warning about a window is only useful pointing at the line that asked
+    for it.
+    """
+    try:
+        lo, hi = (float(bound) for bound in x_range)
+    except (TypeError, ValueError):
+        raise TypeError(
+            f"{what}: x_range must be a (lo, hi) pair of numbers in {unit}, got "
+            f"{x_range!r}."
+        ) from None
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        raise ValueError(
+            f"{what}: x_range bounds must both be finite, got ({lo}, {hi})."
+        )
+    lo, hi = min(lo, hi), max(lo, hi)
+
+    axis_lo, axis_hi = float(values.min()), float(values.max())
+
+    inside = (values >= lo) & (values <= hi)
+    if not inside.any():
+        raise ValueError(
+            f"{what}: no point of the {axis} axis lies in "
+            f"{lo:.6g}–{hi:.6g} {unit}. The axis spans "
+            f"{axis_lo:.6g}–{axis_hi:.6g} {unit} in {values.size} points."
+        )
+
+    where       = np.flatnonzero(inside)
+    first, last = int(where[0]), int(where[-1])
+    if where.size != last - first + 1:
+        raise ValueError(
+            f"{what}: the {axis} axis is not ordered, so {lo:.6g}–{hi:.6g} "
+            f"{unit} is not one consecutive run of points — {where.size} lie "
+            f"inside the window, spread over {last - first + 1} positions. A "
+            f"window can only be returned as a slice for a monotonic axis."
+        )
+
+    # Half the median step: a bound short of the axis by less than that is a
+    # rounded-off end point, further is a window that came back narrower than the
+    # one asked for.
+    step = (float(np.median(np.abs(np.diff(values)))) if values.size > 1
+            else 0.0)
+    clipped = []
+    if lo < axis_lo - 0.5 * step:
+        clipped.append(f"lower bound {lo:.6g} {unit} is below the axis minimum "
+                       f"{axis_lo:.6g} {unit}")
+    if hi > axis_hi + 0.5 * step:
+        clipped.append(f"upper bound {hi:.6g} {unit} is above the axis maximum "
+                       f"{axis_hi:.6g} {unit}")
+    if clipped:
+        warnings.warn(
+            f"{what}: {' and the '.join(clipped)}, so the window was clipped to "
+            f"the {axis} axis and selects {where.size} of {values.size} points.",
+            UserWarning, stacklevel=stacklevel,
+        )
+
+    return slice(first, last + 1)
+
+
 def crop(
     spectra : np.ndarray,
     x       : np.ndarray,

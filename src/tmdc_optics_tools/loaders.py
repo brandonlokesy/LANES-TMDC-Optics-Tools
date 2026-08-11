@@ -3031,7 +3031,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
        The CSV parser is still the PL-shaped 4-column layout.  ``spectra_type``
        currently drives **labelling and metadata only** — it does not change how
        the file is decoded, because no reflectance or reflectance-contrast
-       export has been characterised yet (see E9 in ``dev/audit-2026-07.md``).
+       export has been characterised yet (see E9 in ``dev/defects.md``).
        Loading an ``"R"`` file works only if it happens to share the PL layout.
 
     Parameters

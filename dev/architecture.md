@@ -14,15 +14,17 @@ when you need the argument rather than the mechanism.
 
 | File | Holds |
 |---|---|
-| `.claude/CLAUDE.md` | standing conventions, physics record, design principles, settled decisions |
-| `dev/audit-2026-07.md` | the defect register: what is broken, what was fixed and when |
-| `dev/E7b-E7c-gates.md` | the gate machinery line by line — the deep dive this file summarises |
-| `dev/plan-E12.md`, `dev/cosmic_ray_fix.md`, … | one change each |
+| `.claude/CLAUDE.md` | how to write code here — the rules, not the reasoning |
+| `dev/decisions/` | one record per decision: what was chosen, what was rejected, what followed |
+| `dev/design-principles.md` | the argument behind the rules, with worked examples |
+| `dev/physics-conventions.md` | what each physical quantity means, and when it is valid |
+| `dev/instruments/` | one file per acquisition system: export format and hardware facts |
+| `dev/defects.md` | the defect register: what is broken, what was fixed and when |
+| `dev/plan-E12.md`, … | work planned but not yet landed |
 | **this file** | how the pieces fit and what the words mean |
 
 **On line numbers.** This file names functions and attributes rather than line
-numbers, because names survive edits. `dev/E7b-E7c-gates.md` uses line numbers
-deliberately (it is pinned to one dated change); this one is meant to stay true.
+numbers, because names survive edits and line numbers rot silently.
 
 ---
 
@@ -308,8 +310,32 @@ row recording it.
 Channel-level work needs no declaration at all: `scan["V_A"]` and `sweep="V_A"` are
 unaffected by any of this.
 
-Full treatment, including every refusal and why each one is where it is:
-`dev/E7b-E7c-gates.md`.
+### The refusal matrix
+
+What each access does under each declaration:
+
+| Access | undeclared | `{top, bottom}` | `{bottom, channel}` |
+|---|---|---|---|
+| `scan["V_A"]`, `sweep="V_A"` | ok | ok | ok |
+| `gate_mode`, `repr()` | ok | ok | ok |
+| `v_bot` | **raise** | ok | ok |
+| `v_top` | **raise** | ok | **raise** (no such gate) |
+| `v_channel` | **raise** | **raise** (not declared) | ok |
+| `ef`, no geometry | `None` | `None` | `None` |
+| `ef`, with geometry | **raise** | ok | **raise** (no field) |
+| `carrier_density`, no geometry | `None` | `None` | `None` |
+| `carrier_density`, with geometry | **raise** | **raise** (no channel) | ok |
+| `sweep="top_voltage"` | **raise** | ok | **raise** |
+| `sweep="electric_field"` | **raise** | ok (needs geometry) | **raise** |
+| `sweep="carrier_density"` | **raise** | **raise** (no channel) | ok (needs geometry) |
+| `sweep="power"`, `"piezo_x"`, … | ok | ok | ok |
+
+**Load-time vs access-time:** everything in a `sweep=` row raises during construction;
+everything in a property row raises on first access.
+
+Why each refusal is where it is:
+`dev/decisions/0002-gate-wiring-must-be-declared.md` and
+`dev/decisions/0003-gates-declares-device-topology.md`.
 
 ### Sweep type vs sweep source
 
@@ -528,7 +554,7 @@ geom.carrier_density(v_bot=…)       # cm⁻², electrons positive
 ```
 
 Two things about this class that a maintainer will otherwise get wrong, both recorded
-in `.claude/CLAUDE.md` with the full derivation:
+in `dev/physics-conventions.md` §2 with the full derivation:
 
 - **`electric_field` is exact as written.** Two plausible "simplifications" are
   already shipped elsewhere in the group and both change the numbers — one by 0.6%,
@@ -1166,9 +1192,10 @@ A change that breaks one of these is a bug even if the tests pass.
 | reshape a raster, or pick a spectrum out of one | declare `fast_sweep=`/`slow_sweep=`, then `as_grid()` / `get_spectrum_at()`; §`sweep_grid()` above |
 | add a new input format | write a decoder returning the §2.1 payload; add a suffix to the dispatch in `_decode` |
 | add a curated parameter | one row in `_AttoCubeSweep._CURATED`, plus a property |
-| understand a gate refusal | `dev/E7b-E7c-gates.md`, Part 8 (the refusal matrix) |
-| know why a number is what it is | `.claude/CLAUDE.md`, *Physics conventions* |
-| know whether a bug is known | `.claude/CLAUDE.md`, *Known issues* → `dev/audit-2026-07.md` |
+| understand a gate refusal | the refusal matrix in §2.2 above |
+| know why a number is what it is | `dev/physics-conventions.md` |
+| know why the code is shaped this way | `dev/decisions/`, index in its README |
+| know whether a bug is known | `dev/defects.md` |
 | add a plotting option | first ask whether the returned artist already does it (§10) |
 | run the tests | `conda run --no-capture-output -n viz-sci-plot python -m pytest -q` |
 

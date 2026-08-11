@@ -263,11 +263,10 @@ def plot_spectral_map(
 
     Corrections are configured at load time on the scan object (via
     ``bg_region_nm``, ``bg_region_eV``, ``apply_jacobian`` and ``cosmic_rays``).
-    This function plots the best array the scan has for the chosen axis:
-    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`
-    for ``"energy"``, which is background-corrected where one was supplied, and
-    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_spectra` for
-    ``"wavelength"``, which carries a cosmic-ray repair where one was declared.
+    This function plots the most-corrected array the scan has for the chosen axis
+    — :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`
+    or :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_spectra` — so
+    a declared background or cosmic-ray repair reaches the map on either axis.
 
     Parameters
     ----------
@@ -676,8 +675,8 @@ def plot_single_spectrum(
     ----------
     spectrum : SingleSpectrum
         Any object exposing ``wavelength``, ``energy``, ``best_spectra`` and
-        ``best_energy_spectra`` attributes. Background-corrected arrays are
-        used automatically when a background region was set at load time.
+        ``best_energy_spectra`` attributes. The most-corrected array available is
+        used automatically, on whichever axis is plotted.
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
     x_axis : {"wavelength", "energy"}

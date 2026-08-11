@@ -118,8 +118,9 @@ Key attributes after loading:
 |---|---|
 | `scan.wavelength` | Spectrometer wavelength axis (nm) |
 | `scan.energy` | Photon energy axis (eV) |
-| `scan.spectra` | Raw PL counts, shape `(n_pixels, n_sweeps)` |
-| `scan.energy_spectra` | PL on the energy axis |
+| `scan.spectra` | The file's own counts, shape `(n_pixels, n_sweeps)` |
+| `scan.energy_spectra` | The same counts on the energy axis |
+| `scan.best_spectra`, `scan.best_energy_spectra` | Most-corrected array available on each axis — cosmic-ray repaired and background-subtracted where those were declared at load time |
 | `scan.v_top`, `scan.v_bot` | Gate voltages (V) |
 | `scan.ef` | Displacement field (mV/nm), `None` if no geometry |
 | `scan.power` | Excitation power (µW) |
@@ -207,7 +208,7 @@ print(results[50])
 For a single spectrum:
 ```python
 x = scan.energy
-y = scan.energy_spectra[:, 50]
+y = scan.best_energy_spectra[:, 50]   # corrected where corrections were declared
 
 result = fitting.fit_lorentzian(x, y, p0=(y.max(), 1.385, 0.01))
 ```

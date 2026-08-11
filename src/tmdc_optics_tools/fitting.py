@@ -536,12 +536,12 @@ def fit_scan_peak(
     Fit a single peak in every sweep of an
     :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep`.
 
-    Background subtraction and Jacobian correction are configured at load
-    time on the scan object (via ``bg_region_nm`` / ``bg_region_eV`` and
-    ``apply_jacobian``).  This function always uses
+    Corrections are configured at load time on the scan object (via
+    ``bg_region_nm`` / ``bg_region_eV``, ``apply_jacobian`` and ``cosmic_rays``).
+    This function fits the most-corrected array the scan has for *x_axis* —
     :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`
-    for the energy axis, which automatically returns the background-corrected
-    array when one is available.
+    or :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_spectra` — so
+    a declared background or cosmic-ray repair reaches the fit on either axis.
 
     Parameters
     ----------
@@ -1038,11 +1038,11 @@ def extract_dipole_length(
     4. Derive the dipole length and propagate uncertainties.
 
     .. note::
-        Background subtraction is configured at load time on the scan
-        object via ``bg_region_nm`` or ``bg_region_eV``.
-        :func:`fit_scan_peak` automatically uses
+        Background subtraction and cosmic-ray repair are configured at load time
+        on the scan object, via ``bg_region_nm`` / ``bg_region_eV`` and
+        ``cosmic_rays``.  The per-point fits run on
         :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`,
-        which returns the background-corrected array when available.
+        which is the most-corrected energy-axis array available.
 
     Parameters
     ----------

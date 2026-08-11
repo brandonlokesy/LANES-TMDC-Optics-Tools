@@ -734,19 +734,22 @@ scan.n_points / n_pixels, scan.n_sweeps, scan.n_declared_sweeps
 scan.wavelength         # nm, ascending, as the file wrote it
 scan.energy             # eV, ascending  (hc/λ, then argsorted)
 
-# — signals, wavelength space —
+# — signals, wavelength space —  (one cumulative ladder, mirrored below)
 scan.spectra            # THE FILE'S OWN COUNTS.  never mutated.
 scan.spectra_roi1/roi2  # both ROIs, always present
-scan.spectra_cr         # cosmic-ray repaired, or None
+scan.spectra_cr         # + cosmic-ray repaired, or None
+scan.spectra_bg         # + background subtracted, or None
 scan.cosmic_ray_mask    # which pixels moved, or None
-scan.contrast           # (S−R)/R, or None
+scan.best_spectra       # _bg if present, else _cr, else spectra
+scan.contrast           # (S−R)/R, or None — outside the ladder
 
 # — signals, energy space (all ascending in energy) —
-scan.energy_spectra                  # Jacobian per apply_jacobian, no background
-scan.energy_spectra_pre_jacobian     # never Jacobian; same object when it is off
-scan.energy_spectra_bg               # background-corrected, or None
+scan.energy_spectra                  # the file's counts; Jacobian per apply_jacobian
+scan.energy_spectra_cr               # + cosmic-ray repaired, or None
+scan.energy_spectra_bg               # + background subtracted, or None
+scan.energy_spectra_pre_jacobian     # first rung, never Jacobian; same object when off
+scan.best_energy_spectra             # the same rung best_spectra picks
 scan.energy_contrast                 # Jacobian NEVER applied — it cancels in a ratio
-scan.best_energy_spectra             # _bg if available, else energy_spectra
 
 # — instrument state —
 scan.parameters, scan["V_A"], scan.get_parameter("V_A", scale)
@@ -767,10 +770,13 @@ scan.sweep_grid()
 
 One accessor per axis, so a caller choosing on `x_axis` names a property on both sides:
 
-| Accessor | Returns | What it cannot offer |
-|---|---|---|
-| `best_energy_spectra` | `energy_spectra_bg` if a background was supplied, else `energy_spectra` — both built from the cosmic-ray repair where one was declared | — |
-| `best_spectra` | `spectra_cr` if a repair was declared, else `spectra` | no background: the bg-corrected wavelength array is a local in `__init__` and is never stored, so a supplied background shows on the energy axis only |
+| Accessor | Returns |
+|---|---|
+| `best_spectra` | `spectra_bg` → `spectra_cr` → `spectra`, first one present |
+| `best_energy_spectra` | `energy_spectra_bg` → `energy_spectra_cr` → `energy_spectra`, first one present |
+
+The two pick the **same rung** — that is the invariant, and a test asserts both in one
+place so they cannot drift apart.
 
 Neither **ever returns the contrast**, even when a reference was given: contrast is a
 *different quantity*, not a better-corrected one, and it is negative-going — a peak fit
@@ -878,22 +884,28 @@ This is the part most likely to be broken by a well-meaning edit, because the or
 is physics.
 
 ```
-   file counts  ──►  spectra                          (never mutated, ever)
-        │
+   file counts  ──►  spectra  ─────────────────►  energy_spectra
+        │                                     = jacobian?(spectra), argsorted
+        │                                        energy_spectra_pre_jacobian
         ▼  cosmic_rays=          FIRST — a spike biases everything downstream
-   spectra_cr / cosmic_ray_mask
+   spectra_cr / cosmic_ray_mask ─────────────►  energy_spectra_cr
         │
         │   signal = spectra_cr if repaired else spectra
-        ├──────────────────────────────────────────────┐
-        ▼  (wavelength space)                          ▼  (no bg)
-   bg_region_nm  → subtract_background            energy_spectra
-   bg_spectrum   → subtract_spectrum         = jacobian?(signal), argsorted
+        ▼  (wavelength space)
+   bg_region_nm  → subtract_background
+   bg_spectrum   → subtract_spectrum
         │
-        ├──► energy_spectra_bg  = jacobian?(corrected), argsorted
+        ├──► spectra_bg  ──────────────────────►  energy_spectra_bg
         │
         └──► reference= → spectral_contrast(corrected, reference)
                  └──► contrast, energy_contrast   (Jacobian NEVER applied)
 ```
+
+Every rung is stored on both axes, and each energy rung is its wavelength rung
+argsorted onto ascending energy, times `λ²/hc` iff `apply_jacobian`. So the right-hand
+column is a *representation* of the left, not a second chain — which is why there is
+one `_pre_jacobian` array (of the first rung) rather than one per rung: the
+wavelength-space rungs already hold those values.
 
 The four rules encoded in that diagram:
 
@@ -915,12 +927,20 @@ The four rules encoded in that diagram:
    `(S·λ²/hc)/(R·λ²/hc) = S/R` exactly — it cancels identically, and applying it to
    the numerator alone would be an error.
 
-**Sentinels.** `energy_spectra_bg` is `None` when no background was supplied, and the
-test for that is `corrected is not signal` — comparing against `signal`, not
-`spectra`, so a cosmic-ray repair on its own does not masquerade as a background
-subtraction. `energy_spectra_pre_jacobian` is the *same object* as `energy_spectra`
-when the Jacobian is off, and a separate array when it is on, so both representations
-are always reachable.
+**Sentinels.** A rung is `None` when its correction was not requested, so the `None`
+pattern *is* the record of what ran. `spectra_bg` / `energy_spectra_bg` test
+`corrected is not signal` — comparing against `signal`, not `spectra`, so a cosmic-ray
+repair on its own does not masquerade as a background subtraction and both stay `None`.
+`energy_spectra_pre_jacobian` is the *same object* as `energy_spectra` when the Jacobian
+is off, and a separate array when it is on, so both representations are always reachable.
+
+**A suffix names the last correction, not the only one.** The ladder is cumulative, so
+`spectra_bg` carries the cosmic-ray repair too when one was declared — meaning
+`spectra - spectra_bg` is the pedestal alone only if no repair ran. Provenance lives in
+the declarations (`cosmic_rays`, `bg_region_nm`, `bg_spectrum`), in `cosmic_ray_mask`,
+and in the HDF5 attributes; encoding it in the attribute name instead (`spectra_cr_bg`)
+would make the *name* depend on which corrections were requested, which is the branch
+`best_*` exists to remove.
 
 **Grid mismatch on an auxiliary spectrum raises rather than interpolating.**
 Resampling changes the numbers and smooths the data, so it is a correction and cannot

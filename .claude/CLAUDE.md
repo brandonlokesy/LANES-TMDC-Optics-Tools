@@ -668,10 +668,14 @@ decision; the argument for it is in the audit under the ID given.
   do. `scan["I_A"]` still works undeclared. A role declared `None` gives `v_*`
   zeros but makes `i_*` **raise**: grounding fixes a potential, not a current. (E15)
 - **Cosmic-ray repair is a load-time `cosmic_rays=` dict, run first in the
-  wavelength-space chain** — not a plotting argument and not a third flag with its
-  own energy-space arrays. It feeds the background estimate, the contrast and the
-  fits; `spectra` stays the file's own counts, `spectra_cr` holds the repair and
-  `cosmic_ray_mask` says what moved. (E13)
+  wavelength-space chain** — not a plotting argument, and not a flag crossed with
+  the Jacobian and the background. It is a **rung of one cumulative ladder**, so it
+  has one array per axis and `best_*` never has to choose: `spectra` / `spectra_cr`
+  / `spectra_bg` and `energy_spectra` / `energy_spectra_cr` / `energy_spectra_bg`,
+  each rung the one above it plus one correction, `None` when that correction was
+  not asked for. A suffix names the **last** correction applied, not the only one.
+  `spectra` stays the file's own counts and `cosmic_ray_mask` says what moved.
+  (E13, amended by A17)
 - **Nested sweeps are declared with `fast_sweep=` / `slow_sweep=`, which are not
   aliases of `sweep=`.** Settled 2026-08-06, superseding the `grid=(inner, outer)`
   tuple. Everywhere in this package **"sweep" means the flattened measurement

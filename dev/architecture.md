@@ -763,18 +763,30 @@ scan.sweep_type, scan.sweep_axis, scan.sweep_axis_label, scan.signal_label
 scan.sweep_grid()
 ```
 
-## `best_energy_spectra` — the "just give me the right array" accessor
+## `best_spectra` / `best_energy_spectra` — the "just give me the right array" pair
 
-Returns `energy_spectra_bg` if a background was supplied, else `energy_spectra`, so
-downstream code need not know which. It **never returns the contrast**, even when a
-reference was given: contrast is a *different quantity*, not a better-corrected one,
-and it is negative-going — a peak fit whose model decays to zero in the wings would
-give quietly meaningless numbers, and a PL colour bar would silently start meaning
-ΔR/R₀. Ask for `energy_contrast` explicitly.
+One accessor per axis, so a caller choosing on `x_axis` names a property on both sides:
 
-`loaders._resolve_spectra` mirrors this with `spectra_source=` — the `source=` of
-`get_spectrum_at`, and what `plotting` imports — and `"best"` there
-follows the same rule.
+| Accessor | Returns | What it cannot offer |
+|---|---|---|
+| `best_energy_spectra` | `energy_spectra_bg` if a background was supplied, else `energy_spectra` — both built from the cosmic-ray repair where one was declared | — |
+| `best_spectra` | `spectra_cr` if a repair was declared, else `spectra` | no background: the bg-corrected wavelength array is a local in `__init__` and is never stored, so a supplied background shows on the energy axis only |
+
+Neither **ever returns the contrast**, even when a reference was given: contrast is a
+*different quantity*, not a better-corrected one, and it is negative-going — a peak fit
+whose model decays to zero in the wings would give quietly meaningless numbers, and a PL
+colour bar would silently start meaning ΔR/R₀. Ask for `energy_contrast` explicitly.
+
+**Both halves of the pair have to exist, or callers hand-roll the missing one.** While
+only the energy accessor existed, four sites spelt the wavelength half as raw `spectra`
+and so dropped a declared repair on that axis (A16). `SingleSpectrum` has carried both
+names all along, and its callers were the ones that were right.
+
+`loaders._resolve_spectra` answers the same question for `spectra_source=` — the
+`source=` of `get_spectrum_at`, and what `plotting` imports — with `"best"` delegating to
+whichever of the pair the axis names, so each class decides what its own best is.
+`fitting` uses the two properties directly instead: it must not import from `loaders`,
+which would put the algorithm layer above the I/O layer.
 
 ## The three properties that must never raise
 

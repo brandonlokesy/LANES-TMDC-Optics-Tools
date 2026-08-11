@@ -610,7 +610,12 @@ def _fit_scan_peak(
     _, unit = _x_axis_name_unit(x_axis, what="fit_scan_peak()")
 
     values  = scan.energy     if x_axis == "energy" else scan.wavelength
-    spectra = scan.best_energy_spectra if x_axis == "energy" else scan.spectra
+    # The scan's own choice on each axis, so a declared cosmic-ray repair is
+    # fitted rather than the file's spikes.  loaders._resolve_spectra answers the
+    # same question, but importing it here would put fitting on top of the I/O
+    # layer; the two accessors are reachable without that.
+    spectra = (scan.best_energy_spectra if x_axis == "energy"
+               else scan.best_spectra)
     fit_fn  = fit_lorentzian if model == "lorentzian" else fit_gaussian
 
     key, base_names, _ = _resolve_baseline(baseline)

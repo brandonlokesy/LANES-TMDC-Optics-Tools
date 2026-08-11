@@ -713,15 +713,11 @@ def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
         )
 
     if src == "best":
-        if x_axis == "energy":
-            arr = scan.best_energy_spectra
-        else:
-            # Wavelength space has no background-corrected array to offer, but a
-            # cosmic-ray repair does live here — and "best" ignoring a declared
-            # one would put spikes on the plot that no other source shows.
-            arr = getattr(scan, "spectra_cr", None)
-            if arr is None:
-                arr = scan.spectra
+        # Each class decides what its own "best" is, so this serves a
+        # SingleSpectrum's background-corrected array and a sweep's cosmic-ray
+        # repair through one expression.
+        arr = (scan.best_energy_spectra if x_axis == "energy"
+               else scan.best_spectra)
     elif src == "raw":
         arr = scan.spectra
     else:
@@ -3702,6 +3698,23 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         return self.sweep_axis_label
 
     # --- What the spectra are ----------------------------------------------
+
+    @property
+    def best_spectra(self) -> np.ndarray:
+        """
+        Best available wavelength-axis spectra — the counterpart of
+        :attr:`best_energy_spectra`.
+
+        Returns :attr:`spectra_cr` when a cosmic-ray repair was declared at load
+        time and :attr:`spectra` otherwise, so downstream code need not know which.
+
+        Offers no background subtraction, unlike the energy-axis accessor: the
+        wavelength-space arrays kept on a scan are the file's own counts and the
+        repair, so a supplied background shows on the energy axis only. Never
+        returns the contrast, which is a different quantity rather than a
+        better-corrected one — use :attr:`contrast`.
+        """
+        return self.spectra_cr if self.spectra_cr is not None else self.spectra
 
     @property
     def best_energy_spectra(self) -> np.ndarray:

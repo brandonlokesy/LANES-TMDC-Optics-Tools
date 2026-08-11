@@ -261,12 +261,13 @@ def plot_spectral_map(
     :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.sweep_axis_label`,
     so whatever was declared as ``sweep=`` at load time is what is plotted.
 
-    Background subtraction and Jacobian correction are configured at
-    load time on the scan object (via ``bg_region_nm``, ``bg_region_eV``,
-    and ``apply_jacobian``).  This function always uses
-    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`,
-    which automatically returns the background-corrected array when one
-    is available, and falls back to the uncorrected array otherwise.
+    Corrections are configured at load time on the scan object (via
+    ``bg_region_nm``, ``bg_region_eV``, ``apply_jacobian`` and ``cosmic_rays``).
+    This function plots the best array the scan has for the chosen axis:
+    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`
+    for ``"energy"``, which is background-corrected where one was supplied, and
+    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_spectra` for
+    ``"wavelength"``, which carries a cosmic-ray repair where one was declared.
 
     Parameters
     ----------
@@ -304,9 +305,8 @@ def plot_spectral_map(
     x_m = np.tile(x[:, np.newaxis], (1, scan.n_sweeps))
     y_m = np.tile(y[np.newaxis, :], (scan.n_pixels, 1))
 
-    # Use best_energy_spectra (BG-corrected if available) for energy axis;
-    # raw spectra for wavelength axis (BG correction is a loader concern).
-    data = scan.best_energy_spectra.copy() if x_axis == "energy" else scan.spectra.copy()
+    # Copied because the filters below build on it; the resolver itself does not.
+    data = _resolve_spectra(scan, "best", x_axis).copy()
 
     if median_kernel > 1:
         data = processing.smooth_median(data, kernel=median_kernel)
@@ -642,10 +642,7 @@ def plot_spectrum(
         fig = ax.get_figure()
 
     x, xlabel = _resolve_x_axis(scan, x_axis)
-    if x_axis == "energy":
-        y = scan.best_energy_spectra[:, sweep_index].astype(float)
-    else:
-        y = scan.spectra[:, sweep_index].astype(float)
+    y         = _resolve_spectra(scan, "best", x_axis)[:, sweep_index]
     if normalize:
         y = y / y.max()
 
@@ -707,8 +704,7 @@ def plot_single_spectrum(
         fig = ax.get_figure()
 
     x, xlabel = _resolve_x_axis(spectrum, x_axis)
-    y = (spectrum.best_energy_spectra if x_axis == "energy"
-         else spectrum.best_spectra).astype(float)
+    y = _resolve_spectra(spectrum, "best", x_axis)
     if normalize:
         y = y / y.max()
 
@@ -1377,7 +1373,7 @@ class SpectrumLinePanel(AnimationPanel):
     A panel that animates one PL spectrum per frame.
 
     Wraps an :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` (or any object
-    exposing ``energy``/``wavelength`` plus ``best_energy_spectra``/``spectra``
+    exposing ``energy``/``wavelength`` plus ``best_energy_spectra``/``best_spectra``
     of shape ``(n_pixels, n_sweeps)``).  The x-axis is fixed; each frame swaps
     the y-values and updates a per-panel subtitle showing the swept value.
 
@@ -1437,8 +1433,7 @@ class SpectrumLinePanel(AnimationPanel):
 
     def init_artists(self, ax, n_frames: int) -> None:
         x, xlabel = _resolve_x_axis(self.scan, self.x_axis)
-        y_full = (self.scan.best_energy_spectra if self.x_axis == "energy"
-                  else self.scan.spectra)
+        y_full = _resolve_spectra(self.scan, "best", self.x_axis)
         self._y          = np.asarray(y_full[:, :n_frames], dtype=float)
         self._sweep_vals = np.asarray(getattr(self.scan, self.sweep_attr))[:n_frames]
 
@@ -2530,8 +2525,9 @@ def plot_power_series(
     spectra_source : str
         Which array to use.  One of:
 
-        * ``"best"``  — :attr:`best_energy_spectra` (bg-corrected if
-          configured, otherwise raw energy spectra).  **Default.**
+        * ``"best"``  — the best array for *x_axis*: :attr:`best_energy_spectra`
+          (bg-corrected if configured) on the energy axis, :attr:`best_spectra`
+          (cosmic-ray repaired if declared) on the wavelength axis.  **Default.**
         * ``"raw"``   — :attr:`spectra` (wavelength space, raw counts).
         * ``"energy"``— :attr:`energy_spectra` (Jacobian applied if
           configured; no background subtraction).

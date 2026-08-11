@@ -3,7 +3,7 @@
 Written 2026-08-04. This is a **plan**, not a record of landed work: the code
 described here was implemented, verified, and then reverted at the author's
 request so it can land deliberately rather than as one large pass. Finding E12
-itself is in `audit-2026-07.md`; this file is the fix, in enough detail to
+itself is in `defects.md`; this file is the fix, in enough detail to
 re-apply mechanically.
 
 Status of the tree when this was written: the `plot_pl_map_Vab_scan` →
@@ -305,7 +305,7 @@ pre-built sweep with `sweep="piezo_y"`. Say so in the `spectra` docstring entry.
 
 ### Correction owed to the audit
 
-The E12 entry in `audit-2026-07.md` calls the old `sweep_unit="V"` default "a position
+The E12 entry in `defects.md` calls the old `sweep_unit="V"` default "a position
 default carrying a voltage unit, **wrong** before this rewrite and now
 redundant". The 2026-08-04 answer that the scanner rows carry piezo *drive
 voltage* makes it not wrong — only redundant. Fix that line when this lands.

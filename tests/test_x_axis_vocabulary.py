@@ -119,14 +119,18 @@ def test_a_valid_axis_still_reaches_the_data(scan):
 
 
 # ---------------------------------------------------------------------------
-# What the refusal does not cover
+# The axis and the source cannot disagree
 # ---------------------------------------------------------------------------
 
 
-def test_a_wavelength_source_on_the_energy_axis_only_warns(scan):
-    # x_axis resolves what "best" means; a source named explicitly is served on
-    # its own axis. So this pair is a mismatch the vocabulary check cannot catch
-    # and must not pretend to — it warns, and returns the wavelength-space array.
-    with pytest.warns(UserWarning, match="descending energy order"):
-        served = scan.get_spectrum_at(value=0.0, source="raw", x_axis="energy")
-    assert np.array_equal(served, scan.spectra[:, 0])
+def test_a_named_source_is_served_on_the_axis_asked_for(scan):
+    # A source names a correction state and the axis names the representation, so
+    # every state exists on both and no combination can be a mismatch.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        on_wavelength = scan.get_spectrum_at(value=0.0, source="raw",
+                                             x_axis="wavelength")
+        on_energy     = scan.get_spectrum_at(value=0.0, source="raw",
+                                             x_axis="energy")
+    assert np.array_equal(on_wavelength, scan.spectra[:, 0])
+    assert np.array_equal(on_energy, scan.energy_spectra[:, 0])

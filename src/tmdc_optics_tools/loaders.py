@@ -659,85 +659,107 @@ _DECLARED_CURATED = _GATE_CURATED + _CURRENT_CURATED
 # Spectra-source registry
 # ---------------------------------------------------------------------------
 
-# Mapping of string names → spectra array attribute on AttoCubeSpectralSweep.
-# The sentinel value None means "wavelength-space spectra" — these are
-# served on the wavelength axis regardless of x_axis.
+# Correction state → the array holding it, as (wavelength axis, energy axis).  A
+# source names the state and x_axis picks the column, so every state is reachable
+# on either axis and a source cannot be served on the wrong one.  Contrast is
+# opt-in by name: "best" never returns it, ΔR/R₀ being a different physical
+# quantity from the counts rather than a better-corrected version of them.
 _SPECTRA_SOURCES = {
-    "best"                      : None,   # resolved at call time
-    "raw"                       : "spectra",
-    "energy"                    : "energy_spectra",
-    "energy_bg"                 : "energy_spectra_bg",
-    "energy_pre_jacobian"       : "energy_spectra_pre_jacobian",
-    # Contrast is opt-in by name: "best" never returns it, because ΔR/R₀ is a
-    # different physical quantity from the counts, not a better-corrected version
-    # of them.  See AttoCubeSpectralSweep.best_energy_spectra.
-    "contrast"                  : "energy_contrast",
-    "contrast_wavelength"       : "contrast",
+    "raw"      : ("spectra",    "energy_spectra"),
+    "cr"       : ("spectra_cr", "energy_spectra_cr"),
+    "bg"       : ("spectra_bg", "energy_spectra_bg"),
+    "contrast" : ("contrast",   "energy_contrast"),
 }
 
-_SPECTRA_SOURCE_LABELS = {
-    "best"                      : "best available (repaired, bg-corrected if set)",
-    "raw"                       : "raw counts, wavelength space",
-    "energy"                    : "energy axis (Jacobian if configured)",
-    "energy_bg"                 : "energy axis, bg-subtracted",
-    "energy_pre_jacobian"       : "energy axis, no Jacobian",
-    "contrast"                  : "contrast vs reference, energy axis",
-    "contrast_wavelength"       : "contrast vs reference, wavelength space",
+# Served on the energy axis whatever x_axis says.  The Jacobian is a property of
+# the energy representation rather than a state of the counts, so it is not a
+# column of the table above — the wavelength arrays *are* the pre-Jacobian values.
+_SPECTRA_SOURCES_ENERGY_ONLY = {"pre_jacobian": "energy_spectra_pre_jacobian"}
+
+# "best" asks for the most-corrected rung the object has, which each class answers
+# through its own best_* pair, so it is a request rather than a row of the table.
+_SPECTRA_SOURCE_BEST = "best"
+
+# Which argument would make an absent source available — one message per source,
+# each naming the argument that fixes it rather than guessing between two.
+_SOURCE_REQUIRES = {
+    "cr"       : "cosmic_rays=",
+    "bg"       : "bg_region_nm=, bg_region_eV= or bg_spectrum=",
+    "contrast" : "a reference= spectrum",
 }
+
+
+def _spectra_source_names() -> list:
+    """Every accepted ``spectra_source``, for a message."""
+    return ([_SPECTRA_SOURCE_BEST] + list(_SPECTRA_SOURCES)
+            + list(_SPECTRA_SOURCES_ENERGY_ONLY))
 
 
 def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
     """
     Return the ``(n_pixels, n_sweeps)`` array for *spectra_source*.
 
-    Reads *scan* by attribute name, so it serves anything mirroring
-    :class:`AttoCubeSpectralSweep`.  :class:`SingleSpectrum` carries only a subset
-    of the arrays; a source it lacks degrades to the nearest available one where
-    there is one, and raises otherwise.
+    A source names a **correction state** — ``"raw"``, ``"cr"``, ``"bg"``,
+    ``"contrast"`` — and *x_axis* picks the axis it is served on, so the two
+    cannot disagree.  ``"best"`` asks for the most-corrected state the object
+    holds.  ``"pre_jacobian"`` is the one exception: the Jacobian belongs to the
+    energy representation rather than to the counts, so it exists on that axis
+    only.
 
-    Raises ``ValueError`` when *x_axis* names no spectral axis, or when the
-    requested source is unavailable (e.g. ``"energy_bg"`` but no ``bg_region``
-    was set).  *x_axis* chooses which array ``"best"`` resolves to; a source
-    named explicitly is served on its own axis regardless, and a wavelength-space
-    one asked for on the energy axis only *warns*.
+    Reads *scan* by attribute name, so it serves anything mirroring
+    :class:`AttoCubeSpectralSweep`, and distinguishes a correction the class does
+    not offer from one that was simply not requested.
+
+    Raises ``ValueError`` when *x_axis* names no spectral axis, when the source is
+    unrecognised, when the class has no such correction (a
+    :class:`SingleSpectrum` has no cosmic-ray repair), when the correction exists
+    but was not requested at load time, or when ``"pre_jacobian"`` is asked for on
+    the wavelength axis.
     """
-    # Ahead of the source lookup: what "best" means depends on the axis, so an
-    # unrecognised one would be read as wavelength by the branch below.
+    # Ahead of the source lookup: the axis chooses the column below, so an
+    # unrecognised one would be read as wavelength.
     _x_axis_name_unit(x_axis)
 
     src = spectra_source.lower()
-    if src not in _SPECTRA_SOURCES:
-        raise ValueError(
-            f"spectra_source {src!r} is not recognised. "
-            f"Choose from: {list(_SPECTRA_SOURCES)}."
-        )
 
-    if src == "best":
+    if src == _SPECTRA_SOURCE_BEST:
         # Each class decides what its own "best" is, so this serves a
-        # SingleSpectrum's background-corrected array and a sweep's cosmic-ray
-        # repair through one expression.
+        # SingleSpectrum's background-corrected array and a sweep's most-corrected
+        # rung through one expression.
         arr = (scan.best_energy_spectra if x_axis == "energy"
                else scan.best_spectra)
-    elif src == "raw":
-        arr = scan.spectra
-    else:
-        attr = _SPECTRA_SOURCES[src]
-        arr = getattr(scan, attr, None)
-        if arr is None:
-            needs = ("a reference= spectrum" if src.startswith("contrast")
-                     else "bg_region and/or apply_jacobian")
-            raise ValueError(
-                f"spectra_source={src!r} is not available on this scan.  "
-                f"Check that {needs} was set at load time."
-            )
+        return np.asarray(arr, dtype=float)
 
-    # Warn if wavelength-space data is being plotted on energy axis.
-    if src == "raw" and x_axis == "energy":
-        warnings.warn(
-            "spectra_source='raw' uses the wavelength-space array which has "
-            "descending energy order and unequal pixel spacing.  "
-            "Consider 'energy' or 'best' for an energy-axis plot.",
-            UserWarning, stacklevel=3,
+    if src in _SPECTRA_SOURCES_ENERGY_ONLY:
+        if x_axis != "energy":
+            raise ValueError(
+                f"spectra_source={src!r} exists on the energy axis only — the "
+                f"Jacobian is a property of that representation, and the "
+                f"wavelength-space arrays already hold the values it is applied "
+                f"to. Ask for 'raw', 'cr' or 'bg' on the wavelength axis."
+            )
+        attr = _SPECTRA_SOURCES_ENERGY_ONLY[src]
+    elif src in _SPECTRA_SOURCES:
+        attr = _SPECTRA_SOURCES[src][0 if x_axis == "wavelength" else 1]
+    else:
+        raise ValueError(
+            f"spectra_source {src!r} is not recognised. "
+            f"Choose from: {_spectra_source_names()}."
+        )
+
+    # Two different failures, and the advice differs: a class that never offers
+    # this correction cannot be fixed by passing an argument at load time.
+    if not hasattr(scan, attr):
+        raise ValueError(
+            f"a {type(scan).__name__} has no {src!r} spectra ({attr!r}), so that "
+            f"correction cannot be asked of it. Available: "
+            f"{_spectra_source_names()}."
+        )
+    arr = getattr(scan, attr)
+    if arr is None:
+        raise ValueError(
+            f"spectra_source={src!r} is not available on this scan. Check that "
+            f"{_SOURCE_REQUIRES[src]} was set at load time."
         )
 
     return np.asarray(arr, dtype=float)
@@ -3896,12 +3918,12 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
             Coordinates on the nest axes.  Give both for a single spectrum, or
             one to hold that axis and take every point of the other.
         source : str
-            Which array to read: ``"best"`` (repaired and background-corrected
-            where available), ``"raw"``, ``"energy"``, ``"energy_bg"``,
-            ``"energy_pre_jacobian"``, ``"contrast"``, ``"contrast_wavelength"``.
+            Which correction state to read: ``"best"`` (the most-corrected state
+            available), ``"raw"``, ``"cr"``, ``"bg"``, ``"contrast"``, or
+            ``"pre_jacobian"`` (energy axis only).
         x_axis : {"energy", "wavelength"}
-            Which spectral ordering ``"best"`` should resolve to.  The returned
-            spectra run along :attr:`energy` or :attr:`wavelength` accordingly.
+            Which spectral ordering *source* is served on.  The returned spectra
+            run along :attr:`energy` or :attr:`wavelength` accordingly.
 
         Returns
         -------

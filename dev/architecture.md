@@ -451,7 +451,7 @@ Precedence is the same everywhere: **explicit argument > file metadata > default
 | `_resolve_baseline` | fitting | `"constant"`/`"linear"`/`"none"` → model terms | unrecognised key |
 | `_x_axis_name_unit` | constants | `"energy"`/`"wavelength"` → `(name, unit)` | anything else |
 | `_resolve_x_axis` | plotting | an axis name → `(array, label)` | delegates the refusal |
-| `_resolve_spectra` | loaders | `spectra_source=` / `source=` → the actual array | unknown axis; source unavailable on this scan |
+| `_resolve_spectra` | loaders | a correction state + `x_axis` → the actual array | unknown axis or source; the class has no such correction; the correction was not requested; `"pre_jacobian"` off the energy axis |
 
 Two design habits visible in all of them:
 
@@ -793,6 +793,16 @@ names all along, and its callers were the ones that were right.
 whichever of the pair the axis names, so each class decides what its own best is.
 `fitting` uses the two properties directly instead: it must not import from `loaders`,
 which would put the algorithm layer above the I/O layer.
+
+**A source names a correction state, `x_axis` names the axis.** `"raw"` / `"cr"` / `"bg"`
+/ `"contrast"` each exist on both axes, so no combination of the two arguments can be a
+mismatch — which is why there is no longer a warning for one. The single exception is
+`"pre_jacobian"`, which is energy-only because the Jacobian belongs to that
+representation rather than to the counts; asked for on the wavelength axis it **raises**,
+naming the three states that do live there. An absent source distinguishes *the class
+does not offer this correction* (a `SingleSpectrum` has no cosmic-ray repair, and no
+argument would give it one) from *the correction was not requested*, which names the
+argument that would.
 
 ## The three properties that must never raise
 
@@ -1194,7 +1204,7 @@ skeleton of the whole design:
 | `constants.SIGNAL_LABELS` | code → (axis name, unit) | its axis label |
 | `hdf5._AXIS_KIND_FOR_LAYOUT` | layout kind → dataset name/units/group | a new axis kind |
 | `hdf5._JSON_ATTRS` | which metadata keys are JSON-encoded | a new dict-valued metadata key |
-| `loaders._SPECTRA_SOURCES` | `spectra_source=` / `source=` → attribute name | a new plottable array |
+| `loaders._SPECTRA_SOURCES` | correction state → `(wavelength attr, energy attr)` | a new correction state |
 
 The four derived gate names all come from `_GATE_ROLE_CURATED` on the lines below it,
 so they cannot drift. (`_GATE_CURATED` and `_ROLE_FOR_CURATED` currently hold the

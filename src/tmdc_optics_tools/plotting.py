@@ -29,9 +29,7 @@ from .constants import _x_axis_name_unit
 # The spectra-source registry names attributes on the loader classes, so it lives
 # with them; imported here under its own name because this is where callers of
 # ``spectra_source=`` are.
-from .loaders import (
-    _SPECTRA_SOURCES, _SPECTRA_SOURCE_LABELS, _resolve_spectra,
-)
+from .loaders import _SPECTRA_SOURCES, _resolve_spectra
 
 # Optional colormap packages (pip install "tmdc_optics_tools[colormaps]").
 # Imported for their side effect alone: each registers its colormaps into
@@ -211,7 +209,7 @@ def _signal_name_unit(obj, source: str = None) -> tuple:
     "Intensity" / "counts" — a :class:`~tmdc_optics_tools.loaders.SingleSpectrum`
     is a 2-row CSV as likely to be a bare-substrate reflectance reference as PL.
     """
-    if source is not None and source.startswith("contrast"):
+    if source == "contrast":
         return getattr(obj, "contrast_label", r"$\Delta R/R_0$"), ""
     return (getattr(obj, "signal_name", "Intensity"),
             getattr(obj, "signal_unit", "counts"))
@@ -2522,19 +2520,16 @@ def plot_power_series(
     Spectra
     -------
     spectra_source : str
-        Which array to use.  One of:
+        Which correction state to plot; *x_axis* decides the axis it is served on.
 
-        * ``"best"``  — the best array for *x_axis*: :attr:`best_energy_spectra`
-          (bg-corrected if configured) on the energy axis, :attr:`best_spectra`
-          (cosmic-ray repaired if declared) on the wavelength axis.  **Default.**
-        * ``"raw"``   — :attr:`spectra` (wavelength space, raw counts).
-        * ``"energy"``— :attr:`energy_spectra` (Jacobian applied if
-          configured; no background subtraction).
-        * ``"energy_bg"`` — :attr:`energy_spectra_bg` (background-
-          subtracted, Jacobian applied if configured).  Requires
-          ``bg_region`` at load time.
-        * ``"energy_pre_jacobian"`` — :attr:`energy_spectra_pre_jacobian`
-          (always without Jacobian correction).
+        * ``"best"``  — the most-corrected state the scan holds.  **Default.**
+        * ``"raw"``   — the file's own counts.
+        * ``"cr"``    — cosmic-ray repaired.  Requires ``cosmic_rays`` at load time.
+        * ``"bg"``    — background-subtracted.  Requires ``bg_region_nm`` /
+          ``bg_region_eV`` or ``bg_spectrum`` at load time.
+        * ``"contrast"`` — ΔR/R₀ against the reference.  Requires ``reference``.
+        * ``"pre_jacobian"`` — the raw counts on the energy axis with the Jacobian
+          left off, whatever ``apply_jacobian`` says.  Energy axis only.
 
     bg_region : tuple of (x_min, x_max), optional
         Additional background region subtracted *after* loading (same units

@@ -23,7 +23,11 @@ import numpy as np
 import pytest
 
 from tmdc_optics_tools.constants import HC_EV_NM
-from tmdc_optics_tools.loaders import AttoCubeSpectralSweep
+from tmdc_optics_tools.loaders import (
+    AttoCubeSpectralSweep,
+    SingleSpectrum,
+    _resolve_spectra,
+)
 
 from test_loaders import make_spectral_csv
 from test_loaders_cosmic_rays import (
@@ -173,6 +177,51 @@ def test_the_contrast_sits_outside_the_ladder(tmp_path, csv_path):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Reaching the rungs by name: a source is a correction, x_axis is the axis
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("source, rung", [("raw", "raw"), ("cr", "cr"), ("bg", "bg")])
+@pytest.mark.parametrize("x_axis", ["wavelength", "energy"])
+def test_every_state_is_reachable_on_both_axes(load, source, rung, x_axis):
+    scan = load(**DECLARATIONS["cr+bg"])
+    attr = RUNGS[rung][0 if x_axis == "wavelength" else 1]
+    assert np.array_equal(_resolve_spectra(scan, source, x_axis),
+                          getattr(scan, attr))
+
+
+@pytest.mark.parametrize("retired", ["energy", "energy_bg", "contrast_wavelength",
+                                     "energy_pre_jacobian"])
+def test_the_retired_keys_raise_and_name_the_vocabulary(load, retired):
+    # These keys baked the axis into the name. Refusing them is what stops a call
+    # that used to mean one array quietly meaning another.
+    scan = load(**DECLARATIONS["cr+bg"])
+    with pytest.raises(ValueError, match="is not recognised") as excinfo:
+        _resolve_spectra(scan, retired, "energy")
+    assert "'raw'" in str(excinfo.value) and "'bg'" in str(excinfo.value)
+
+
+def test_an_unrequested_correction_names_the_argument_that_enables_it(load):
+    scan = load()
+    with pytest.raises(ValueError, match=r"cosmic_rays="):
+        _resolve_spectra(scan, "cr", "wavelength")
+    with pytest.raises(ValueError, match=r"bg_region_nm="):
+        _resolve_spectra(scan, "bg", "energy")
+
+
+def test_a_correction_the_class_does_not_offer_names_the_class(tmp_path):
+    # A SingleSpectrum takes no cosmic_rays=, so advising it would send the caller
+    # after an argument that does not exist.
+    path = tmp_path / "one.csv"
+    path.write_text(
+        ",".join(f"{w}" for w in WL) + "\n"
+        + ",".join(f"{v}" for v in _sweep()[:, 0]) + "\n"
+    )
+    with pytest.raises(ValueError, match="SingleSpectrum has no 'cr'"):
+        _resolve_spectra(SingleSpectrum(str(path)), "cr", "wavelength")
+
+
 def test_the_jacobian_reaches_every_energy_rung_and_no_wavelength_one(load):
     from tmdc_optics_tools.processing import jacobian_correction_wvl2E
 
@@ -187,6 +236,15 @@ def test_the_jacobian_reaches_every_energy_rung_and_no_wavelength_one(load):
             _ascending_energy(jacobian_correction_wvl2E(
                 getattr(on, wl_attr), WL, axis=0)),
         )
+
+
+def test_pre_jacobian_is_refused_on_the_wavelength_axis(load):
+    # The wavelength arrays already hold the values the Jacobian is applied to, so
+    # there is a correct alternative to name rather than a warning to emit.
+    scan = load()
+    with pytest.raises(ValueError, match="energy axis only"):
+        _resolve_spectra(scan, "pre_jacobian", "wavelength")
+    assert _resolve_spectra(scan, "pre_jacobian", "energy") is not None
 
 
 def test_pre_jacobian_is_the_first_rung_without_the_correction(load):

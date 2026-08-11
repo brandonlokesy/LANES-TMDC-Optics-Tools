@@ -164,6 +164,27 @@ def test_an_empty_window_is_refused_and_names_the_axis(scan):
     assert "spans" in message
 
 
+def test_a_window_narrower_than_the_model_is_refused(scan):
+    # Non-empty, so the window helper is satisfied; three points cannot carry the
+    # four free parameters of a Lorentzian with a constant baseline. curve_fit
+    # reports this as a TypeError, which the RuntimeError handler misses.
+    with pytest.raises(ValueError) as excinfo:
+        fitting.fit_scan_peak(scan, x_range=(scan.energy[0], scan.energy[2]))
+    message = str(excinfo.value)
+    assert "covers 3 points" in message
+    assert "4 free parameters" in message
+
+
+def test_the_minimum_follows_the_model_not_the_axis(scan):
+    # The same three points are enough without the baseline term, which is what
+    # makes this the model's minimum rather than a constant.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        results = fitting.fit_scan_peak(
+            scan, x_range=(scan.energy[0], scan.energy[2]), baseline="none")
+    assert results[0].x_fit.size == 3
+
+
 def test_a_bound_beyond_the_axis_warns_and_still_fits(scan):
     with pytest.warns(UserWarning, match=r"fit_scan_peak\(\): lower bound"):
         results = fitting.fit_scan_peak(scan, x_range=(1.0, 1.56))

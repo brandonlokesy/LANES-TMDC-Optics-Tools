@@ -573,8 +573,9 @@ def fit_scan_peak(
     Raises
     ------
     ValueError
-        If *x_axis* is not ``"energy"`` or ``"wavelength"``, or if *x_range*
-        selects no point of that axis — the message gives the axis's span.
+        If *x_axis* is not ``"energy"`` or ``"wavelength"``; if *x_range* selects
+        no point of that axis, the message giving the axis's span; or if it
+        selects fewer points than the model has free parameters.
 
     Warns
     -----
@@ -623,6 +624,19 @@ def _fit_scan_peak(
                                   what="fit_scan_peak()", stacklevel=stacklevel)
           if x_range is not None else slice(None))
     x  = values[px]
+
+    # Fewer points than free parameters is not a fit, and curve_fit reports it as a
+    # TypeError, which _fit_single_peak's RuntimeError handler does not catch — so
+    # it escapes as neither a fit nor a non-converged result.  The minimum belongs
+    # to the model rather than to the axis, which is why it is checked here and not
+    # inside the window helper.
+    n_params = len(_PEAK_PARAM_NAMES) + len(base_names)
+    if x.size < n_params:
+        raise ValueError(
+            f"fit_scan_peak(): the {x_axis} window {x[0]:.6g}–{x[-1]:.6g} {unit} "
+            f"covers {x.size} point{'' if x.size == 1 else 's'}, fewer than the "
+            f"{n_params} free parameters of a {label} model. Widen x_range."
+        )
 
     if sweep_mask is None:
         sweep_mask = np.ones(scan.n_sweeps, dtype=bool)

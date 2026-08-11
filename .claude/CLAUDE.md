@@ -807,13 +807,11 @@ decision; the argument for it is in the audit under the ID given.
   "which version of the data is this". `"best"` means corrected when a `bg_region`
   was set and raw otherwise: the opt-in is `bg_region=None` at the loader, so a plot
   honouring it is the `best_energy_spectra` rule, not a second silent decision. There
-  is deliberately **no `_FRAME_SOURCE_LABELS`** — nothing would read it, as nothing
-  reads the spectral one. (B1)
+  is deliberately **no `_FRAME_SOURCE_LABELS`** — nothing would read it, which is also
+  why the spectral twin no longer exists: both resolvers build their messages from
+  `list(_SPECTRA_SOURCES)` / `list(_FRAME_SOURCES)`. (B1, A17)
 
 **Open, not yet fixed:**
-- **`_SPECTRA_SOURCE_LABELS` (`loaders.py`) is dead** — imported by `plotting.py` and
-  read nowhere. A B-section deletion: the dict and the import. Found while deciding
-  not to add a frame-side twin of it.
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
   that already had `bg_region` applied at load.
 - README §5/§6 reference APIs that don't exist (`AttoCubePLScan`, `plot_pl_map`,

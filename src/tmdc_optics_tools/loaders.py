@@ -52,6 +52,7 @@ from .constants import (
     HC_EV_NM,
     SIGNAL_LABELS,
     SPECTROSCOPY_TYPES,
+    _x_axis_name_unit,
 )
 
 from . import processing
@@ -694,10 +695,16 @@ def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
     of the arrays; a source it lacks degrades to the nearest available one where
     there is one, and raises otherwise.
 
-    Raises ``ValueError`` when the requested source is unavailable (e.g.
-    ``"energy_bg"`` but no ``bg_region`` was set) or incompatible with the
-    chosen *x_axis* (e.g. wavelength-space source with ``x_axis="energy"``).
+    Raises ``ValueError`` when *x_axis* names no spectral axis, or when the
+    requested source is unavailable (e.g. ``"energy_bg"`` but no ``bg_region``
+    was set).  *x_axis* chooses which array ``"best"`` resolves to; a source
+    named explicitly is served on its own axis regardless, and a wavelength-space
+    one asked for on the energy axis only *warns*.
     """
+    # Ahead of the source lookup: what "best" means depends on the axis, so an
+    # unrecognised one would be read as wavelength by the branch below.
+    _x_axis_name_unit(x_axis)
+
     src = spectra_source.lower()
     if src not in _SPECTRA_SOURCES:
         raise ValueError(
@@ -3873,15 +3880,8 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         >>> scan.pixel_slice((720, 760), x_axis="wavelength")  # doctest: +SKIP
         slice(210, 540, None)
         """
-        if x_axis == "energy":
-            values, unit = self.energy, "eV"
-        elif x_axis == "wavelength":
-            values, unit = self.wavelength, "nm"
-        else:
-            raise ValueError(
-                f"pixel_slice(): x_axis must be 'energy' or 'wavelength', got "
-                f"{x_axis!r}."
-            )
+        _, unit = _x_axis_name_unit(x_axis, what="pixel_slice()")
+        values  = self.energy if x_axis == "energy" else self.wavelength
         return _window_slice(values, x_range, axis=x_axis, unit=unit,
                              what="pixel_slice()", stacklevel=3)
 

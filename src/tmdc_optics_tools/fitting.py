@@ -18,6 +18,8 @@ import numpy as np
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 
+from .constants import _x_axis_name_unit
+
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -563,7 +565,16 @@ def fit_scan_peak(
     Returns
     -------
     list of FitResult, length = scan.n_sweeps
+
+    Raises
+    ------
+    ValueError
+        If *x_axis* is not ``"energy"`` or ``"wavelength"``.
     """
+    # Ahead of the two ternaries, which would otherwise read an unrecognised axis
+    # as the wavelength one and fit it without complaint.
+    _x_axis_name_unit(x_axis, what="fit_scan_peak()")
+
     x       = scan.energy     if x_axis == "energy" else scan.wavelength
     spectra = scan.best_energy_spectra if x_axis == "energy" else scan.spectra
     fit_fn  = fit_lorentzian if model == "lorentzian" else fit_gaussian

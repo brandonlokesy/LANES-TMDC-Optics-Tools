@@ -449,14 +449,20 @@ Precedence is the same everywhere: **explicit argument > file metadata > default
 | `_resolve_sweep` | loaders | the sweep axis | unknown sweep; missing row; missing role/geometry |
 | `_resolve_aux_spectrum` | loaders | a background or reference onto this scan's grid | axis mismatch (never resamples) |
 | `_resolve_baseline` | fitting | `"constant"`/`"linear"`/`"none"` → model terms | unrecognised key |
-| `_resolve_x_axis` | plotting | `"energy"`/`"wavelength"` → `(array, label)` | anything else |
-| `_resolve_spectra` | loaders | `spectra_source=` / `source=` → the actual array | source unavailable on this scan |
+| `_x_axis_name_unit` | constants | `"energy"`/`"wavelength"` → `(name, unit)` | anything else |
+| `_resolve_x_axis` | plotting | an axis name → `(array, label)` | delegates the refusal |
+| `_resolve_spectra` | loaders | `spectra_source=` / `source=` → the actual array | unknown axis; source unavailable on this scan |
 
 Two design habits visible in all of them:
 
-- **They are the only place that ambiguity is decided.** If you find yourself
-  branching on `x_axis == "energy"` in a new plot function, call `_resolve_x_axis`
-  instead — that is what it is for.
+- **They are the only place that ambiguity is decided.** The `x_axis` vocabulary is
+  the worked example of why that matters, since it is the one ambiguity decided in
+  three modules: `constants.X_AXES` holds the two axes and `_x_axis_name_unit` is the
+  only thing that refuses a third, so `_resolve_x_axis` (plotting), `_resolve_spectra`
+  and `pixel_slice` (loaders) and `fit_scan_peak` (fitting) share one message. A
+  branch on `x_axis == "energy"` still picks the arrays — that mapping is not uniform
+  — but it must sit *after* the refusal, or the `else` is a two-way test on a
+  free-form string and every misspelling reads as wavelength (A14).
 - **A disagreement is not swallowed.** `_resolve_spectra_type` warns when the
   argument and the file disagree, then uses the argument. A relabelled measurement is
   exactly the error that survives into every downstream figure.

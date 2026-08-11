@@ -25,6 +25,7 @@ from skimage.exposure import rescale_intensity
 
 from . import processing
 from . import diffusion as _diffusion
+from .constants import _x_axis_name_unit
 # The spectra-source registry names attributes on the loader classes, so it lives
 # with them; imported here under its own name because this is where callers of
 # ``spectra_source=`` are.
@@ -193,14 +194,9 @@ def _resolve_x_axis(scan, x_axis: str) -> tuple:
     Centralises the repeated ``"energy"`` / ``"wavelength"`` branching so
     every plotting function can call this instead of duplicating the logic.
     """
-    if x_axis == "energy":
-        return scan.energy, "Energy (eV)"
-    elif x_axis == "wavelength":
-        return scan.wavelength, "Wavelength (nm)"
-    else:
-        raise ValueError(
-            f"x_axis must be 'energy' or 'wavelength', got '{x_axis}'."
-        )
+    name, unit = _x_axis_name_unit(x_axis)
+    values     = scan.energy if x_axis == "energy" else scan.wavelength
+    return values, f"{name} ({unit})"
 
 
 def _signal_name_unit(obj, source: str = None) -> tuple:

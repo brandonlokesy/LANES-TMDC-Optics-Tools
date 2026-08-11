@@ -38,6 +38,52 @@ SIGNAL_LABELS = {
     "TRPL": ("PL intensity",          "counts"),
 }
 
+# ----- Spectral x-axis vocabulary ----- #
+# The two orderings a spectrum can be served on, as (name, unit) — the same shape
+# as SIGNAL_LABELS above, so an axis label composes the same way.  The keys are
+# what every x_axis= argument in the package accepts.
+X_AXES = {
+    "energy":     ("Energy",     "eV"),
+    "wavelength": ("Wavelength", "nm"),
+}
+
+
+def _x_axis_name_unit(x_axis: str, what: str = None) -> tuple:
+    """
+    Return ``(name, unit)`` for a spectral axis, refusing anything else.
+
+    The one check behind every ``x_axis=`` in the package.  Each caller still
+    picks its own arrays, but none of them decides what the vocabulary is, so an
+    unrecognised value cannot be read as one of the two by the branch below it.
+
+    Parameters
+    ----------
+    x_axis : str
+        Axis name to check, a key of :data:`X_AXES`.
+    what : str, optional
+        Calling function, spelled ``"pixel_slice()"``, used to prefix the
+        message.  Omitted where the caller's other messages are unprefixed.
+
+    Returns
+    -------
+    tuple of (str, str)
+        Quantity name and unit, e.g. ``("Energy", "eV")``.
+
+    Raises
+    ------
+    ValueError
+        If *x_axis* is not a key of :data:`X_AXES`.
+    """
+    try:
+        return X_AXES[x_axis]
+    except (KeyError, TypeError):       # TypeError: an unhashable x_axis
+        # Derived from the table, so a key added there cannot go unmentioned here.
+        raise ValueError(
+            f"{what + ': ' if what else ''}x_axis must be "
+            f"{' or '.join(repr(key) for key in X_AXES)}, got {x_axis!r}."
+        ) from None
+
+
 # ----- Material dielectric constants ----- #
 # Sources cited as comments where known
 EPS_HBN   = 3.9    # hBN out-of-plane, Laturia et al. 2018

@@ -449,14 +449,20 @@ Precedence is the same everywhere: **explicit argument > file metadata > default
 | `_resolve_sweep` | loaders | the sweep axis | unknown sweep; missing row; missing role/geometry |
 | `_resolve_aux_spectrum` | loaders | a background or reference onto this scan's grid | axis mismatch (never resamples) |
 | `_resolve_baseline` | fitting | `"constant"`/`"linear"`/`"none"` → model terms | unrecognised key |
-| `_resolve_x_axis` | plotting | `"energy"`/`"wavelength"` → `(array, label)` | anything else |
-| `_resolve_spectra` | loaders | `spectra_source=` / `source=` → the actual array | source unavailable on this scan |
+| `_x_axis_name_unit` | constants | `"energy"`/`"wavelength"` → `(name, unit)` | anything else |
+| `_resolve_x_axis` | plotting | an axis name → `(array, label)` | delegates the refusal |
+| `_resolve_spectra` | loaders | a correction state + `x_axis` → the actual array | unknown axis or source; the class has no such correction; the correction was not requested; `"pre_jacobian"` off the energy axis |
 
 Two design habits visible in all of them:
 
-- **They are the only place that ambiguity is decided.** If you find yourself
-  branching on `x_axis == "energy"` in a new plot function, call `_resolve_x_axis`
-  instead — that is what it is for.
+- **They are the only place that ambiguity is decided.** The `x_axis` vocabulary is
+  the worked example of why that matters, since it is the one ambiguity decided in
+  three modules: `constants.X_AXES` holds the two axes and `_x_axis_name_unit` is the
+  only thing that refuses a third, so `_resolve_x_axis` (plotting), `_resolve_spectra`
+  and `pixel_slice` (loaders) and `fit_scan_peak` (fitting) share one message. A
+  branch on `x_axis == "energy"` still picks the arrays — that mapping is not uniform
+  — but it must sit *after* the refusal, or the `else` is a two-way test on a
+  free-form string and every misspelling reads as wavelength (A14).
 - **A disagreement is not swallowed.** `_resolve_spectra_type` warns when the
   argument and the file disagree, then uses the argument. A relabelled measurement is
   exactly the error that survives into every downstream figure.
@@ -728,19 +734,22 @@ scan.n_points / n_pixels, scan.n_sweeps, scan.n_declared_sweeps
 scan.wavelength         # nm, ascending, as the file wrote it
 scan.energy             # eV, ascending  (hc/λ, then argsorted)
 
-# — signals, wavelength space —
+# — signals, wavelength space —  (one cumulative ladder, mirrored below)
 scan.spectra            # THE FILE'S OWN COUNTS.  never mutated.
 scan.spectra_roi1/roi2  # both ROIs, always present
-scan.spectra_cr         # cosmic-ray repaired, or None
+scan.spectra_cr         # + cosmic-ray repaired, or None
+scan.spectra_bg         # + background subtracted, or None
 scan.cosmic_ray_mask    # which pixels moved, or None
-scan.contrast           # (S−R)/R, or None
+scan.best_spectra       # _bg if present, else _cr, else spectra
+scan.contrast           # (S−R)/R, or None — outside the ladder
 
 # — signals, energy space (all ascending in energy) —
-scan.energy_spectra                  # Jacobian per apply_jacobian, no background
-scan.energy_spectra_pre_jacobian     # never Jacobian; same object when it is off
-scan.energy_spectra_bg               # background-corrected, or None
+scan.energy_spectra                  # the file's counts; Jacobian per apply_jacobian
+scan.energy_spectra_cr               # + cosmic-ray repaired, or None
+scan.energy_spectra_bg               # + background subtracted, or None
+scan.energy_spectra_pre_jacobian     # first rung, never Jacobian; same object when off
+scan.best_energy_spectra             # the same rung best_spectra picks
 scan.energy_contrast                 # Jacobian NEVER applied — it cancels in a ratio
-scan.best_energy_spectra             # _bg if available, else energy_spectra
 
 # — instrument state —
 scan.parameters, scan["V_A"], scan.get_parameter("V_A", scale)
@@ -757,18 +766,43 @@ scan.sweep_type, scan.sweep_axis, scan.sweep_axis_label, scan.signal_label
 scan.sweep_grid()
 ```
 
-## `best_energy_spectra` — the "just give me the right array" accessor
+## `best_spectra` / `best_energy_spectra` — the "just give me the right array" pair
 
-Returns `energy_spectra_bg` if a background was supplied, else `energy_spectra`, so
-downstream code need not know which. It **never returns the contrast**, even when a
-reference was given: contrast is a *different quantity*, not a better-corrected one,
-and it is negative-going — a peak fit whose model decays to zero in the wings would
-give quietly meaningless numbers, and a PL colour bar would silently start meaning
-ΔR/R₀. Ask for `energy_contrast` explicitly.
+One accessor per axis, so a caller choosing on `x_axis` names a property on both sides:
 
-`loaders._resolve_spectra` mirrors this with `spectra_source=` — the `source=` of
-`get_spectrum_at`, and what `plotting` imports — and `"best"` there
-follows the same rule.
+| Accessor | Returns |
+|---|---|
+| `best_spectra` | `spectra_bg` → `spectra_cr` → `spectra`, first one present |
+| `best_energy_spectra` | `energy_spectra_bg` → `energy_spectra_cr` → `energy_spectra`, first one present |
+
+The two pick the **same rung** — that is the invariant, and a test asserts both in one
+place so they cannot drift apart.
+
+Neither **ever returns the contrast**, even when a reference was given: contrast is a
+*different quantity*, not a better-corrected one, and it is negative-going — a peak fit
+whose model decays to zero in the wings would give quietly meaningless numbers, and a PL
+colour bar would silently start meaning ΔR/R₀. Ask for `energy_contrast` explicitly.
+
+**Both halves of the pair have to exist, or callers hand-roll the missing one.** While
+only the energy accessor existed, four sites spelt the wavelength half as raw `spectra`
+and so dropped a declared repair on that axis (A16). `SingleSpectrum` has carried both
+names all along, and its callers were the ones that were right.
+
+`loaders._resolve_spectra` answers the same question for `spectra_source=` — the
+`source=` of `get_spectrum_at`, and what `plotting` imports — with `"best"` delegating to
+whichever of the pair the axis names, so each class decides what its own best is.
+`fitting` uses the two properties directly instead: it must not import from `loaders`,
+which would put the algorithm layer above the I/O layer.
+
+**A source names a correction state, `x_axis` names the axis.** `"raw"` / `"cr"` / `"bg"`
+/ `"contrast"` each exist on both axes, so no combination of the two arguments can be a
+mismatch — which is why there is no longer a warning for one. The single exception is
+`"pre_jacobian"`, which is energy-only because the Jacobian belongs to that
+representation rather than to the counts; asked for on the wavelength axis it **raises**,
+naming the three states that do live there. An absent source distinguishes *the class
+does not offer this correction* (a `SingleSpectrum` has no cosmic-ray repair, and no
+argument would give it one) from *the correction was not requested*, which names the
+argument that would.
 
 ## The three properties that must never raise
 
@@ -860,22 +894,28 @@ This is the part most likely to be broken by a well-meaning edit, because the or
 is physics.
 
 ```
-   file counts  ──►  spectra                          (never mutated, ever)
-        │
+   file counts  ──►  spectra  ─────────────────►  energy_spectra
+        │                                     = jacobian?(spectra), argsorted
+        │                                        energy_spectra_pre_jacobian
         ▼  cosmic_rays=          FIRST — a spike biases everything downstream
-   spectra_cr / cosmic_ray_mask
+   spectra_cr / cosmic_ray_mask ─────────────►  energy_spectra_cr
         │
         │   signal = spectra_cr if repaired else spectra
-        ├──────────────────────────────────────────────┐
-        ▼  (wavelength space)                          ▼  (no bg)
-   bg_region_nm  → subtract_background            energy_spectra
-   bg_spectrum   → subtract_spectrum         = jacobian?(signal), argsorted
+        ▼  (wavelength space)
+   bg_region_nm  → subtract_background
+   bg_spectrum   → subtract_spectrum
         │
-        ├──► energy_spectra_bg  = jacobian?(corrected), argsorted
+        ├──► spectra_bg  ──────────────────────►  energy_spectra_bg
         │
         └──► reference= → spectral_contrast(corrected, reference)
                  └──► contrast, energy_contrast   (Jacobian NEVER applied)
 ```
+
+Every rung is stored on both axes, and each energy rung is its wavelength rung
+argsorted onto ascending energy, times `λ²/hc` iff `apply_jacobian`. So the right-hand
+column is a *representation* of the left, not a second chain — which is why there is
+one `_pre_jacobian` array (of the first rung) rather than one per rung: the
+wavelength-space rungs already hold those values.
 
 The four rules encoded in that diagram:
 
@@ -897,12 +937,20 @@ The four rules encoded in that diagram:
    `(S·λ²/hc)/(R·λ²/hc) = S/R` exactly — it cancels identically, and applying it to
    the numerator alone would be an error.
 
-**Sentinels.** `energy_spectra_bg` is `None` when no background was supplied, and the
-test for that is `corrected is not signal` — comparing against `signal`, not
-`spectra`, so a cosmic-ray repair on its own does not masquerade as a background
-subtraction. `energy_spectra_pre_jacobian` is the *same object* as `energy_spectra`
-when the Jacobian is off, and a separate array when it is on, so both representations
-are always reachable.
+**Sentinels.** A rung is `None` when its correction was not requested, so the `None`
+pattern *is* the record of what ran. `spectra_bg` / `energy_spectra_bg` test
+`corrected is not signal` — comparing against `signal`, not `spectra`, so a cosmic-ray
+repair on its own does not masquerade as a background subtraction and both stay `None`.
+`energy_spectra_pre_jacobian` is the *same object* as `energy_spectra` when the Jacobian
+is off, and a separate array when it is on, so both representations are always reachable.
+
+**A suffix names the last correction, not the only one.** The ladder is cumulative, so
+`spectra_bg` carries the cosmic-ray repair too when one was declared — meaning
+`spectra - spectra_bg` is the pedestal alone only if no repair ran. Provenance lives in
+the declarations (`cosmic_rays`, `bg_region_nm`, `bg_spectrum`), in `cosmic_ray_mask`,
+and in the HDF5 attributes; encoding it in the attribute name instead (`spectra_cr_bg`)
+would make the *name* depend on which corrections were requested, which is the branch
+`best_*` exists to remove.
 
 **Grid mismatch on an auxiliary spectrum raises rather than interpolating.**
 Resampling changes the numbers and smooths the data, so it is a correction and cannot
@@ -1001,15 +1049,25 @@ auxiliary spectra out of `/metadata`, which an old reader would silently drop).
 
 ## `processing` — arrays in, arrays out
 
-No objects, no files, no matplotlib. Everything takes an `axis=` and respects the
-`(n_points, n_sweeps)` convention.
+No objects, no files. Everything takes an `axis=` and respects the
+`(n_points, n_sweeps)` convention. The one exception to "no matplotlib" is
+`_draw_region_box`, which lives here so that `loaders` and `diffusion` share one
+drawer instead of forking it (D1).
 
 ```
 normalise_peak / normalise_area      subtract_background / subtract_spectrum
-smooth_median / smooth_savgol        crop
+smooth_median / smooth_savgol        crop / _window_slice
 wavelength_to_energy / energy_to_wavelength / jacobian_correction_wvl2E
 spectral_contrast                    remove_cosmic_rays
 ```
+
+`_window_slice` turns a `(lo, hi)` window on a measured axis into a `slice`, so the
+axis and the signal are cut by one object and both stay views. It is what
+`AttoCubeSpectralSweep.pixel_slice` and `fitting.fit_scan_peak` are both built on, and
+it refuses an empty window and warns on a clipped bound — which is why it sits next to
+`crop`, the remaining spelling of the same window that does neither. (The third is
+`plot_power_series`'s inline mask.) Unifying `crop` on it would make it raise where it
+now returns an empty array, so that is its own change.
 
 `spectral_contrast` returns `(contrast, reference_guarded)` — the second is the
 reference actually used, so the caller can see what it divided by. That is the
@@ -1146,7 +1204,7 @@ skeleton of the whole design:
 | `constants.SIGNAL_LABELS` | code → (axis name, unit) | its axis label |
 | `hdf5._AXIS_KIND_FOR_LAYOUT` | layout kind → dataset name/units/group | a new axis kind |
 | `hdf5._JSON_ATTRS` | which metadata keys are JSON-encoded | a new dict-valued metadata key |
-| `loaders._SPECTRA_SOURCES` | `spectra_source=` / `source=` → attribute name | a new plottable array |
+| `loaders._SPECTRA_SOURCES` | correction state → `(wavelength attr, energy attr)` | a new correction state |
 
 The four derived gate names all come from `_GATE_ROLE_CURATED` on the lines below it,
 so they cannot drift. (`_GATE_CURATED` and `_ROLE_FOR_CURATED` currently hold the

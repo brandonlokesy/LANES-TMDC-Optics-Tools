@@ -195,18 +195,18 @@ def test_plot_image_default_still_marks_rescaling():
 # Contrast is a different quantity from the raw signal
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("source", ["contrast", "contrast_wavelength"])
-def test_contrast_source_uses_contrast_label(contrast_scan, source):
-    x_axis = "energy" if source == "contrast" else "wavelength"
+@pytest.mark.parametrize("x_axis", ["energy", "wavelength"])
+def test_contrast_source_uses_contrast_label(contrast_scan, x_axis):
+    # One source name, either axis: the label follows the quantity, not the axis.
     _, ax, _, _ = plotting.plot_power_series(
-        contrast_scan, spectra_source=source, x_axis=x_axis)
+        contrast_scan, spectra_source="contrast", x_axis=x_axis)
     assert ax.get_ylabel() == contrast_scan.contrast_label
     assert "counts" not in ax.get_ylabel()
 
 
 def test_raw_source_keeps_the_signal_label(contrast_scan):
     _, ax, _, _ = plotting.plot_power_series(contrast_scan,
-                                             spectra_source="energy")
+                                             spectra_source="raw")
     assert ax.get_ylabel() == contrast_scan.signal_label
     assert ax.get_ylabel() == "Reflected intensity (counts)"
 

@@ -73,12 +73,14 @@ def test_time_axis_is_ns_ascending():
 def test_energy_machinery_absent():
     # hc/t is meaningless and divides by zero at t=0, so none of it should exist.
     d = AttoCubeTRPLSweep(ONE_DECAY)
-    for attr in ("energy", "energy_spectra", "energy_spectra_bg",
-                 "apply_jacobian", "bg_region_nm", "wavelength"):
+    for attr in ("energy", "energy_spectra", "energy_spectra_cr",
+                 "energy_spectra_bg", "apply_jacobian", "bg_region_nm",
+                 "wavelength"):
         assert not hasattr(d, attr), attr
-    # Nor `spectra`: a TRPL sweep handed to a spectral plot must raise, not draw
-    # time as though it were wavelength.
+    # Nor `spectra` and its rungs: a TRPL sweep handed to a spectral plot must
+    # raise, not draw time as though it were wavelength.
     assert not hasattr(d, "spectra")
+    assert not hasattr(d, "spectra_bg")
 
 
 # ---------------------------------------------------------------------------

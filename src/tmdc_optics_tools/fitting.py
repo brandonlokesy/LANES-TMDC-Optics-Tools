@@ -18,6 +18,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
 
+from . import processing
 from .constants import _x_axis_name_unit
 
 
@@ -547,8 +548,9 @@ def fit_scan_peak(
     scan : AttoCubeSpectralSweep
     x_axis : {"energy", "wavelength"}
     x_range : tuple of (x_min, x_max), optional
-        Restrict the fit to this spectral window. Units match *x_axis*.
-        Fits the full range if ``None``.
+        Restrict the fit to this spectral window. Units match *x_axis*. Bounds
+        are inclusive, and their order carries no information: ``(1.42, 1.30)``
+        is the same window as ``(1.30, 1.42)``. Fits the full range if ``None``.
     model : {"lorentzian", "gaussian"}
         Peak shape to fit.
     sweep_mask : np.ndarray of bool, optional
@@ -565,17 +567,48 @@ def fit_scan_peak(
     Returns
     -------
     list of FitResult, length = scan.n_sweeps
+        Each result's ``x_fit`` is a **view** into the scan's own axis, so it
+        must not be modified in place.
 
     Raises
     ------
     ValueError
-        If *x_axis* is not ``"energy"`` or ``"wavelength"``.
+        If *x_axis* is not ``"energy"`` or ``"wavelength"``, or if *x_range*
+        selects no point of that axis — the message gives the axis's span.
+
+    Warns
+    -----
+    UserWarning
+        When a bound of *x_range* lies beyond the end of the axis by more than
+        half a pixel, so the window fitted is narrower than the one asked for.
+    """
+    return _fit_scan_peak(scan, x_axis, x_range, model, sweep_mask, baseline,
+                          stacklevel=4)
+
+
+def _fit_scan_peak(
+    scan,
+    x_axis     : str,
+    x_range    : tuple,
+    model      : str,
+    sweep_mask : np.ndarray,
+    baseline   : str,
+    *,
+    stacklevel : int,
+) -> list[FitResult]:
+    """
+    Implementation of :func:`fit_scan_peak`.
+
+    *stacklevel* is a required argument because the public entry points sit at
+    different depths — :func:`fit_scan_peak` one frame up,
+    :func:`extract_dipole_length` two — and a warning about a window is only
+    useful pointing at the line that chose the window.
     """
     # Ahead of the two ternaries, which would otherwise read an unrecognised axis
     # as the wavelength one and fit it without complaint.
-    _x_axis_name_unit(x_axis, what="fit_scan_peak()")
+    _, unit = _x_axis_name_unit(x_axis, what="fit_scan_peak()")
 
-    x       = scan.energy     if x_axis == "energy" else scan.wavelength
+    values  = scan.energy     if x_axis == "energy" else scan.wavelength
     spectra = scan.best_energy_spectra if x_axis == "energy" else scan.spectra
     fit_fn  = fit_lorentzian if model == "lorentzian" else fit_gaussian
 
@@ -583,11 +616,13 @@ def fit_scan_peak(
     label      = _model_label(model, key)
     nan_names  = _PEAK_PARAM_NAMES + base_names
 
-    if x_range is not None:
-        px_mask = (x >= x_range[0]) & (x <= x_range[1])
-        x       = x[px_mask]
-    else:
-        px_mask = np.ones(len(x), dtype=bool)
+    # A slice, so one window cuts the axis and every sweep's counts to the same
+    # length, and each cut is a view.  slice(None) is the whole axis, which keeps
+    # the windowed and un-windowed paths on one code path.
+    px = (processing._window_slice(values, x_range, axis=x_axis, unit=unit,
+                                  what="fit_scan_peak()", stacklevel=stacklevel)
+          if x_range is not None else slice(None))
+    x  = values[px]
 
     if sweep_mask is None:
         sweep_mask = np.ones(scan.n_sweeps, dtype=bool)
@@ -596,7 +631,7 @@ def fit_scan_peak(
     results = []
     for i in range(scan.n_sweeps):
         if sweep_mask[i]:
-            results.append(fit_fn(x, spectra[px_mask, i].astype(float),
+            results.append(fit_fn(x, spectra[px, i].astype(float),
                                   baseline=baseline))
         else:
             # Placeholder so indices stay aligned with scan.ef.  Fresh dicts
@@ -742,8 +777,10 @@ def _prepare_dipole_data(
     if active_range is not None:
         sweep_mask = (scan.ef >= active_range[0]) & (scan.ef <= active_range[1])
 
-    fit_results   = fit_scan_peak(
-        scan, x_axis="energy", x_range=x_range, model=model,
+    # stacklevel=5: _window_slice, _fit_scan_peak, here, extract_dipole_length,
+    # the researcher's line.  Measured, not counted off the def lines.
+    fit_results   = _fit_scan_peak(
+        scan, x_axis="energy", x_range=x_range, model=model, stacklevel=5,
         sweep_mask=sweep_mask, baseline=baseline,
     )
     peak_energies = np.array([r.params["center"] for r in fit_results])
@@ -1052,7 +1089,14 @@ def extract_dipole_length(
     ------
     ValueError
         If ``scan.ef`` is ``None``, fewer than 2 usable sweep points remain,
-        or *method* is not recognised.
+        *method* is not recognised, or *x_range* selects no point of the energy
+        axis.
+
+    Warns
+    -----
+    UserWarning
+        When a bound of *x_range* lies beyond the end of the energy axis, so the
+        window fitted is narrower than the one asked for.
 
     Examples
     --------

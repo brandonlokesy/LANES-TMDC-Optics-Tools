@@ -1455,7 +1455,8 @@ compare the sequence with consecutive repeats collapsed, so they pin our frame o
 than matplotlib's priming. And the layout assertion turned up **E20**.
 
 **E20. The shared title is placed from a hardcoded axes fraction and collides with anything
-the panels draw on top.** **[verified by running]** `animate_panels` puts its shared title at
+the panels draw on top.** **[FIXED — 2026-08-12]** **[verified by running]**
+`animate_panels` puts its shared title at
 `transAxes` y=1.04, or y=1.12 with each panel's axes title nudged `pad=-4`
 (`plotting.py:1646-1674`). Both numbers are guesses about how tall the panels' decorations
 are, and the title is an axes artist so nothing lays it out.
@@ -1471,14 +1472,55 @@ two strings drawn through each other.
 No shipped panel draws a top axis yet, which is why this has never been seen. It stops being
 hypothetical the moment one does.
 
-*Fix:* draw once inside `animate_panels` and place the title from the measured top of the
-panels' decorations instead of from 1.04/1.12/`pad=-4`. One extra `fig.canvas.draw()` is
-negligible against rendering an animation, and the text stays an axes artist so blit still
-repaints it.
+*The sketched fix above was wrong, and measuring it is what showed why.* It proposed
+drawing once and placing the title from the measured top of the panels' decorations. There
+is nowhere to place it: `ax.get_tightbbox().y1` is **395.8 in every configuration** tried,
+because `constrained_layout` does not grow the figure to fit decorations — it shrinks the
+axes. The panels already reach the top of the usable area, so no measurement finds free
+space above them. The mechanism is better stated the other way round: the axes box top
+falls from 375.5 to 335.2 when a secondary axis appears, so a position given as a *fraction
+of the axes* slides down while the axes title stays pinned at the layout's top.
 
-*Test:* `tests/test_plotting_animation.py::test_the_shared_title_clears_a_secondary_top_axis`
-is a **strict** `xfail` — it fails today by exactly this overlap and will report as
-unexpectedly passing the moment the placement is fixed.
+*Fixed:* use a real `fig.suptitle`, which is the only shared title `constrained_layout`
+reserves vertical space for, and set `blit=False`. Clears the panel titles by **8.3 px**,
+identically across every combination tried — 1, 2, 3 and 4 panels × five figure sizes ×
+secondary axis present or absent. The fake header, both magic fractions, and the engine's
+`pad=-4` restyling of the caller's panel titles are all deleted.
+
+*Why `blit=False` is not a regression.* Blitting repaints only axes artists, which is why
+the fake header existed. Checked across all three output paths, for both header styles and
+both blit settings:
+
+| header | blit | notebook slider | GIF | MP4 |
+|---|---|---|---|---|
+| fake (axes text) | either | updates | updates | updates |
+| real `suptitle` | `True` | **frozen** | updates | **frozen** |
+| real `suptitle` | `False` | updates | updates | updates |
+
+So a GIF-only check would have passed a title that is frozen in the notebook player *and*
+in MP4 — the two paths this group actually uses. Nothing is given up: both save paths draw
+full frames regardless of the flag (measured slightly **faster** without blit, 49.1 s vs
+54.0 s for 40 frames), and `to_jshtml`'s slider steps through frames rendered in advance,
+which blitting cannot speed up. Only live playback in a desktop window or `%matplotlib
+widget` now redraws more per frame.
+
+*One visible side effect.* Matplotlib warns from `Animation.__del__` when an animation is
+collected having never drawn. Setting up blitting used to force an init draw, which marked
+the animation as started as a side effect, so the warning was suppressed by accident.
+Building an animation and never rendering it now warns — which is arguably the correct
+signal, since nothing happened. The tests filter that one message because many of them
+assert on the built figure deliberately.
+
+*Consequence for the panel protocol:* `AnimationPanel.update`'s returned artists no longer
+drive anything. The return is kept — all three panels already do it, it documents which
+artists a panel owns, and it lets a caller drive the panels itself — but the base class
+docstring no longer claims it exists for blitting.
+
+*Test:* `tests/test_plotting_animation.py` — the clearance assertion is parametrised over
+4 panel counts × 4 figure sizes, since the bug was scale-dependent;
+`test_the_engine_does_not_blit` pins the flag, and
+`test_the_header_updates_in_the_notebook_player` pins the *consequence* through
+`HTMLWriter`, so flipping blit back on fails on behaviour rather than on a flag.
 
 **E19. `DiffusionCloudPanel` analyses every frame even when the animation shows fewer.**
 `_get_seq_result` (`plotting.py:2309`) calls `analyse_diffusion_sequence(self.scan, …)` with
@@ -1532,9 +1574,9 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
 
 **Opened 2026-08-12 by the review of PR #16** (`animate_panels` frame windowing):
 **A18**, **C8**, **C9**, **E16**, **E17**, **E18**, **E19**, and **E20** which pinning E18
-turned up. **E18 is fixed** — it gated the rest, because the engine could not be safely
-changed while it was untested. **E20** is next and must precede any panel that draws a top
-axis, so it comes before the conjugate-axis work. **A18** and **E19** are both
+turned up. **E18 and E20 are both fixed** — E18 gated the rest, because the engine could not
+be safely changed while it was untested, and E20 had to precede any panel that draws a top
+axis. The frame-window work is now unblocked. **A18** and **E19** are both
 `DiffusionCloudPanel` and both want `diffusion`'s first tests, so they go together, alongside
 **A5**/**E11**. **E16** and **E17** are one `plot_power_series` change, not two. **C8** and
 **C9** ride along with whatever touches their function.

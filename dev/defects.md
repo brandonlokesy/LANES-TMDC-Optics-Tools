@@ -1,18 +1,22 @@
-# Code audit — July 2026
+# Defect register
 
-Findings register for `tmdc_optics_tools`, from a full read of the package
-(~6.3k lines across 7 modules plus the `reference/` sub-package).
+Findings register for `tmdc_optics_tools`, from a full read of the package.
 
-Project conventions, physics conventions, and the short version of the deferred
-items live in `.claude/CLAUDE.md`. This file is the long form: every finding with
-a one-or-two-line fix sketch, to be worked through individually.
+**What belongs here:** something that is *wrong* — a crash, a silently wrong number, a
+dead parameter, documentation that contradicts the code, duplication. The diagnosis is
+kept even after the fix, because it is the record of why the code changed.
+
+**What does not:** the reasoning behind a design choice. That is a record in
+`dev/decisions/`, and entries below point at one wherever the fix required a decision.
+Rules live in `.claude/CLAUDE.md`; physical quantities in `dev/physics-conventions.md`;
+the export format in `dev/instruments/attocube.md`.
 
 Items marked **[verified by running]** were reproduced in the interpreter.
 
 Resolved findings keep their number and stay where they are, tagged
-**[FIXED — date, commit]**. The diagnosis is the record of why the code changed, so
-it is never deleted and never struck through; the entry gains what was done instead.
-`Suggested order` below tracks what is left.
+**[FIXED — date, commit]** — never deleted, never struck through. `Suggested order`
+below tracks what is left.
+
 
 ## Already addressed
 
@@ -29,9 +33,9 @@ it is never deleted and never struck through; the entry gains what was done inst
 ## A. Broken — crashes or silently wrong numbers
 
 *(A1–A3 fixed; A4 deferred; A5 open; **A6 fixed 2026-07-30**; **A8 fixed 2026-08-06**
-with E14; **A10 and A7 fixed 2026-08-07**; **A9 open, reported not fixed** — the
-remaining half of the `AttoCubePLScanRealSpace` file-discovery pass, and it wants
-B1 with it.)*
+with E14; **A10 and A7 fixed 2026-08-07**; **A9 and B1 both fixed 2026-08-10**, which
+closes the `AttoCubePLScanRealSpace` pass. **A5** is the one live bug left in this
+section.)*
 
 **A1. `processing.remove_cosmic_rays` cannot be called at all.** **[FIXED — 2026-07-28, e77fabf]**
 `processing.py:349-361` referenced `cosmic_mask`, which was never defined — the
@@ -111,7 +115,7 @@ reflectance/cavity work, which needs its own dispersive `n(λ)`.
 
 **`electric_field` was made exact in the same pass** (numerator `ε_hBN` → `ε_stack`),
 per Brandon's own derivation from D-continuity. Fields are now ~0.6% higher than all
-prior MATLAB and Python results. See the *Displacement field* section of CLAUDE.md
+prior MATLAB and Python results. See `dev/physics-conventions.md` §2
 for the two wrong forms and why the old MATLAB's `eps_hs` typo was load-bearing.
 The `ValueError` guard for a device with no hBN at all was **kept**, though the exact
 form no longer needs it: both-`None` is far more likely a forgotten constructor
@@ -246,7 +250,7 @@ code, and the 3 that pass either way are the did-not-regress ones). Verified on 
 data beyond the synthetic tests: the 11 committed padded frames copied to a scratch
 directory renamed **unpadded** load as 0…10, and their per-frame sums match the padded
 originals element-for-element — so the pairing is right, not merely the filename list.
-A9 is still open and is now the whole of that pass, with B1.
+A9 and B1 followed on 2026-08-10, completing that pass.
 
 **A8. A declared 1-D sweep on a raster gives a sawtooth axis, silently.**
 **[FIXED — 2026-08-06]** Reported 2026-07-31. `sweep="piezo_x"` on the reflectance raster **succeeded** and
@@ -372,27 +376,61 @@ is a diagnostic and its docstring says so.
 and in order under `simplefilter("error")`, so a numpy overflow would fail the test;
 and the wobble-versus-sweep distinction is pinned on both sides.
 
-**A9. `_is_image_csv` accepts a two-row spectrum as an image.** — *open, reported
-2026-07-31* `loaders.py:_is_image_csv` tests only whether the first line parses as
+**A9. `_is_image_csv` accepts a two-row spectrum as an image.**
+**[FIXED — 2026-08-10, 679ebf9]** **[verified against real data]** Reported
+2026-07-31. `loaders.py:_is_image_csv` tested only whether the first line parses as
 floats, which a `SingleSpectrum` CSV does (its first row is the wavelength axis). So
-`AttoCubePLScanRealSpace` pointed at a directory of single spectra loads each as a
+`AttoCubePLScanRealSpace` pointed at a directory of single spectra loaded each as a
 2×N "image" — a two-row frame that every downstream diffusion and animation routine
-will happily process into nonsense.
+would happily process into nonsense.
 
 Note the contrast with `_read_block_layout`, which was given exactly this
 discrimination on 2026-07-31 — a bare grid of two rows is named as `SingleSpectrum`,
-more than two as an image sequence — so the rule to copy already exists in the
+more than two as an image sequence — so the rule to copy already existed in the
 package.
-*Fix:* require at least three rows to count as an image, and say what was skipped.
 
-A7 landed without it (2026-08-07) and does not get in the way: this lives entirely
-inside `_is_image_csv`, which A7 did not touch, and the fix plugs into the same
-`if not images: raise` block, whose message already has the right shape
-("Found N candidate(s) but none passed the numeric-grid check") to be extended with
-the skip reasons. Take it with **B1**, and after it, since B1 changes what
-`load_frame` returns while A9 changes which files are there to return.
-`tests/test_loaders_real_space.py` already pins that the timestamped spectral export
-in each committed directory is excluded by content, so A9 has something to keep green.
+**Fixed by replacing the predicate with a classifier.** `_is_image_csv` is gone;
+`_classify_csv` returns the kind, because a bool cannot carry the reason a file was
+skipped and *saying what was skipped* was half the fix. Six kinds: `image`,
+`spectrum`, `too_short`, `spectral`, `temporal`, `unrecognised`, `unreadable`.
+
+Three decisions worth recording, in the order they were made:
+
+- **A numeric grid needs three rows.** The row-count peek is bounded — one line plus
+  at most two — so a classifier run over a directory costs the same on a 300 MB
+  export as on a small one. The bounded peek is now `_n_rows_upto`, module-level and
+  *shared* with `_read_block_layout` rather than copied out of it; the D-section rule
+  says the second copy is the bug.
+- **A headed file defers to `_read_block_layout`.** The first draft had `_classify_csv`
+  return `"spectral"` for anything with a text header. Brandon caught it: `"spectral"`
+  and `"temporal"` are the two `_BLOCK_LAYOUTS` entries, so a wider meaning for the
+  same word forks the vocabulary and mislabels a TRPL export. Delegating also lets the
+  message name the right loader via `_CLASS_FOR_KIND`, and gives `"unrecognised"` for
+  a header matching no known layout — a different acquisition version, which the
+  format-fixed 57-row record says is worth naming rather than dropping.
+- **Only surprising skips warn.** An AttoCube export beside the frames is what an
+  acquisition writes every time — every committed example directory has one — so
+  warning there would fire on every legitimate load and would have broken
+  `test_committed_sequence_loads_without_warnings`. `_EXPECTED_NON_IMAGE_KINDS` is
+  therefore `frozenset(_CLASS_FOR_KIND)`, and everything outside it is named. When
+  nothing survives, the raise lists each candidate with its reason and its loader.
+
+*Test:* `tests/test_loaders_real_space.py`, 8 new cases (10 → 18): the three-row
+boundary, the three header kinds, a directory of single spectra raising with
+`SingleSpectrum` named, a temporal export naming `AttoCubeTRPLSweep`, a stray spectrum
+among frames warned by name, an export among frames staying silent, and
+`caught[0].filename == __file__` for the new `stacklevel=2` — measured, per A11,
+rather than read off the call stack. The two committed-data tests pass unchanged.
+
+Verified on real data: over `examples/data`, the committed
+`ref_single_spectrum_26_07_01_14_42_47.csv` now classifies `spectrum` where it used to
+classify as an image, the TRPL files classify `temporal` rather than `spectral`, and
+the 11 stark-shift frames plus the laser and white-light references all classify
+`image`.
+
+**B1** followed the same day and completed this class's pass. In the end it did *not*
+change what `load_frame` returns — the correction went into a sibling accessor, which
+is what kept `diffusion` correct.
 
 **A11. Warning locations across `loaders.py` are unverified.** — *open, reported
 2026-08-07* All 15 `warnings.warn` calls hand-tune `stacklevel`, spread across the
@@ -443,7 +481,7 @@ unchanged — and CPython's stable sort leaves a colliding pair in glob order.
 
 **This was first written up as unreachable, and that was wrong.** The claim was that a
 duplicate could only arrive if a classifier had already failed (`_read_block_layout`
-for TRPL, `_is_image_csv` for images), which would have made a guard here a
+for TRPL, the image classifier now called `_classify_csv`), which would have made a guard here a
 symptom-catcher for **A9**. It takes no classifier failure at all: **two acquisitions
 copied into one directory** is enough, and every file in that directory is a
 legitimate export that the classifier is right to accept. Demonstrated —
@@ -468,7 +506,7 @@ Covered by `test_two_runs_in_one_directory_warn_on_collision`,
 `test_duplicate_iteration_index_warns` (TRPL). No committed export triggers it: the
 TRPL companion collides on `iter_0` with the first decay but is a *spectral* file
 separated out by content before the sort, and the timestamped spectral export in each
-real-space directory is excluded by `_is_image_csv` — both pinned by the existing
+real-space directory is excluded by `_classify_csv` — both pinned by the existing
 no-warning tests.
 
 **A13. A declared nest was refused when a level was wider than the axis tolerance.**
@@ -654,14 +692,14 @@ directions and no shipped notebook or README combines the two.
 Incidental find, unrelated to the repair but visible from the test: `plot_spectral_map`'s
 `median_kernel` still defaults to **3**, so its mesh is smoothed across sweeps unless
 told otherwise. The test passes `median_kernel=1` to compare arrays. Still the open item
-in CLAUDE.md's *Decided but not yet implemented*.
+in CLAUDE.md's *Known issues*.
 
 **Not fixed, and its own change:** there is no background-corrected wavelength-space
 array, so `bg_region_nm=` shows on the energy axis only, and `best_spectra` therefore
 means "repaired" on a sweep and "background-subtracted" on a `SingleSpectrum`. Closing
 that means storing `corrected` as `spectra_bg`, which adds a public array and changes
 wavelength-axis numbers for every scan loaded with a background — see the array-count
-decision in `dev/cosmic_ray_fix.md` before doing it.
+decision in `dev/decisions/0001-cosmic-ray-repair-at-load-time.md` before doing it.
 
 **A17. The two spectral axes carried different sets of arrays.**
 **[FIXED — 2026-08-11]** **[verified by running]** Asked for 2026-08-11, closing what
@@ -703,12 +741,13 @@ Three consequences worth stating plainly:
   either — the wavelength rungs hold exactly those values, which is precisely what
   adding them buys.
 
-**This amends E13 and `dev/cosmic_ray_fix.md` §3.2**, which refused "a third flag with
+**This amends E13 and the *Rejected* section of
+`dev/decisions/0001-cosmic-ray-repair-at-load-time.md`**, which refused "a third flag with
 its own energy-space arrays" and closed with "no new energy-space names". The refusal
 was of an independent flag **crossed with** the other two — a 2×2×2 lattice, ten names,
 `best_*` having to choose a branch. This keeps one fixed order (`raw → cr → bg`), so
 `energy_spectra_cr` is not a new branch but the energy view of a rung that already
-existed, the count goes 5 → 7, and `best_*` stays a total order. What §3.2 got wrong is
+existed, the count goes 5 → 7, and `best_*` stays a total order. What that refusal got wrong is
 that "no new energy-space names" was not free: it was paid for by letting one attribute
 name two different quantities depending on a load-time argument, which is the same
 defect class as A16 — a name that reads as symmetric and is not. The CLAUDE.md bullet
@@ -752,10 +791,70 @@ rung (it takes no `cosmic_rays=`, deliberately). Nothing reaches the former.
 
 ## B. Dead parameters — accepted, documented, silently ignored
 
-**B1.** `AttoCubePLScanRealSpace(bg_region=, bg_stat=)` are stored
-(`loaders.py:1119-1120`) but `load_frame()` returns `np.loadtxt(...)` untouched, so
-every consumer (animations, diffusion sequences) gets un-subtracted frames.
-*Fix:* apply `processing._apply_bg_region` in `load_frame`, or delete the parameters.
+**B1. `AttoCubePLScanRealSpace(bg_region=, bg_stat=)` are stored and never read.**
+**[FIXED — 2026-08-10, 4fe8f24]** **[verified against real data]** They were assigned
+in `__init__` and read nowhere, so `load_frame()` returned `np.loadtxt(...)` untouched
+and constructing with a background region gave frames identical to constructing
+without one. No viewer could show a subtracted frame at all: `plotting.py` had no
+`bg_region` anywhere outside `DiffusionCloudPanel`. Both parameters were also absent
+from the class docstring, so the signature was their only documentation — and there
+they read as supported.
+
+**The sketch above ("apply `_apply_bg_region` in `load_frame`") would have introduced a
+double subtraction, and was not taken.** `analyse_diffusion_sequence` calls
+`scan.load_frame(i)` and forwards `bg_region` to `analyse_diffusion_cloud`, which
+subtracts again; `diffusion.py:403-411` is an explicit comment relying on `load_frame`
+being raw, and `DiffusionCloudPanel` (`plotting.py:2363`, `:2427`) would have been a
+second instance. That is the mechanism of **A5**, and `diffusion.py` has no tests at
+all to have caught it.
+
+**Fixed as a sibling array instead.** `load_frame` is unchanged — the file's own counts
+— and `load_frame_bg` carries the correction, mirroring `spectra` / `spectra_bg` and
+the *raw arrays are never mutated after load* rule. `diffusion.py`,
+`plot_diffusion_cloud` and `DiffusionCloudPanel` therefore needed no change, and the
+double subtraction cannot arise.
+
+Three decisions worth recording:
+
+- **The viewer toggle is `frame_source={"best"|"raw"|"bg"}`, not `raw=True/False`.**
+  Brandon proposed the boolean; it was argued down to a string because
+  `spectra_source=` already answers this exact question with a named vocabulary, so a
+  boolean would give the package two spellings for "which version of the data is
+  this", read as a double negative when asking for the corrected frame, and have
+  nowhere to grow if image cosmic-ray repair ever lands. `_resolve_frame` is built
+  after `_resolve_spectra` and reuses its two error wordings.
+- **One dict, no labels table.** Brandon asked whether `_FRAME_SOURCES` and a
+  `_FRAME_SOURCE_LABELS` should be a single nested dict to avoid maintaining two —
+  a fair instinct, and checking it found that `_SPECTRA_SOURCE_LABELS` is *dead*
+  (imported at `plotting.py:32`, read nowhere). So no labels table was added at all;
+  `_resolve_spectra` builds its message from `list(_SPECTRA_SOURCES)` and the frame
+  resolver does the same. The dead spectral dict went with A17, which rewrote that
+  vocabulary; its last import went when this branch was rebased onto that work.
+- **`"best"` defaults to subtracted, and that is not a silent correction.** The opt-in
+  is `bg_region=None` at the loader; once the researcher has asked there, a plot
+  honouring it is the `best_energy_spectra` rule rather than a second decision.
+  Defaulting the plot to raw would silently discard a correction they requested.
+  `bg_stat` is now validated at construction, since `_apply_bg_region` falls through
+  to the mean for anything but `"median"`.
+
+*Test:* `tests/test_loaders_real_space.py`, 8 new cases (18 → 26) — `load_frame` still
+raw with a `bg_region` set, the median/mean pedestals distinguished by a corner whose
+two statistics differ by construction, `load_frame_bg` refusing without a region, an
+invalid `bg_stat`, and the four `_resolve_frame` behaviours including an object
+exposing only `load_frame` degrading to raw. Plus `tests/test_plotting_frame_source.py`
+(7 cases), which reads the array back **off the axes** rather than checking the call
+succeeded — forwarding a parameter and then ignoring it is precisely what B1 was.
+
+Verified on the committed stark-shift sequence with a 40 × 40 corner: pedestal 209.0,
+`load_frame` bit-identical to a scan loaded without `bg_region`, median and mean
+estimators giving different frames (209.0 vs 208.9512), and
+`analyse_diffusion_cloud(load_frame(0), bg_region=R)` equal to
+`analyse_diffusion_cloud(load_frame_bg(0))` to the last digit — the single-subtraction
+invariant, measured rather than assumed.
+
+Not done here: **A5**, and `animate_wl_pl_spectra` (`plotting.py:1795`) constructs its
+scans internally with no `bg_region` passthrough, so it is the one public path that
+cannot reach this.
 
 **B2.** `analyse_diffusion_cloud(scale_units=)` / `analyse_diffusion_sequence(scale_units=)`
 are forwarded but never stored; `DiffusionResult` has no such field, though its
@@ -808,10 +907,10 @@ Mostly self-inflicted, by the 2026-07-30 rewrite. The known sites:
 |---|---|
 | `AttoCubeTRPLSweep` class | A paragraph arguing why it is a separate class rather than a mode |
 | `AttoCubeTRPLSweep.spectra_type` param | "Deliberately unlike `AttoCubeSpectralSweep`, which requires…" |
-| `best_energy_spectra` | Defends the decision at length — this is the worked before/after in CLAUDE.md |
+| `best_energy_spectra` | Defends the decision at length — this is the worked before/after in `dev/design-principles.md` §4 |
 | `_cross_check_companion` | Why there is no value check, ending "which is how warnings get ignored" |
 | `loaders.py` module docstring, `AttoCubePLVabScan` | "Deprecated **pre-rename** name", "reproduces the **pre-rename** behaviour" |
-| `AttoCubeSpectralSweep` note **[FIXED — 2026-08-04]** | "no reflectance export has been characterised yet (see **E9** in `dev/audit-2026-07.md`)" — stale as well as misplaced. Note deleted; the layout fact restated positively on the `.csv` bullet, which now says PL/R/RC share the block layout and that it is identified from the header rather than from `spectra_type`. |
+| `AttoCubeSpectralSweep` note **[FIXED — 2026-08-04]** | "no reflectance export has been characterised yet (see **E9** in `dev/defects.md`)" — stale as well as misplaced. Note deleted; the layout fact restated positively on the `.csv` bullet, which now says PL/R/RC share the block layout and that it is identified from the header rather than from `spectra_type`. |
 | `DeviceGeometry.electric_field` | Two dates: "before 2026-07-30", "~0.6 % higher than pre-2026-07-30 results" |
 | 6 sites in `loaders.py` | `:func:`_drop_unwritten_blocks``, `:attr:`_CURATED``, `:meth:`_cross_check_companion`` cited from *public* docstrings |
 | `hdf5.py` module docstring | "What is deliberately *not* stored" — content is good, framing is a defence |
@@ -919,7 +1018,7 @@ commented "Lazy imports" that is in fact executed at module import.
 `processing._apply_bg_region` (image, `median|mean`, slice-pair). Fine to keep both,
 but they should be named as a pair and documented together.
 
-## E. Design decisions worth revisiting
+## E. Design, packaging, and project questions
 
 **E1. `_CURATED` fail-fast makes some real files unloadable.** — **fixed 2026-07-30**
 Raised `KeyError` if *any* curated row was missing — including `Scanner X`/`Scanner
@@ -954,29 +1053,17 @@ where A1 and A4 live. `pytest` is not in `pyproject` (no `dev`/`test` extra) and
 not installed in the `viz-sci-plot` env. Tests are local-only by choice; no CI test
 job wanted.
 
-*Update, 2026-07-29 (verified by running).* `pytest` 9.1.1 is installed in
-`viz-sci-plot` and `python -m pytest -q` gives **41 passed in 2.7 s** — 18
-`test_loaders.py` + 18 `test_processing_cosmic_rays.py` + 5 `test_laser_spot.py`.
-This confirms the *Verification* note at the foot of this file. `test_converters.py`
-is not collected, as expected: it exists only on `dev/hdf5`.
+*Update.* `pytest` is installed in `viz-sci-plot` and the whole suite runs. It is still
+**not declared** in `pyproject.toml`, in any extra, so the dependency exists only in that
+one environment and `pip install -e ".[docs]"` does not provision it. Declaring
+`[project.optional-dependencies] test = ["pytest"]` fixes the *signal* only: it does not
+commit the project to a CI test job, and it leaves tests local-only by choice.
 
-Still undeclared: `pyproject.toml` contains no reference to `pytest` at all, in any
-extra. Two documentation consequences, both for whoever picks up E4:
+That signal is the whole point. This item drifted twice in two days while the audit was
+open — present, then absent, then present again after a manual install — so an undeclared
+test dependency has no way to announce itself when an env is rebuilt, and any docs
+describing it go stale silently, as they did in both directions.
 
-- CLAUDE.md's Environment block states `pytest` "is **not currently installed** in
-  `viz-sci-plot`". That is now false and should be corrected in the same change.
-- The install line there is `pip install -e ".[docs]"`, which is the command that
-  provisions the *documented* env — and it does not provision the test suite. So the
-  `Tests:` line depends on a manual step recorded nowhere.
-
-This item drifted twice in two days while the audit was open (present per the
-Verification note of 2026-07-28, absent when checked earlier on 2026-07-29, present
-again after a manual install). That is the argument for declaring it: an undeclared
-test dependency has no signal when an env is rebuilt, so the docs describing it go
-stale silently — as they just did, in both directions. Declaring
-`[project.optional-dependencies] test = ["pytest"]` fixes the signal only; it does
-not commit the project to a CI test job (cf. F1), and it leaves tests local-only by
-choice.
 
 **E5. Packaging.** `pyproject` lists `ffmpeg` as a dependency: that PyPI package is
 an unmaintained wrapper, not the ffmpeg *binary* matplotlib needs. Use
@@ -1007,159 +1094,64 @@ Whether the converters belong on `main` is a merge decision, not a packaging one
   sequence.
 
 **E7. Constants provenance — unresolved.** Not defects, but undocumented:
-`power_scale = 0.303e6`; `EPS_TMDC["HS"] = 7.5`; `T_MONOLAYER` = 0.65 nm for all
-four materials. See `.claude/CLAUDE.md`.
+`power_scale = 0.303e6`; `EPS_TMDC["HS"] = 7.5`; `T_MONOLAYER` = 0.65 nm for all four
+materials. Each is recorded with what is missing in `dev/physics-conventions.md` §8, and
+the citations they would need are listed in §9 of that file.
 
-*`Scanner X`/`Scanner Y` units struck 2026-08-04 — **answered: volts.** The scanners
-are piezos and the rows carry drive voltage, so scale 1.0 was right and the unit
-string was not. `_CURATED`, the two properties and the sweep registry now say V, and
-the `position_x`/`position_y` sweep keys were renamed `piezo_x`/`piezo_y` — a
-distance needs a per-stage µm/V calibration that no file contains, passed via
-`curated_scales`. No shim; the unknown-key error lists the new names.*
+*`Scanner X` / `Scanner Y` units struck 2026-08-04 — **answered: volts.** The scanners
+are piezos and the rows carry drive voltage, so scale 1.0 was right and the unit string
+was not; the `position_x` / `position_y` sweep keys became `piezo_x` / `piezo_y`.
+Recorded in `dev/instruments/attocube.md`.*
 
-*(The displacement-field formula in `DeviceGeometry.electric_field` was checked at
-audit time and found self-consistent — the full-stack `d_tot` in the denominator is
-deliberate and still is. **Superseded 2026-07-30:** it was the thin-TMDC
-approximation, 0.59% low, and is now exact via `eps_stack` in the numerator. See A2
-and the *Displacement field* section of CLAUDE.md before touching it.)*
+*(The displacement-field formula was checked at audit time and found self-consistent,
+then **superseded 2026-07-30**: it had been the thin-TMDC approximation, 0.59% low, and
+is now exact. See **A2** and `dev/physics-conventions.md` §2 before touching it.)*
 
-**E7a. `EPS_HBN = 3.9` may not match its own citation.** Added 2026-07-30. The four
-TMDC values match Laturia et al. 2018's bulk out-of-plane figures, but that paper's
-hBN out-of-plane value is usually quoted as **3.76**; 3.9 is also the canonical SiO₂
-value. Now that `electric_field` is exact, `eps_hbn` no longer enters it at all — it
-still sets `eps_stack`, so it moves the field, but only through the ~98% of the stack
-that is hBN. Worth one look at the paper.
+**E7a. `EPS_HBN = 3.9` may not match its own citation.** Added 2026-07-30, still open.
+The four TMDC values match the cited paper's bulk out-of-plane figures, but that paper's
+hBN out-of-plane value is usually quoted as **3.76**, and 3.9 is also the canonical SiO₂
+value. Now that `electric_field` is exact, `eps_hbn` no longer enters it directly — it
+still sets `eps_stack`, so it moves the field through the ~98% of the stack that is hBN.
+The most tractable of the three provenance gaps, because it is the only one a reachable
+source could settle. Worth one look at the paper.
+
 
 **E7b. Gate polarity is not recorded per scan.** **[FIXED — 2026-08-05]**
-**[verified by running, against `examples/data/stark-shift/`]** Added 2026-07-30. The electrodes can
-be wired either way round, so which acquisition channel drove which gate is a
-per-session fact that no default can encode; the old MATLAB used `dm(4,…)`/`dm(6,…)`
-with no note of which was which, and the senior's thesis is internally inconsistent
-(eq. 3.11 carries a leading minus, 3.12/3.13 do not). `electric_field(v_top=, v_bot=)`
-puts the mapping on the caller by design, so there is no latent bug in it — the gap is
-metadata. Transposing the two mirrors the field axis and flips the sign of any
-extracted dipole.
-
-*Partly closed 2026-07-30, as this item asked, inside the `AttoCubeSpectralSweep`
-rewrite.* The channel-to-argument mapping is now recorded rather than implicit:
-`curated_labels={"v_top": …, "v_bot": …}`, surfaced in `__repr__` as
-`(top ← 'V_A', bottom ← 'V_B')` and written into exported HDF5, so a scan carries
-its own mapping and a transposition is visible on sight. `gate_mode` additionally
-reports whether the gates were driven anti-correlated (field-like) or correlated
-(doping-like), which catches a doping sweep mistaken for a field sweep.
-
-*Closed 2026-08-05, after the default bit in the lab.* A voltage applied to a
-device's **bottom** gate was read as the top gate, because `_CURATED` hardwired
-`v_top → "V_A"` / `v_bot → "V_B"` and applied it silently. Three consequences, in
-increasing severity: `sweep="bottom_voltage"` passed `_SWEEP_REQUIRES` and returned
-the *top* channel, with a plot that looked entirely normal; `ef` was mirrored, so any
-dipole extracted from it had the wrong sign; and `gate_mode` returned
+**[verified by running, against `examples/data/stark-shift/`]** Added 2026-07-30.
+`_CURATED` hardwired `v_top → "V_A"` / `v_bot → "V_B"` and applied it silently, so a
+voltage applied to a device's **bottom** gate was read as the top gate. Three
+consequences, in increasing severity: `sweep="bottom_voltage"` passed validation and
+returned the *top* channel, with a plot that looked entirely normal; `ef` was mirrored,
+so any dipole extracted from it had the wrong sign; and `gate_mode` returned
 `"top-gate only"` — the repr did not merely assume wrong, it **asserted** wrong.
 
-The previous entry said closing this needed a per-session fact rather than more code.
-That was right about the fact and wrong about the code: the package cannot supply the
-wiring, but it can refuse to proceed without it, and it was not refusing. This was
-the last place the package guessed at something no file records — `spectra_type=` is
-required with no default, and an undeclared `sweep=` means the index rather than an
-auto-detected parameter.
+A partial fix on 2026-07-30 recorded the mapping and surfaced it in `__repr__` and in
+exported HDF5, which made a transposition visible on sight but still defaulted when
+nothing was said. Closed 2026-08-05 by requiring a keyword-only `gates=` and refusing to
+produce `v_top`, `v_bot`, `ef` or the gate sweep types without it.
 
-**Fix.** A keyword-only `gates={"top": <row>, "bottom": <row>}` on both sweep classes,
-resolving onto the existing `_curated` labels so `curated_parameters`, `__repr__` and
-HDF5 needed no new plumbing. Both roles are required; a grounded gate is still a
-driven channel at 0 V. What now refuses without it: `v_top`, `v_bot`, `ef` (only when
-a geometry was supplied — saying no field was computed needs no wiring), and the three
-gate sweep types, derived from `_SWEEP_REQUIRES ∩ _GATE_CURATED` rather than relisted.
-`v_top` / `v_bot` were removed as `curated_labels` *label* keys, so the mapping has one
-spelling; `curated_scales` still reaches them.
+**Nothing in the code is still open.** The wiring itself has to come from the lab
+notebook per session — that was always true, and is now enforced rather than assumed.
 
-Two things deliberately do **not** raise, because a diagnostic that dies is no
-diagnostic. `gate_mode` needs no mapping — how many channels moved together is a
-property of the data, and the Pearson correlation is symmetric in the two rows, so
-only the wording differs: a single driven gate is `"bottom-gate only"` with a mapping
-and `"single gate driven ('V_B')"` without. `__repr__` renders either way, guards its
-`E_F` line, and states the undeclared case with the `gates=` call shape — it is where
-someone looks after loading, and the failure guarded against is a plot that looks fine.
+Decision, rejected alternatives and consequences:
+`dev/decisions/0002-gate-wiring-must-be-declared.md`.
 
-HDF5 stores `gates` as its own attribute, written only when declared. The blanket
-`curated_labels` dump always carries a resolved label for both gate rows and so cannot
-tell a declared mapping from a defaulted one; keeping this separate is what stops a
-round trip laundering an unstated wiring into provenance.
-
-`AttoCubePLVabScan` passes the historical `V_A`→top / `V_B`→bottom mapping explicitly,
-so existing notebooks keep producing the numbers they always did — verified against
-`examples/data/stark-shift/`: the shim reproduces `ef[:3] = [-171.2652, -165.5573,
--159.8484]` mV/nm, and the transposed mapping gives the exact negation. Its
-`FutureWarning` is what asks callers to confirm the wiring rather than inherit it.
-
-Two `plotting` call sites fell back to `scan.v_top` and labelled the axis
-`$V_\mathrm{top}$`; both now use `scan.sweep_axis` / `sweep_axis_label`, which asserts
-nothing the scan was not told. Wiring is checked before `scan.ef` is read, since
-reading it undeclared raises.
-
-**What is still open:** nothing in the code. The *fact* still has to come from the lab
-notebook per session — that was always true and is now enforced rather than assumed.
 
 **E7c. `gates` could not describe a single-gated device.** **[FIXED — 2026-08-05]**
 **[verified by running, against `examples/data/stark-shift/`]** Raised immediately by
-E7b's fix, on a real device: one electrode drives the bottom gate, the other contacts
-the TMDC to ground it. There is no top gate, so no `{"top", "bottom"}` assignment was
-correct — including the transposition the caller was worried about.
+E7b's fix, on a real device: one electrode drives the bottom gate, the other contacts the
+TMDC to ground it. With no top gate, no `{"top", "bottom"}` assignment was correct -
+including the transposition the caller had been worried about. Passing the grounded row
+as `v_top` would have returned a field with the wrong denominator by ≈2× for a 53/46 nm
+stack, in a slab that is now the terminating electrode.
 
-`electric_field` does not merely get a sign wrong for this geometry; its premise
-fails twice. `E_stack = (V_BG − V_TG)/d_TOT` needs an equipotential at each end of
-the stack, and with no top gate the upper surface has no defined potential — there is
-nothing to subtract. And the derivation assumes no free charge between the gates,
-which is exactly what grounding the TMDC through a contact introduces: field lines
-terminate on the induced sheet charge, so `V_BG` drops across `d_hBN,bottom` rather
-than across `d_TOT` with `ε_stack` in it. Passing the grounded row as `v_top` (it
-sits at 0, so `v_bot − 0`) would have returned `V_BG/d_TOT · ε_stack/ε_2D` — wrong
-denominator by ≈2× for a 53/46 nm stack, and a field in a slab that is now the
-terminating electrode. Underneath both: one gate is one degree of freedom, so field
-and density are locked; independent control is what the dual-gate anti-symmetric
-sweep buys, which is why `gate_mode`'s correlation verdict matters.
+Fixed by making the role vocabulary describe device **topology**, adding a `"channel"`
+role for a contact to the TMDC itself, and deriving what is computable from which roles
+are present. A geometric carrier-density path came with it.
 
-**Fix.** The `gates` role vocabulary now describes the *topology* as well as the
-wiring, so which quantities exist is derived from which roles are present rather than
-flagged separately. `"top"`/`"bottom"` are gate electrodes; `"channel"` is a contact
-to the TMDC itself and is not a gate — it sits inside the stack, carries no
-thickness, and enters no field. A value of `None` means the electrode is tied to
-ground with no row recording it, giving zeros; `__repr__` prints `← grounded` rather
-than inventing a row name. `is_dual_gated` is the single predicate for "a field is
-defined", and is what `plotting` branches on.
+Decision, rejected alternatives and consequences:
+`dev/decisions/0003-gates-declares-device-topology.md`.
 
-Validation keeps E7b's no-half-declaration guarantee: at least one gate is required,
-and a lone gate must name its `"channel"` too — otherwise a single-gated device could
-not be told from a two-gate device whose other gate was forgotten. `gate_mode` still
-never raises and now reports on whichever gates it can see, so a partially-missing
-row degrades to describing the other gate instead of returning `None`. Sweeping an
-electrode declared as grounded is refused: its voltage is zero at every point, so it
-is not an axis.
-
-**Density path**, chosen over an absolute-`n` API because only the geometric part is
-free of unrecorded facts. `DeviceGeometry.gate_capacitance(gate)` is
-`ε₀ε_hBN/d_hBN` — the TMDC is the counter-electrode, not a slab inside the
-capacitor, so neither its thickness nor `eps_stack` appears, and a test pins that a
-5-layer stack gives the same number. `DeviceGeometry.carrier_density` sums
-`C_i(V_i − V_ref)/e` over the gates supplied, signed with electrons positive, and
-returns cm⁻². For 46 nm hBN at ε = 3.9 that is 4.685 × 10¹¹ cm⁻² V⁻¹, the right order
-for hBN-gated TMDCs; the committed 61-point ±17.3 V sweep spans ±8.10 × 10¹² cm⁻².
-
-`v_ref` is a *gate voltage*, not a threshold, so the result is a density difference.
-Absolute density needs the threshold at which the channel populates, from a transfer
-curve or the PL charging step, which is in no file — the docstring says to pass it as
-`v_ref` if measured. The value is also geometric only: quantum and interface-trap
-capacitance are in series and make the effective value smaller, so it is an upper
-bound.
-
-`sweep="carrier_density"` requires a geometry, a declared `"channel"` (charge comes
-from the contact that supplies it), and a computable capacitance for every declared
-gate — validated at load like every other sweep. Its requirement depends on which
-roles were declared, so it cannot live in `_SWEEP_REQUIRES` and is checked explicitly
-beside the `electric_field`-needs-a-geometry case. The property additionally **warns**
-when the channel's own row varies: the density is referenced to that contact, so a
-driven contact moves the reference under the axis. Expected for a source-drain bias,
-wrong for a doping sweep, and no file distinguishes them — so it reports the span it
-saw instead of choosing.
 
 **E8. Repo weight.** ~160 example CSVs live in the working tree. They are there
 deliberately, to reproduce the example notebooks. The root `data/` directory is
@@ -1167,61 +1159,23 @@ empty and unused.
 
 **E9. The instrument export format was nowhere described.** — **largely closed
 2026-07-30**, by sample files rather than by code, exactly as this item asked.
-
 `examples/data/reflectance-contrast/` (an R sweep + its substrate reference) and
-`examples/data/TRPL/` (a 3-point sweep: three decays + a metadata companion) were
-committed, and reading them settled five of the six unknowns. The format is now
-recorded in the **"The AttoCube export format"** section of `.claude/CLAUDE.md` —
-that is the authoritative place; this entry only tracks the item's status.
+`examples/data/TRPL/` (three decays + a metadata companion) were committed, and reading
+them settled five of the six unknowns.
 
-| Question | Answer |
-|---|---|
-| What are `ExpROI1`/`ExpROI2`? | Two spatial ROIs on the CCD: excitation spot, and a remote spatially-filtered spot, for two-spot galvo scans. Zero when unused. |
-| Which labelled rows are guaranteed? | **Format-fixed** — all four file types carry the identical 57-row set (verified by diff). |
-| How do non-PL exports differ? | R/RC: not at all, same 4-column layout. TRPL: 3-column block, time in the "Wavelength" slot, and a sweep is a directory + companion. |
-| Nested sweep: one file or a directory? | Both exist. A 2-D raster is one flattened file (41×51); a TRPL sweep is a directory. |
-| Real-space image CSVs? | Unchanged — bare numeric grid, per `_is_image_csv`. |
+The format record is `dev/instruments/attocube.md`. Two things the sample files exposed
+that inference had missed are filed as their own findings: the zero-filled over-allocated
+blocks (**A6**), and that column-count arithmetic cannot recover the block count at all -
+the layout must be read from the header names.
 
-Still open, and no file can answer it: **which acquisition software and version
-emits this, and whether the layout is version-stable.**
+**Still open, and no file can answer it:** which acquisition software and version emits
+this format, and whether the layout is version-stable.
 
-Two things the sample files exposed that inference had missed, both now fixed: the
-zero-filled over-allocated blocks (A6 below) and that column-count arithmetic
-cannot recover the block count at all — the layout must be read from the header
-names, which is what `_read_block_layout` does.
+The synthetic-fixture caveat stands and is worth keeping in mind: `make_spectral_csv` is
+written from the same understanding as the parser, so it pins the decoding *contract* but
+cannot catch a shared misunderstanding. The real files are the check on that, which is
+why a handful of tests load them directly.
 
-The synthetic fixture caveat stands and is worth keeping in mind: `make_spectral_csv`
-is still written from the same understanding as the parser, so it pins the decoding
-*contract* but cannot catch a shared misunderstanding. The real files are now the
-check on that, which is why a handful of tests load them directly.
-
-What can be read off the code: a `Parameters Labels` header column, then one column
-group per sweep point (`Par_i`, `Wavelength{i}`, `ExpROI1_{i}`, `ExpROI2_{i}`), two
-trailing padding columns, labelled scalar rows occupying the leading pixel rows of
-the same grid the spectra live in, and a `roi=` argument selecting between the two
-ROI columns.
-
-What cannot, and is needed:
-
-- Which acquisition software and version emits this, and whether the layout is
-  version-stable.
-- What `ExpROI1` and `ExpROI2` physically are. `roi=1` silently picks one; a reader
-  cannot tell whether the other is a second detector region, a different binning, or
-  a reference channel — nor which is right for a given measurement.
-- Which labelled rows are guaranteed by the format versus contingent on instrument
-  configuration. This is the substance of E1: the fail-fast is only wrong if some
-  curated rows are genuinely optional, and that cannot be decided from the parser.
-- How the non-PL exports differ — R, RC, absorption. Extra reference channel, extra
-  column group, different header?
-- Whether a nested sweep (field × power, as in the `Tagarelli2023` reference data)
-  arrives as one file or a directory of files.
-- Whether the real-space image CSVs are a bare matrix or carry a header.
-
-*What made this tractable:* one committed sample file per measurement type, which
-is what the item asked for and what arrived. Both new formats were then implemented
-against files rather than assumptions, and both immediately contradicted an
-assumption the parser had been making. (E1 was resolved as part of the rewrite, as
-planned; E7b partly.)
 
 **E10. Working context that is not written down anywhere.** Not defects; questions
 whose answers change what an agent (or a new group member) does, and which currently
@@ -1269,7 +1223,7 @@ own style with no opt-out.
 
 `laser_halo` is the one style argument to keep — the white halo is what makes a thin
 red circle legible over a dark colormap, so it is correctness-of-reading rather than
-decoration. See *parameters earn their place* in `.claude/CLAUDE.md`.
+decoration. See *parameters earn their place* in `dev/design-principles.md` §2.
 
 *Fix:* return the artists alongside the result, then delete the style parameters.
 The return shape is the open decision — either a named tuple carrying `result` plus
@@ -1287,491 +1241,146 @@ defaults) and **E3** (`plot_pl_map_Vab_scan`'s questionable defaults). **E6**'s
 `threshold` mismatch between `plot_diffusion_cloud` and `DiffusionCloudPanel` is
 adjacent but separate — that one is a physics default, not styling.
 
-**E12. `plotting` still speaks gate-sweep PL.** Added 2026-07-30, created by the
-`AttoCubeSpectralSweep` rewrite. Nothing is broken — `gate_axis` /
-`gate_axis_label` survive as aliases and every call site still runs, verified
-against `examples/data/stark-shift/` — but the module now lags the loader:
+**E12. `plotting` still speaks gate-sweep PL.** Added 2026-07-30, created by the loader
+rewrite. Nothing is broken — `gate_axis` / `gate_axis_label` survive as aliases and every
+call site still runs — but the module lags the loader in two ways, one now closed.
 
-- **"PL intensity" is hardcoded in ~6 places** (`plot_pl_map_Vab_scan`'s colorbar,
-  `plot_spectrum`, `plot_single_spectrum`, `plot_power_series`'s `ylabel` default,
-  `SpectrumLinePanel`'s `ylabel` default). A reflectance sweep would be labelled
-  "PL intensity (counts)". `scan.signal_label` exists for exactly this and derives
-  the string from `spectra_type`, including dropping the unit for a dimensionless
-  ratio.
-- **Names and arguments carry the gate-sweep assumption**:
-  `plot_pl_map_Vab_scan` (a power series is not a "Vab scan"),
-  `plot_current(ef_axis=True)` (should be "use the sweep axis"),
-  `plot_spectrum`'s label default hand-rolls `E_F`/`V_top` instead of asking
-  `sweep_axis_label`, and `SpectrumLinePanel(sweep_attr="scanner_y",
-  sweep_unit="V")` — a position default carrying a voltage unit, wrong before this
-  rewrite and now redundant, since the panel can read `scan.sweep_axis` and
-  `scan.sweep_unit` itself.
+- **Hardcoded "PL intensity" in ~6 places.** **[FIXED — 2026-08-06]** A reflectance sweep
+  came out labelled "PL intensity (counts)". Replaced by one module-wide label contract:
+  `dev/decisions/0011-label-contract-derive-or-verbatim.md`. Two defects were fixed in
+  passing, neither previously recorded — `plot_image` discarded `colorbar_label` whenever
+  `rescale_img=True`, always overwriting it with a hardcoded string; and a second,
+  **dead** `signal_label` property sat ~300 lines above the real one with a bare `return`
+  as its body, so any reordering of the class body would have turned every signal label
+  into `None`.
+- **Names and arguments still carry the gate-sweep assumption** — *open*.
+  `plot_current(ef_axis=)`, `plot_spectrum`'s hand-rolled `E_F` legend default, and
+  `SpectrumLinePanel(sweep_attr="scanner_y", sweep_unit="V")` — a position default
+  carrying a voltage unit, now redundant since the panel can read the scan's own sweep
+  axis and unit.
 
-*Fix:* one pass replacing hardcoded labels with `scan.signal_label` /
-`scan.sweep_axis_label`, then the renames. Deliberately **not** done in the rewrite
-commit: it is a separate change to a different module, it touches `examples/`, and
-`plot_pl_map_Vab_scan`'s rename should land with **E3**'s default fixes and
-**E11**'s signature work rather than three times over.
+**Do the `plot_current` rename first.** **E15** already changed that function's signature
+and its return, and the remaining step changes it again; landing them separately breaks
+every caller twice for one function's worth of churn. The planned tests for it also need
+`gates=` in their fixtures now, since a current row cannot be attributed to an electrode
+without a declared mapping.
 
-*Grown since, 2026-07-30.* Reflectance contrast and TRPL both now land in the loader
-with nothing in `plotting` able to display them idiomatically:
+TRPL plotting and lifetime fitting are **unwritten** rather than broken: the x-axis
+resolver knows only energy and wavelength, and `fitting` has no exponential model. The
+baseline machinery is already generic over the model function, so a decay fit is a small
+generalisation there rather than a parallel implementation.
 
-- `scan.contrast_label` exists (ΔR/R₀, or R/R₀ in ratio mode) and nothing uses it.
-  `spectra_source="contrast"` reaches the array, but every y-label still says PL.
-  **[FIXED — 2026-08-06]** along with the hardcoded-label half of E12; see below.
-- **TRPL has no plotting at all.** `_resolve_x_axis` (`plotting.py:97`) knows only
-  `"energy"` and `"wavelength"`, and a TRPL sweep deliberately exposes neither
-  `wavelength` nor `spectra`, so it raises `AttributeError` — loudly, which is the
-  intent, but it means decay plotting is unwritten. The natural shape is to let
-  `_resolve_x_axis` ask the scan for its own axis (`axis_label` already exists on
-  the TRPL class) rather than to branch on a third string.
-- Lifetime fitting is likewise absent: `fitting.py` has no exponential model. The
-  baseline machinery (`_with_baseline`, `_complete_p0`, `_complete_bounds`,
-  `_make_result`) is already generic over the model function — only
-  `_fit_single_peak` hardcodes the 3-parameter `_PEAK_PARAM_NAMES` — so a decay fit
-  is a small generalisation there rather than a parallel implementation.
+Full remaining plan: `dev/plan-E12.md`.
 
-*Labels fixed, renames still owed — 2026-08-06.* The hardcoded-"PL" half of E12 is
-done; `plot_current(ef_axis=)`, `plot_spectrum`'s hand-rolled `E_F` legend and
-`SpectrumLinePanel`'s sweep parameters are not. Full record in `dev/plan-E12.md`,
-which now marks its Steps 1–2 as landed and carries the one design reversal:
-`colorbar_label` was **kept**, not deleted, and generalised into a module-wide
-contract — *`None` derives the label from the scan; a string is used verbatim and
-nothing is ever appended to it.* The reasoning is in that file; the short version
-is that `plot_power_series(ylabel=None)` already worked this way, that the
-`"(norm.) (norm.)"` defect came from the append rather than from the parameter,
-and that a mislabelled colour bar is a misread rather than a styling preference.
-
-*Do `plot_current` first — 2026-08-07, added with **E15**.* **E15** has already
-changed that function's signature (`color_ich1` / `color_ich2` deleted) and its
-return (`lines` appended), and Step 3 is a *further* breaking change to the same
-function. Landing them separately breaks every caller twice for one function's worth
-of churn, so Step 3's `plot_current` bullet should be the next thing done in E12,
-ahead of the rest of the step. Two knock-ons, both in `dev/plan-E12.md`:
-
-- Step 3's body sketch replaces the `scan.ef` branch that E15 left in place. That is
-  still the right change; the bullet's stated *before* signature is simply stale.
-- The planned tests for "`plot_current` on both branches" need `gates=` in their
-  fixtures now — without a declared mapping the function raises, because a current
-  row cannot be attributed to an electrode. Same reason `v_top` needs one.
-
-Two defects fixed in passing, neither previously recorded:
-
-- **`plot_image` discarded `colorbar_label` whenever `rescale_img=True`**, always
-  overwriting it with the hardcoded `"Intensity (norm.)"`. Silent: the caller
-  passed a label and got a different one, with no warning.
-- **`_AttoCubeSweep` carried a second, dead `signal_label` property** whose whole
-  body was a bare `return` (i.e. `None`), sitting in the curated-parameter section
-  ~300 lines above the real one. Later definition wins in a class body, so nothing
-  misbehaved — but any reordering would have turned every signal label into
-  `None`. Deleted.
-
-And one that had been shipped red: the `SIGNAL_LABELS` `"Reflectance"` →
-`"Reflected intensity"` correction (E12 step 1) had landed in `constants.py`
-without its test, leaving `test_contrast.py::test_spectra_type_not_mutated_by_
-supplying_a_reference` failing on `main`. Updated with a comment on why the
-wording is not the subject of that test.
 
 **E13. `remove_cosmic_rays` was reachable but not wired to a scan.**
-**[FIXED — 2026-08-05]** Added 2026-08-05. The function has existed since A1 with 18
-tests, and every caller had to spell out `processing.remove_cosmic_rays(scan.spectra)`
-and then carry the cleaned array by hand — so it reached no other correction, and
-nothing recorded that a repair had happened.
+**[FIXED — 2026-08-05]** Added 2026-08-05. The function existed with tests and nothing
+called it, so every caller spelled out `processing.remove_cosmic_rays(scan.spectra)` and
+carried the cleaned array by hand. Two faults followed: the repair arrived *after*
+`__init__` had already built the background-corrected, energy-axis and contrast arrays
+from the unrepaired counts, so it agreed with none of them; and nothing recorded that a
+repair had happened, so `__repr__` was silent and `to_hdf5` could not write it down.
 
-**Where it goes: the head of the load-time chain, not plotting.** Three separate
-reasons, each sufficient on its own.
+Fixed by a load-time `cosmic_rays=` dict at the head of the wavelength-space chain,
+adding `spectra_cr` and `cosmic_ray_mask` and reassigning nothing. Amended by **A17**,
+which mirrored the correction ladder across both spectral axes.
 
-- *Detection space.* The 3-point Laplacian `f[i-1] − 2f[i] + f[i+1]` assumes uniform
-  sample spacing. The detector axis has it; the energy axis does not, and `plotting`
-  already warns about the unequal spacing for `spectra_source="raw"`. A plot-time
-  call would have to re-enter wavelength space, clean, re-sort and re-apply the
-  Jacobian — maths in `plotting`, which the module split forbids.
-- *Consistency.* The repair has to precede the `bg_region` window mean (a spike inside
-  the window is averaged into the pedestal and then over-subtracted from every pixel
-  of that sweep), the contrast ratio (a spike in either arm biases it non-linearly,
-  and shifts which reference pixels the non-positive guard excludes), and any `fit_*`
-  call. Cleaning at plot time leaves the figure clean while `energy_contrast` and
-  `fit_scan_peak` still see the spikes: two datasets under one name.
-- *Batching.* `cross_sweep_veto` and the `PERSISTENT_FLAG_FRACTION` warning are both
-  defined over the sweep axis, and `plot_power_series` takes `sweep_step`. At plot
-  time their verdict would depend on the plot's stride — the "results must not depend
-  on how the data was batched" rule the function's own default was chosen for.
-
-The post-load `bg_region=` on `plot_power_series` is not a precedent that extends
-here: subtracting a scalar is space-agnostic and repeatable, replacing pixel values
-with local medians is neither.
-
-**Shape: one dict, and no new axis in the array namespace.** `cosmic_rays=None` opts
-in and carries the forwarded kwargs (`{}` accepts every default). Chosen over
-`remove_cosmic_rays=False` plus five `cr_*` arguments on an already 17-parameter
-`__init__` — one structural parameter absorbing a combinatorial space, as with
-`animate_panels(panels=…)`. The cost is that a mistyped key would surface as a
-`TypeError` from a function the caller never called, so the keys are validated against
-`inspect.signature(processing.remove_cosmic_rays)` — self-maintaining, and
-`spectra`/`axis` are excluded because an `axis` would transpose detection without
-changing the stored shape. Both that check and the `bg_region_nm`/`bg_region_eV`
-exclusion now run *before* the decode: an export is large enough that a typo should
-not cost the read.
-
-Treating the repair as a third independent flag would have multiplied five arrays into
-ten. It is not an alternative representation of the signal the way the Jacobian and
-the background branch are — it is a repair of the counts, so it sits *upstream* of the
-branch point instead of adding one. Net cost is two arrays and no new
-`_SPECTRA_SOURCES` key: `spectra_cr` (the repaired counts, `None` when not asked for),
-`cosmic_ray_mask` (returned so the repair can be looked at — `mean(axis=1)` localises
-a detector defect), and `cosmic_rays` (the declaration). A local `signal` feeds
-`energy_spectra`, `energy_spectra_pre_jacobian`, the background chain and the
-contrast; `spectra` is never reassigned, and the `energy_spectra_bg` sentinel compares
-against `signal` rather than `spectra` so a repair alone cannot masquerade as a
-background subtraction.
-
-*Two consequences.* HDF5 records the declaration as provenance next to
-`apply_jacobian` and does **not** replay it (G2) — the stored `spectra` is the source
-file's, so a round trip needs `cosmic_rays=` again; and `spectra_source="best"` on a
-**wavelength** axis now prefers `spectra_cr`, since it had nothing better to offer
-before and "best" showing spikes no other source shows would be the same silent
-inconsistency this entry is about.
-
-Not extended to `SingleSpectrum` (`apply_jacobian` and a background already, and 1-D
-input is supported by the function) or to `AttoCubeTRPLSweep` — a decay's sharp rise
-at `t₀` is exactly what a Laplacian flags, so that needs its own judgement, not this
-signature copied.
+Decision, rejected alternatives and consequences:
+`dev/decisions/0001-cosmic-ray-repair-at-load-time.md`.
 
 *Test:* `tests/test_loaders_cosmic_rays.py`, 14 cases. The pedestal-bias test is the
 ordering one: it plants a spike inside the background window and pins the ≈129-count
 over-subtraction it causes when the repair is not run first. `make_spectral_csv` grew
-`roi1=` / `wavelength=` overrides so a test can write spectra with real scatter — the
-MAD noise estimate has nothing to work against on the default index ramp.
+`roi1=` / `wavelength=` overrides so a test can write spectra with real scatter — the MAD
+noise estimate has nothing to work against on the default index ramp.
 
-**E14. Nested sweeps: `fast_sweep=` / `slow_sweep=`, `as_grid()`, and the spectrum
-accessors.** **[FIXED — 2026-08-06]** Added 2026-08-06. Closes **A8** and implements
-the grid API deferred since 2026-07-31 — with a different spelling from the one
-settled then. What landed, and why each part is shaped as it is.
 
-*The declaration is not a rename of `sweep=`.* The 2026-07-31 decision was
-`grid=("Scanner X", "Scanner Y")`, inner-first. Two objections retired it. The
-weaker one: the order carries the meaning and nothing at the call site states it, so
-reversing it transposes every map silently — which is the exact failure the
-declaration exists to prevent. The stronger one came out of asking what "sweep"
-already means in this package. Every existing use — `n_sweeps`, `sweep_index`,
-`sweep_mask`, `sweep_axis` (an array *of length `n_sweeps`*) — means **the flattened
-measurement point**, never an axis of a loop nest. So redefining bare `sweep=` to
-mean "the fast axis" would have made it the one place the word meant something else,
-two lines from `n_sweeps` still meaning the other thing.
+**E14. Nested sweeps were not expressible.** **[FIXED — 2026-08-06]** Added 2026-08-06.
+Closes **A8** and implements the grid API deferred since 2026-07-31, with a different
+spelling from the one settled then.
 
-That gives the split the code now has, and it is why `fast_sweep` is **not** an alias
-of `sweep`:
+A 2-D raster arrives as one flattened file and nothing in the rows states the nest, so
+the sweep axis was a silent sawtooth and any map built from it was wrong. The harder
+motivating case cannot be expressed at row level at all: both gates moved together to
+sweep the displacement field, so every gate row takes a different value at every point
+while the field they encode takes exactly `n_fast`.
 
-| Declaration | Question it answers | Cardinality |
-|---|---|---|
-| `sweep=` | which length-`n_sweeps` array labels each flat point? | one, always |
-| `fast_sweep=` / `slow_sweep=` | those points are a nest, `n_fast` inside `n_slow` | zero or two |
+Fixed by `fast_sweep=` / `slow_sweep=`, both resolving through the existing sweep
+vocabulary so a *derived* quantity can be an axis, with `as_grid()` as a view over the
+still-flat arrays and value/position accessors on top. The verification mechanism was
+later amended by **A13** — compare level indices, not raw readings.
 
-They look equivalent in a 1-D scan only because there is one loop. Keeping them
-separate cost nothing: no alias, no conflict branch, no fallout onto `sweep_label` /
-`sweep_unit`, and an additive HDF5 bump to 2.1 rather than a major one. On a nested
-scan `sweep=` is normally omitted, so `sweep_axis` is the flat index — the honest
-labelling of a raster.
+Decision, rejected alternatives and consequences:
+`dev/decisions/0004-nested-sweeps-fast-and-slow.md`.
 
-*Both axes resolve through `_resolve_sweep`.* This is what makes the motivating
-measurement expressible, and it was the argument that settled the whole design. Both
-gates moved together to sweep the displacement field at fixed density: each gate row
-then takes a different value at every one of the `n_fast × n_slow` points, so **no
-row-level reading can express the nest**, while the field they encode takes exactly
-`n_fast`. `_resolve_sweep` already accepted a `_SWEEP_TYPES` key or a raw row, so
-`fast_sweep="electric_field", slow_sweep="power"` needed no new vocabulary — only a
-keyword-only `param=` threaded through it so a bad `fast_sweep=` reports itself
-rather than naming an argument the caller never passed.
-
-Consequence worth knowing: `sweep_grid()` still detects on **raw rows only**, so on
-that measurement it reports the channels rather than the field. It is a diagnostic
-that says what to declare, the same relation `gate_mode` has to `gates=`. See also
-**A10**, which its candidate ordering suffers from.
-
-*Verification, not detection.* Counting distinct values with a span-scaled tolerance
-(`_NEST_RTOL`, because a derived axis is float-valued and may cross zero), then
-reshaping both axes to `(n_slow, n_fast)` and checking the structure directly: every
-row of the fast array equals row 0, every row of the slow array is constant, and the
-slow values are distinct. One broadcast comparison each. (Superseded in its
-mechanism by **A13** — the comparison is made on level indices rather than on the
-readings, because comparing readings held a level's scatter to a tolerance set by
-the whole axis. The structure being checked is the same.) On failure the message
-retries the *transposed* reading and, when that works, says so outright — the
-reversed declaration being the one mistake worth naming, since detection cannot.
-Coordinates come out of the same verified reshape in acquisition order, so a
-descending sweep stays descending.
-
-*Flat stays canonical; the grid is a view.* `spectra` keeps shape
-`(n_points, n_sweeps)` **whether or not a nest is declared**. Had it reshaped,
-`spectra.ndim` would depend on a constructor argument: every consumer would branch on
-`is_nested`, `n_sweeps` (defined as `spectra.shape[1]`) would silently start meaning
-`n_slow`, and both `_validate_axis_and_signals` and the HDF5 `axes = "wavelength,
-sweep"` attribute would be describing something else. `as_grid(array)` is one method
-serving all six spectra arrays and every parameter row, rather than a `*_grid`
-attribute per array.
-
-*Accessors.* `get_spectrum_at` (by value) and `get_spectrum_by_index` (by position),
-each taking `fast=` / `slow=`, with `nearest_index` underneath for composing. Naming
-both axes gives `(n_points,)`; naming one gives `(n_points, n)` with the swept
-dimension last, so a slice drops into `plot_spectral_map` and `fit_scan_peak` without
-a transpose. The rank varying with how much is specified follows numpy basic
-indexing and is stated first in the docstrings.
-
-The selectors are deliberately `int`s and `slice`s rather than fancy indexing, so
-every result is a **view**. None is C-contiguous — no column selection out of a
-row-major array can be — which the docstring says rather than claiming otherwise.
-
-*Out-of-range reporting.* A nearest-value lookup cannot fail, so asking for a
-coordinate the scan does not hold returns a real spectrum from somewhere else.
-`nearest_index` warns past half the axis's median step, naming the value asked for,
-the value used, the distance and the axis span. Silent on an exact match and on a
-request landing legitimately between two grid points, so a loop over real
-coordinates stays quiet.
-
-*`axis=` — locating a point by a quantity other than the declared one.* Added
-2026-08-06, on the case that prompted it: a 1-D field sweep driven by both gates at
-a fixed ratio, where you know the top-gate voltage you want rather than the field.
-`nearest_index(15.0, axis="top_voltage")` and `get_spectrum_at(15.0,
-axis="top_voltage")` — again through `_resolve_sweep`, so it is the fourth entry
-point onto **one** vocabulary and accepts a registry key or a raw row alike.
-
-Spelled as a parameter rather than a `get_spectrum_from_parameter` sibling: it is
-the same selection read against a different coordinate, so a third accessor would
-have duplicated the docstring, the validation and the refusals to say so.
-
-It is **flat-sweep only**, and the reason is worth keeping. On a nest, an arbitrary
-quantity does not identify a point, and *how badly* depends on the data rather than
-the call: where `V_top` varies only along the fast axis it matches `n_slow` points,
-and where a per-row common-mode offset makes it vary everywhere it matches one — so
-the return rank would be a property of how the scan was driven. Combining `axis=`
-with `fast=`/`slow=` therefore raises, pointing at `fast_sweep=` instead: with a
-fixed ratio `V_top` takes `n_fast` distinct values too and declares perfectly well,
-and where it does not, it genuinely locates nothing.
-
-*An ambiguous coordinate: warned in one place, refused in the other.* A quantity
-that is not what the sweep was ordered by need not label its points individually —
-a hysteresis loop passes the same gate voltage twice, and every quantity of a nest
-repeats. `_nearest` finds the matches; the two callers then apply different
-policies, and the split is the point:
-
-- **`nearest_index` warns**, naming the count and the indices. A single `int` is its
-  whole contract, so returning one and saying so is the best it can do.
-- **The accessors raise.** `get_spectrum_at` returns *data*, and the API already has
-  a complete answer for "several match": a declared nest addresses all of them at
-  once through `fast=` / `slow=`. Handing back one of four would not be a
-  nearest-match, it would be a silent partial answer. The message names the
-  declaration to make — reading `sweep_grid()` for the row names when it has them —
-  and `get_spectrum_by_index` for taking one deliberately.
-
-Matches are compared on the **coordinate** (`|values - found| <= _axis_atol`) rather
-than on the distance, so a request landing midway between two *distinct* points is
-not a tie; that case is an ordinary between-points lookup, which the half-step rule
-above already covers.
-
-*`source=`.* Takes `plotting._resolve_spectra`'s vocabulary rather than forking it,
-which meant moving that resolver — a loader cannot import `plotting`. It went to
-`loaders.py`, **not** `constants.py` as first planned: `_SPECTRA_SOURCES` maps names
-to *attribute names on the loader classes*, so it belongs with them, whereas
-`constants.py` holds physics and controlled vocabularies. It stays duck-typed, since
-`SingleSpectrum` mirrors a subset of those attributes.
-
-*Not built:* map plotting on top of `as_grid`, `AttoCubeTRPLSweep.get_decay_at` (the
-base machinery is inherited; the `source=` vocabulary is spectral-specific and no
-nested TRPL sweep has been seen), and snake/bidirectional rasters — a reversing row
-fails verification loudly, which is the right failure until the lab confirms whether
-the instrument writes them.
-
-*Test:* `tests/test_loaders_nesting.py`, 52 cases. `make_spectral_csv` now derives
-the sweep count from the row length instead of the module-level `N_SWEEPS`, so a
-raster fixture is a longer `params=` dict rather than a second builder. The raster
-fixtures are **synthetic**: the committed reflectance export turns out to be the
-first 50 points of a 41 × 51 scan — one complete X row plus 9 — so the real file
-exercises the aborted-raster refusal and nothing else. It has a test of its own for
-exactly that.
+*Test:* `tests/test_loaders_nesting.py`, 52 cases. The raster fixtures are **synthetic**:
+the committed reflectance export turns out to be the first 50 points of a 41 × 51 scan -
+one complete X row plus 9 — so the real file exercises the aborted-raster refusal and
+nothing else. It has a test of its own for exactly that.
 
 ---
 
+
 **E15. Electrode currents were channel-named in a registry of role names.**
-**[FIXED — 2026-08-07]**
+**[FIXED — 2026-08-07]** `_CURATED` held `"Ich1": ("I_A", …)` and
+`"Ich2": ("I_B", …)` — three faults in one entry: the only camel-case keys in a
+registry of snake_case attribute names; a `1`/`2` indexing that the file (`I_A` / `I_B`)
+does not use; and a *channel* named in the one place everything else names a *role*.
 
-*Symptom.* `_CURATED` held `"Ich1": ("I_A", …)` and `"Ich2": ("I_B", …)`. Three
-faults in one entry: the only camel-case keys in a registry of snake_case attribute
-names; a `1`/`2` indexing the file (`I_A` / `I_B`) does not use; and a *channel*
-named in the one place everything else names a *role*.
+It mattered because `V_A` and `I_A` are one source-meter terminal, so `I_A` belongs to
+whichever electrode channel A reached — which only `gates=` records. Reaching the bottom
+gate's leakage therefore meant knowing both that `1↔A` and that `A↔bottom`, and only
+the second was written down anywhere. The two currents also got one blanket description
+("leakage currents") when on a contacted device they are two different quantities -
+leakage across a dielectric on a gate, transport into the flake on the channel contact.
+`examples/old_example_stark_shift.ipynb` shows the cost directly: `ich2_label="I_A"`,
+`ich1_label="I_B"` — label overrides used to repair a mapping the index names got wrong.
 
-*Why it mattered.* Channels A and B are source-meter channels — `V_A` is the bias
-applied and `I_A` the current sourced at the **same terminal**. So `I_A` belongs to
-whichever electrode channel A reached, which is exactly what `gates=` records and
-nothing else does. Channel-named keys hid that: the two currents got one blanket
-description ("leakage currents", `README.md`) when on a contacted device they are
-two different quantities — leakage across a dielectric on a gate, transport into the
-flake on the channel contact. Reaching the bottom gate's leakage meant knowing both
-that `1↔A` and that `A↔bottom`, and only the second was written down anywhere.
-`examples/old_example_stark_shift.ipynb` already shows the cost: `ich2_label="I_A"`,
-`ich1_label="I_B"`, someone using label overrides to repair a mapping the index
-names got wrong.
+Fixed by `i_top` / `i_bot` / `i_channel`, resolved from `gates=`. `Ich1` / `Ich2` deleted,
+along with the `ich1_label` / `ich2_label` shims that could no longer reach anything.
 
-*Fix.* `i_top` / `i_bot` / `i_channel`, resolved from `gates=` exactly as `v_top` /
-`v_bot` are, via a new `_CHANNEL_SIBLING_CURRENT = {"V_A": "I_A", "V_B": "I_B"}`.
-`Ich1` / `Ich2` deleted, along with the `ich1_label` / `ich2_label` shim parameters
-that could no longer reach anything.
-
-*Rejected: `gates={"bottom": "A"}`.* The tempting spelling, and the one first
-proposed. Against it: *"row `V_A` and row `I_A` are the same terminal"* is a fact
-about the **export format** — fixed, verified across PL/R/TRPL — whereas *"channel A
-reached the bottom gate"* is a fact about the **session**. Different lifetimes and
-different sources of truth, so they belong in different places; fusing them would
-mean a row rename in a future acquisition version reaches into every notebook.
-Channel letters would also have moved `gates` into channel-space while `sweep=`,
-`scan[...]`, `varying_parameters()` and `sweep_grid()` all stay in row-space —
-including the undeclared-gates error, which prints candidate *rows* and would then
-have asked for a *letter*. And `gates` currently accepts any row, which letters
-could not express. Accepted cost of the table instead: `{"bottom": "V_A"}` implies
-`I_A` without saying so, which the `gates` docstring now states.
-
-*Rejected: keeping a channel-level `i_a` / `i_b` pair.* Which electrode `I_A` flows
-into is precisely the undeclared fact, so the currents refuse without `gates=` just
-as the voltages do (E7b). `scan["I_A"]` still works with no declaration. Also
-considered and dropped: a bare rename to `i_a` / `i_b`, which differs from the row
-label `I_A` **only by case** — too weak a place to put the boundary between the two
-vocabularies, and the confusion that opened this thread was a row label passed where
-an attribute name was wanted.
-
-*Two asymmetries that are deliberate.* `_ROLE_CURRENT_CURATED` covers all three
-roles where `_GATE_ROLE_CURATED` covers two — a current flows at the channel contact
-just as at a gate; only the *field* is restricted to the two gates. And a role
-declared `None` gives `v_channel` zeros but makes `i_channel` **raise**: grounding an
-electrode is what holds its potential at zero, but it says nothing about the current,
-which still flows and simply was not recorded. Returning zeros there would fabricate
-a measurement.
-
-*Consequence — `plot_current` now needs `gates=`.* It plots whichever roles the scan
-declared and have a recorded current, so a dual-gated device shows top+bottom and a
-contacted one bottom+channel. Its `color_ich1` / `color_ich2` parameters went with
-the rename — the roles present vary, so two enumerated colours no longer map onto
-the traces — and it returns its lines instead, per *parameters earn their place*.
-`color_power` is untouched and still owed to E11.
+Decision, rejected alternatives and consequences:
+`dev/decisions/0005-electrode-currents-are-role-named.md`.
 
 *Found in passing, not fixed:* `curated_scales` **replaces** a scale rather than
 multiplying it, so flipping a current's polarity is `{"i_bot": -1e9}` and
-`{"i_bot": -1.0}` silently returns amps. Harmless for the voltages, whose scale is
-`1.0`. Caught by a test written the wrong way round first.
+`{"i_bot": -1.0}` silently returns amps. Harmless for the voltages, whose scale is `1.0`.
+Caught by a test written the wrong way round first.
 
 *Test:* `tests/test_loaders.py` — currents transpose with the wiring, the channel
-contact's own row, the grounded-electrode raise, the non-source-meter-row raise, and
-the scale override. 344 passing.
+contact's own row, the grounded-electrode raise, the non-source-meter-row raise, and the
+scale override.
 
 ---
 
-## Settled design decisions — the 2026-07-30 rewrite
 
-Migrated here 2026-08-04 from the *Fixed — don't re-report* block of
-`.claude/CLAUDE.md`, which kept the reasoning in context on every session.  The
-standing **don't** for each of these stays there as a one-line rule; this section is
-the argument behind it, for whoever wants to reopen the question.
+## Settled design decisions
 
-None of these carry a finding number: they are work that *closed* findings (**E1**,
-**A6**, most of **E9**, part of **E7b**) rather than findings themselves.
+Every decision that closed a finding in this file now has its own append-only record in
+`dev/decisions/`, carrying the alternatives that were rejected and why. The 2026-07-30
+rewrite is `0006`-`0009`; the gate work is `0002`, `0003` and `0005`; nesting is `0004`;
+the cosmic-ray wiring is `0001`. Index and conventions: `dev/decisions/README.md`.
 
-**G1. `AttoCubePLVabScan` → `AttoCubeSpectralSweep`.** Renamed and rewritten. The old
-name survives as a deprecated subclass emitting `FutureWarning` — **not**
-`DeprecationWarning`, which Python filters out by default outside `__main__`, so a
-library raising one warns nobody. What changed:
+None of those records carry a finding number of their own: they are work that *closed*
+findings (**E1**, **A6**, most of **E9**, part of **E7b**) rather than findings
+themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md` under
+*Do not re-propose*.
 
-- `spectra_type=` is **required, keyword-only, no default**. It is written into
-  exported metadata and trusted thereafter, so a default would let a guess outlive
-  the session. Downstream code uses `scan.signal_label` rather than hardcoding "PL".
-- One `sweep=` argument takes a `_SWEEP_TYPES` key *or* any raw CSV row label.
-  Undeclared means the sweep axis is the sweep **index**, never an auto-detected
-  parameter: mislabelling an axis is worse than not labelling one, and `V_A`+`V_B`
-  both varying is ambiguous between a field sweep and independent gating.
-  `varying_parameters()` and `gate_mode` return the evidence instead, which is the
-  *return the evidence* principle rather than a guess.
-- `gate_axis` / `gate_axis_label` kept as aliases of `sweep_axis` /
-  `sweep_axis_label` so existing plotting keeps working. They cannot be deleted
-  until `plot_pl_map_Vab_scan` is updated — see **E12**.
-- **E1 fixed: no curated row is mandatory.** A file missing `Scanner X` loads; the
-  property raises only if accessed. The one remaining fail-fast is the row the
-  *declared* `sweep` needs, so the requirement follows the declaration.
-- The eight `*_label` / `power_scale` arguments collapsed into two dicts,
-  `curated_labels=` / `curated_scales=`.
-- Both ROIs always loaded (`spectra_roi1` / `spectra_roi2`); `roi=` only chooses
-  what `spectra` points at.
-- `SPECTROSCOPY_TYPES` **moved** from `reference/loader.py` to `constants.py` (with
-  `"RC"` added) and is re-exported from the old location. One vocabulary for the
-  package — a second copy is the bug, per *reuse before adding*.
-
-*Tests:* `tests/test_loaders.py` (against the new class, plus shim tests) and
-`tests/test_hdf5_roundtrip.py`.
-
-**G2. HDF5 storage (`hdf5.py`).** `scan.to_hdf5(path)`; the loader accepts
-`.h5`/`.hdf5` and dispatches on suffix, so **one class serves both formats** — a
-second loader class for HDF5 would double the API for one file format. The file
-stores raw signal arrays (both ROIs for a spectral sweep), every parameter row
-verbatim, and the measurement metadata.
-
-It does **not** store the energy axis, the energy-space spectra, or the sweep axis:
-all are derivable, and freezing them would put one session's corrections into the
-archive. Corrections — `apply_jacobian`, `bg_region_nm`/`_ns`, and the
-`bg_spectrum` / `reference` arrays — are recorded as provenance in
-`scan.source_metadata` and are **never replayed on read**; loading is not deciding.
-The auxiliary spectra are stored as *arrays, not paths*, so a contrast can still be
-rebuilt from the archive alone once the original CSVs have moved.
-
-`FORMAT_VERSION` 1.1 added the temporal axis kind (additive, so 1.0 files still
-read). Sizes from the committed examples: a 4.59 MB PL CSV writes as 0.14 MB; the
-4-file 11.57 MB TRPL sweep as 0.069 MB.
-
-**G3. `AttoCubeTRPLSweep`.** Sibling of `AttoCubeSpectralSweep` over a shared private
-base `_AttoCubeSweep`. Accepts one file *or* a directory.
-
-Not one class with a mode flag: a single decay is just `n_sweeps == 1`, but
-`energy = hc/t` is meaningless and divides by zero at `t = 0`, so a mode flag would
-leave roughly a third of the public API conditionally meaningful. It has no
-`spectra` attribute, so a TRPL sweep handed to a spectral plot raises instead of
-drawing time as wavelength — see **E12** for what that costs on the plotting side,
-which is unwritten rather than broken.
-
-**G4. The TRPL metadata companion is evidence, not the source.** Parameters come from
-each data file's own 57-row snapshot, contemporaneous with its decay, so a sweep
-loads without the companion at all. The companion supplies `n_declared_sweeps` (which
-makes an aborted sweep visible) and its table is exposed as `declared_parameters`.
-
-Its values are **not** cross-checked row by row. It is written seconds after the last
-decay, so genuinely drifting channels disagree — the leakage currents and
-`Fianium_Select_A6` do, while the swept gates agree to seven figures. Nothing in the
-file says which channels are stable, so a value check would fire on every real sweep,
-which is how warnings get ignored. Cf. **A6**, where the same file's over-allocation
-*is* keyed on, because there the sentinel is exact.
-
-**G5. Jacobian ordering is pinned by a test.** Added 2026-08-04. Background must come
-off in wavelength space *before* the `λ²/hc` multiply, because a flat pedestal `B`
-becomes `B·λ²/hc` — curved, not flat — in energy space. The loader already did this;
-what was missing was any test that would fail if the two were swapped, and a warning
-when the Jacobian is requested with no background at all.
-
-`tests/test_jacobian_background.py`, 15 cases, covers both mechanisms
-(`bg_region_nm`/`_eV` and `bg_spectrum`) on `AttoCubeSpectralSweep` plus the warning
-on both classes that expose `apply_jacobian`. The two ordering cases were confirmed
-to fail against a deliberately reversed loader (Jacobian first, background after)
-before being kept; each also asserts that the right and wrong orders differ, so the
-comparison cannot be satisfied by both. This retired the *Jacobian* paragraph from
-CLAUDE.md's physics conventions, one sentence of which had already gone stale —
-it claimed the docstrings and README still documented a `True` default, which they
-no longer did.
-
----
 
 ## Suggested order
 
-1. **A5**, **A9** — the remaining live bugs, both small and independently testable.
+1. **A5** — the last live bug in section A, and now best taken with **E11**, which
+   rewrites `plot_diffusion_cloud`'s signature and return anyway; fixing it alone means
+   two breaking changes to one function. It also wants the repo's first `diffusion`
+   tests, of which there are currently none.
    (A1 fixed 2026-07-28; A2, A3 and A6 fixed 2026-07-30; A8 fixed 2026-08-06; A10 and
-   A7 fixed 2026-08-07; A4 deferred.) A9 is now the whole of the file-discovery pass
-   and wants **B1** with it, B1 second. **A11** (warning locations) and **A12**
-   (duplicate iteration indices) were both opened by the A7 work; A12 is fixed,
-   A11 is still owed and is its own deliberate pass over 15 sites.
+   A7 fixed 2026-08-07; A9 and B1 fixed 2026-08-10; A4 deferred.) **A11** (warning
+   locations) and **A12** (duplicate iteration indices) were both opened by the A7
+   work; A12 is fixed, A11 is still owed and is its own deliberate pass over 15 sites.
 2. **C1–C3** — the doc corrections, since they actively mislead.
-3. **B1–B4, D1–D9** — dead parameters and duplication; mechanical, low risk.
+3. **B2–B4, D1–D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
+   2026-08-10, and was not mechanical: the sketched fix would have introduced a second
+   instance of A5.)
 4. **E2, E3, E5** — the remaining design calls, one at a time.
 5. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
    because it is the only breaking change on the list and touches `examples/`.

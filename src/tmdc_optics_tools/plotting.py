@@ -26,10 +26,10 @@ from skimage.exposure import rescale_intensity
 from . import processing
 from . import diffusion as _diffusion
 from .constants import _x_axis_name_unit
-# The spectra-source registry names attributes on the loader classes, so it lives
-# with them; imported here under its own name because this is where callers of
-# ``spectra_source=`` are.
-from .loaders import _SPECTRA_SOURCES, _resolve_spectra
+# The spectra- and frame-source registries name attributes on the loader classes,
+# so they live with them; the resolvers are imported here because this is where
+# callers of ``spectra_source=`` and ``frame_source=`` are.
+from .loaders import _SPECTRA_SOURCES, _resolve_spectra, _resolve_frame
 
 # Optional colormap packages (pip install "tmdc_optics_tools[colormaps]").
 # Imported for their side effect alone: each registers its colormaps into
@@ -883,7 +883,8 @@ def plot_real_space_PL_map(
     idx    : int = 0,
     xlabel : str = "x-axis (pixels)",
     ylabel : str = "y-axis (pixels)",
-    cmap   : ColormapLike = "magma"
+    cmap   : ColormapLike = "magma",
+    frame_source : str = "best",
 ) -> tuple:
     """
     Plot a single real-space PL map from an
@@ -899,6 +900,11 @@ def plot_real_space_PL_map(
         Axis labels.
     cmap : str, Colormap, or sequence of colours
         Passed to :func:`get_cmap`.
+    frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+        Which version of the frame to draw.  ``"best"`` is background-corrected
+        when the scan was loaded with a *bg_region* and raw otherwise; ``"raw"``
+        is always the file's counts; ``"bg"`` requires a *bg_region* and raises
+        without one.
 
     Returns
     -------
@@ -909,7 +915,7 @@ def plot_real_space_PL_map(
     else:
         fig = ax.get_figure()
 
-    ax.imshow(scan.load_frame(idx), cmap=get_cmap(cmap))
+    ax.imshow(_resolve_frame(scan, idx, frame_source), cmap=get_cmap(cmap))
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     return fig, ax
@@ -1043,6 +1049,7 @@ def animate_real_space_PL_map(
     ylabel           : str  = "y-axis (um)",
     laser_annotation : bool = True,
     cmap             : ColormapLike = "magma",
+    frame_source     : str  = "best",
 ) -> tuple:
     """
     Animate a sequence of real-space PL maps from an
@@ -1079,6 +1086,11 @@ def animate_real_space_PL_map(
         Overlay the laser spot circle if ``scan.laser_ref`` is set.
     cmap : str, Colormap, or sequence of colours
         Passed to :func:`get_cmap`.
+    frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+        Which version of each frame to draw.  ``"best"`` is background-corrected
+        when the scan was loaded with a *bg_region* and raw otherwise, so
+        animating the same scan twice as ``"raw"`` and ``"bg"`` shows what the
+        subtraction removed.
 
     Returns
     -------
@@ -1104,8 +1116,11 @@ def animate_real_space_PL_map(
     ...     title     = "Power-dependent PL",
     ... )
     """
-    fig, ax = plot_real_space_PL_map(scan, ax, idx=0, xlabel=xlabel, ylabel=ylabel, cmap=(cmap))
-    im = ax.images[0] if ax.images else ax.imshow(scan.load_frame(0), cmap=get_cmap(cmap))
+    fig, ax = plot_real_space_PL_map(scan, ax, idx=0, xlabel=xlabel, ylabel=ylabel,
+                                     cmap=(cmap), frame_source=frame_source)
+    im = ax.images[0] if ax.images else ax.imshow(
+        _resolve_frame(scan, 0, frame_source), cmap=get_cmap(cmap)
+    )
 
     # Static overall title (suptitle so it doesn't clash with the per-frame subtitle)
     if title is not None:
@@ -1121,7 +1136,7 @@ def animate_real_space_PL_map(
         _draw_laser_circle(ax, scan.laser_ref, ls="--")
 
     def update(frame):
-        im.set_data(scan.load_frame(frame))
+        im.set_data(_resolve_frame(scan, frame, frame_source))
         updated = [im]
         if var_array is not None and frame_title is not None:
             frame_title.set_text(
@@ -1300,6 +1315,9 @@ class ImageSequencePanel(AnimationPanel):
         Colour of the halo stroke.
     xlabel, ylabel : str
         Axis labels forwarded to :func:`plot_real_space_PL_map`.
+    frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+        Which version of each frame to draw.  ``"best"`` is background-corrected
+        when the scan was loaded with a *bg_region* and raw otherwise.
     """
 
     def __init__(
@@ -1315,10 +1333,12 @@ class ImageSequencePanel(AnimationPanel):
         laser_halo_color : str   = "white",
         xlabel           : str   = "x-axis (pixels)",
         ylabel           : str   = "y-axis (pixels)",
+        frame_source     : str   = "best",
     ):
         self.scan             = scan
         self.title            = title
         self.cmap             = cmap
+        self.frame_source     = frame_source
         self.laser_annotation = laser_annotation
         self.laser_color      = laser_color
         self.laser_linewidth  = laser_linewidth
@@ -1337,6 +1357,7 @@ class ImageSequencePanel(AnimationPanel):
         plot_real_space_PL_map(
             self.scan, ax=ax, idx=0, cmap=self.cmap,
             xlabel=self.xlabel, ylabel=self.ylabel,
+            frame_source=self.frame_source,
         )
         ax.set_title(self.title)
         self._im = ax.images[0]
@@ -1361,7 +1382,7 @@ class ImageSequencePanel(AnimationPanel):
             ax.add_patch(circle)
 
     def update(self, frame: int) -> tuple:
-        self._im.set_data(self.scan.load_frame(frame))
+        self._im.set_data(_resolve_frame(self.scan, frame, self.frame_source))
         return (self._im,)
 
 

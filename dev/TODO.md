@@ -42,9 +42,14 @@
       between them (4 digits in `position-scan/PL`, 6 in `position-scan/wl`), so it
       was never something to rely on. The helper also now warns when two files claim
       the same index (A12) — two acquisitions in one directory, which needs no
-      malformed file to happen. **A9** (`_is_image_csv` takes a two-row spectrum for
-      an image) and **B1** (`bg_region` ignored in `load_frame`) are the rest of this
-      class's pass and are still open, in that order.
+      malformed file to happen. ~~**A9** (`_is_image_csv` takes a two-row spectrum for
+      an image)~~ **fixed 2026-08-10** — `_classify_csv` replaces it, requires three
+      rows for a frame, and defers a headed file to `_read_block_layout` so a TRPL
+      export is named `temporal` rather than `spectral`. ~~**B1** (`bg_region` ignored
+      in `load_frame`)~~ **fixed 2026-08-10** — `load_frame` still returns the file's
+      counts and `load_frame_bg` carries the correction, so `diffusion` keeps
+      subtracting exactly once; the viewers pick with
+      `frame_source={"best","raw","bg"}`. That completes this class's pass.
 - Position in scans (x,y).
     - ~~for x (..) for y (...) can be flipped to for y (...) for x (..)~~ **settled
       2026-07-31, built 2026-08-06 (E14).** The flip is settled *by statement*, not

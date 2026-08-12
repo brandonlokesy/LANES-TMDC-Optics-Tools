@@ -8,7 +8,7 @@ curated attributes, and the deprecated ``AttoCubePLVabScan`` shim.
 
 The fixture CSV is written from the same reading of the export layout as the
 parser, so it cannot catch a misunderstanding shared by both — see E9 in
-``dev/audit-2026-07.md``.  It does pin the decoding *contract*.
+``dev/defects.md``.  It does pin the decoding *contract*.
 """
 
 import warnings

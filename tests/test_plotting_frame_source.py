@@ -105,7 +105,7 @@ def test_panel_update_honours_its_frame_source(tmp_path):
     scan  = _scan(tmp_path, bg_region=BG_REGION)
     panel = plotting.ImageSequencePanel(scan, frame_source="raw")
     _, ax = plt.subplots()
-    panel.init_artists(ax, panel.n_frames)
+    panel.init_artists(ax, range(panel.n_frames))
 
     assert np.allclose(_drawn(ax).max(), SIGNAL_FILL)      # frame 0, via init
     panel.update(2)
@@ -119,7 +119,7 @@ def test_panel_defaults_to_the_corrected_frame(tmp_path):
     scan  = _scan(tmp_path, bg_region=BG_REGION)
     panel = plotting.ImageSequencePanel(scan)
     _, ax = plt.subplots()
-    panel.init_artists(ax, panel.n_frames)
+    panel.init_artists(ax, range(panel.n_frames))
     panel.update(1)
 
     assert np.allclose(_drawn(ax).max(), SIGNAL_FILL + 1 - BG_MEDIAN)

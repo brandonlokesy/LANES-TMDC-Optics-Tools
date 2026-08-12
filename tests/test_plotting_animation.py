@@ -14,6 +14,8 @@ index it is handed, which is what makes "did it animate the frames it said it wo
 an assertion rather than an inspection.
 """
 
+import warnings
+
 import matplotlib
 matplotlib.use("Agg", force=True)      # headless: render without a display
 
@@ -53,7 +55,7 @@ class _ProbePanel(plotting.AnimationPanel):
 
     ``seen`` is the frame index passed to every ``update`` call, in order, which is how
     the tests below check *which* frames were animated rather than merely how many.
-    ``init_frames`` records the frame count handed to ``init_artists``.
+    ``init_frames`` records the frame sequence handed to ``init_artists``.
     """
 
     def __init__(self, n_frames=4, title="", label=None, top_axis=False):
@@ -69,8 +71,8 @@ class _ProbePanel(plotting.AnimationPanel):
     def n_frames(self) -> int:
         return self._n_frames
 
-    def init_artists(self, ax, n_frames: int) -> None:
-        self.init_frames = n_frames
+    def init_artists(self, ax, frames) -> None:
+        self.init_frames = list(frames)
         x = np.linspace(1.5, 2.5, 32)
         (self._line,) = ax.plot(x, np.sin(x))
         ax.set_xlabel("Energy (eV)")
@@ -110,8 +112,8 @@ class _LateLabelPanel(_ProbePanel):
         super().__init__(**kwargs)
         self._ready = False
 
-    def init_artists(self, ax, n_frames: int) -> None:
-        super().init_artists(ax, n_frames)
+    def init_artists(self, ax, frames) -> None:
+        super().init_artists(ax, frames)
         self._ready = True
 
     def frame_label(self, frame: int):
@@ -161,25 +163,62 @@ def test_no_panels_is_refused():
         plotting.animate_panels([])
 
 
-def test_frame_count_is_the_minimum_across_panels():
-    """
-    The shortest panel governs. This is the behaviour the AttoCube's extra white-light
-    frame currently lands on: a longer sequence is silently truncated to the shorter.
-    """
-    short, long_ = _ProbePanel(n_frames=4), _ProbePanel(n_frames=10)
-    fig, anim = plotting.animate_panels([short, long_])
+def test_every_frame_is_animated_by_default():
+    panels = [_ProbePanel(n_frames=4), _ProbePanel(n_frames=4)]
+    fig, anim = plotting.animate_panels(panels)
 
-    assert short.init_frames == 4
-    assert long_.init_frames == 4
+    assert all(p.init_frames == [0, 1, 2, 3] for p in panels)
     assert list(anim.new_frame_seq()) == [0, 1, 2, 3]
 
 
-def test_an_explicit_frame_count_truncates():
-    panel = _ProbePanel(n_frames=10)
-    fig, anim = plotting.animate_panels([panel], n_frames=3)
+def test_panels_that_disagree_on_frame_count_are_refused():
+    """
+    The old behaviour took the minimum and said nothing, so a figure built from a scan
+    and an image sequence that do not correspond rendered happily and looked right.
+    """
+    panels = [_ProbePanel(n_frames=4), _ProbePanel(n_frames=10)]
+    with pytest.raises(ValueError, match="disagree on how many frames"):
+        plotting.animate_panels(panels)
 
-    assert panel.init_frames == 3
-    assert list(anim.new_frame_seq()) == [0, 1, 2]
+
+def test_the_refusal_names_the_counts():
+    """A message that does not say which panel is which sends you back to the data."""
+    panels = [_ProbePanel(n_frames=4), _ProbePanel(n_frames=10)]
+    with pytest.raises(ValueError) as excinfo:
+        plotting.animate_panels(panels)
+
+    message = str(excinfo.value)
+    assert "has 4" in message and "has 10" in message
+    assert "white-light" in message      # names the usual cause of an off-by-one
+
+
+def test_an_explicit_selection_allows_panels_of_differing_length():
+    """
+    Refusing is about the *default*, where the engine would have to pick for you.
+    Naming the frames yourself removes the guess, so long as every index is valid
+    for every panel — which is how the white-light off-by-one gets handled upstream.
+    """
+    short, long_ = _ProbePanel(n_frames=4), _ProbePanel(n_frames=10)
+    fig, anim = plotting.animate_panels([short, long_], frames=range(4))
+
+    assert short.init_frames == [0, 1, 2, 3]
+    assert long_.init_frames == [0, 1, 2, 3]
+
+
+def test_a_window_selects_its_own_frames():
+    panel = _ProbePanel(n_frames=10)
+    fig, anim = plotting.animate_panels([panel], frames=range(4, 8))
+
+    assert panel.init_frames == [4, 5, 6, 7]
+    assert list(anim.new_frame_seq()) == [4, 5, 6, 7]
+
+
+def test_a_stride_is_just_another_selection():
+    """One parameter covers a window, a stride and a single frame."""
+    panel = _ProbePanel(n_frames=10)
+    fig, anim = plotting.animate_panels([panel], frames=range(0, 10, 3))
+
+    assert panel.init_frames == [0, 3, 6, 9]
 
 
 def test_every_frame_is_animated_in_order(tmp_path):
@@ -203,6 +242,165 @@ def test_panels_advance_in_lock_step(tmp_path):
     assert a.seen == b.seen
 
 
+def test_update_receives_the_frames_own_index(tmp_path):
+    """
+    The whole reason the engine passes native indices: a panel reads its data at the
+    index it is handed, with no window offset to carry. Getting this wrong is silent —
+    the animation plays real frames while the title names different ones — so it is
+    checked through an actual render rather than by inspecting the setup.
+    """
+    panel = _ProbePanel(n_frames=10)
+    fig, anim = plotting.animate_panels([panel], frames=range(6, 9))
+    _render(fig, anim, tmp_path)
+
+    assert _advanced_through(panel.seen) == [6, 7, 8]
+
+
+def test_a_single_frame_selection_animates_one_frame(tmp_path):
+    panel = _ProbePanel(n_frames=10)
+    fig, anim = plotting.animate_panels([panel], frames=[7])
+    _render(fig, anim, tmp_path)
+
+    assert panel.init_frames == [7]
+    assert set(panel.seen) == {7}
+
+
+# ---------------------------------------------------------------------------
+# Refusing a selection that cannot mean what it says
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_selection_is_refused():
+    with pytest.raises(ValueError, match="at least one frame"):
+        plotting.animate_panels([_ProbePanel(n_frames=4)], frames=[])
+
+
+def test_a_frame_past_the_end_is_refused():
+    """Otherwise this fails inside a writer, mid-render, naming no panel."""
+    with pytest.raises(ValueError, match="but the panels have 4 frames"):
+        plotting.animate_panels([_ProbePanel(n_frames=4)], frames=range(2, 6))
+
+
+def test_a_fractional_frame_is_refused():
+    with pytest.raises(TypeError, match="whole frame indices"):
+        plotting.animate_panels([_ProbePanel(n_frames=4)], frames=[1.5])
+
+
+def test_a_negative_frame_is_refused():
+    """
+    Negative indices would work by accident on some panels and silently reorder the
+    animation when mixed with positives, so they are refused with the idiom instead.
+    """
+    with pytest.raises(ValueError, match="counted from 0"):
+        plotting.animate_panels([_ProbePanel(n_frames=4)], frames=[-1])
+
+
+def test_a_bare_count_is_refused():
+    """
+    ``n_frames=`` used to take a count and sat in this position. A stale positional
+    call must not be read as a frame selection.
+    """
+    with pytest.raises(TypeError):
+        plotting.animate_panels([_ProbePanel(n_frames=4)], 3)
+    with pytest.raises(TypeError):
+        plotting.animate_panels([_ProbePanel(n_frames=4)], n_frames=3)
+    with pytest.raises(TypeError, match="sequence of frame indices"):
+        plotting.animate_panels([_ProbePanel(n_frames=4)], frames=3)
+
+
+# ---------------------------------------------------------------------------
+# The AttoCube's trailing white-light frame
+# ---------------------------------------------------------------------------
+#
+# The export writes one more white-light frame than PL frames; the last one has no
+# PL frame to pair with. animate_panels cannot fix this — it sees a row of
+# ImageSequencePanels and cannot tell which is the white light — so the rule lives in
+# animate_wl_pl_spectra, where the argument is named `wl`. These tests build real
+# directories because AttoCubePLScanRealSpace is type-checked, not duck-typed.
+
+
+def _image_dir(root, prefix, n_frames):
+    """A directory of numeric-grid frame CSVs, named the way the exporter names them."""
+    root.mkdir(parents=True, exist_ok=True)
+    for i in range(n_frames):
+        np.savetxt(root / f"{prefix}iter_{i}.csv",
+                   np.full(SHAPE, float(i)), delimiter=",")
+    return root
+
+
+def test_one_extra_white_light_frame_is_dropped_with_a_warning(tmp_path):
+    wl = _image_dir(tmp_path / "wl", "wl_", 5)     # N + 1
+    pl = _image_dir(tmp_path / "pl", "pl_", 4)     # N
+
+    with pytest.warns(UserWarning, match=r"takes 4 images out of a possible 5"):
+        fig, anim = plotting.animate_wl_pl_spectra(
+            wl=(str(wl), "wl_"), pl=(str(pl), "pl_"),
+        )
+
+    assert list(anim.new_frame_seq()) == [0, 1, 2, 3]
+
+
+def test_the_warning_names_the_export_quirk(tmp_path):
+    """A bare count would read as a bug in the data rather than a known export habit."""
+    wl = _image_dir(tmp_path / "wl", "wl_", 5)
+    pl = _image_dir(tmp_path / "pl", "pl_", 4)
+
+    with pytest.warns(UserWarning) as record:
+        plotting.animate_wl_pl_spectra(wl=(str(wl), "wl_"), pl=(str(pl), "pl_"))
+
+    assert any("white-light" in str(w.message) for w in record)
+
+
+def test_a_larger_mismatch_is_refused_not_trimmed(tmp_path):
+    """
+    Only *exactly one* extra frame is the documented quirk. Two is something else, and
+    quietly dropping both would hide whatever it is.
+    """
+    wl = _image_dir(tmp_path / "wl", "wl_", 6)     # N + 2
+    pl = _image_dir(tmp_path / "pl", "pl_", 4)
+
+    with pytest.raises(ValueError, match="disagree on how many frames"):
+        plotting.animate_wl_pl_spectra(wl=(str(wl), "wl_"), pl=(str(pl), "pl_"))
+
+
+def test_fewer_white_light_frames_than_pl_is_refused(tmp_path):
+    """The quirk is one-directional; the other way round is not it."""
+    wl = _image_dir(tmp_path / "wl", "wl_", 3)
+    pl = _image_dir(tmp_path / "pl", "pl_", 4)
+
+    with pytest.raises(ValueError, match="disagree on how many frames"):
+        plotting.animate_wl_pl_spectra(wl=(str(wl), "wl_"), pl=(str(pl), "pl_"))
+
+
+def test_matching_counts_animate_without_a_warning(tmp_path):
+    wl = _image_dir(tmp_path / "wl", "wl_", 4)
+    pl = _image_dir(tmp_path / "pl", "pl_", 4)
+
+    # Recorded rather than escalated to an error: turning every UserWarning into an
+    # exception also catches matplotlib's unrelated "deleted without rendering" one,
+    # which is raised from __del__ and so surfaces as an unraisable-exception warning
+    # attributed to whichever test happens to trigger collection.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fig, anim = plotting.animate_wl_pl_spectra(
+            wl=(str(wl), "wl_"), pl=(str(pl), "pl_"),
+        )
+
+    assert not [w for w in caught if "out of a possible" in str(w.message)]
+    assert list(anim.new_frame_seq()) == [0, 1, 2, 3]
+
+
+def test_an_explicit_selection_overrides_the_trim(tmp_path):
+    """The rule is a default, not a policy: naming frames yourself wins."""
+    wl = _image_dir(tmp_path / "wl", "wl_", 5)
+    pl = _image_dir(tmp_path / "pl", "pl_", 4)
+
+    fig, anim = plotting.animate_wl_pl_spectra(
+        wl=(str(wl), "wl_"), pl=(str(pl), "pl_"), frames=range(2),
+    )
+    assert list(anim.new_frame_seq()) == [0, 1]
+
+
 # ---------------------------------------------------------------------------
 # The shared title
 # ---------------------------------------------------------------------------
@@ -218,6 +416,26 @@ def test_the_frame_counter_format_is_overridable():
         [_ProbePanel(n_frames=4)], frame_count_fmt="{frame} of {n_frames}",
     )
     assert _shared_title(fig).get_text() == "0 of 4"
+
+
+def test_the_counter_names_the_frames_index_in_the_scan():
+    """
+    A windowed animation captions its frames with the indices they have in the scan,
+    so a still lifted from one can be traced back to a file, and two clips of the same
+    scan are not captioned identically.
+    """
+    fig, anim = plotting.animate_panels(
+        [_ProbePanel(n_frames=100)], frames=range(20, 24),
+    )
+    assert _shared_title(fig).get_text() == "Frame 20/100"
+
+
+def test_the_counter_can_report_position_within_the_selection():
+    fig, anim = plotting.animate_panels(
+        [_ProbePanel(n_frames=100)], frames=range(20, 24),
+        frame_count_fmt="{position}/{n_shown}",
+    )
+    assert _shared_title(fig).get_text() == "0/4"
 
 
 def test_panel_labels_join_the_counter():

@@ -968,16 +968,17 @@ three lines of `re.findall` over `site/api/<page>/index.html` for
 `id="<module>.<Class>.<member>"`.
 
 **C8. `animate_wl_pl_spectra` documents a `suptitle_fmt` parameter that has never
-existed.** The `**engine_kwargs` passage at `plotting.py:1765` offers
+existed.** **[FIXED — 2026-08-12]** The `**engine_kwargs` passage at `plotting.py:1765`
+offered
 ```suptitle_fmt``, ``n_frames``, ``writer``` as examples of what is forwarded to
 `animate_panels`. `animate_panels` has no `suptitle_fmt` — the shared title is assembled
 from `frame_count_fmt` (`:1522`) and `suptitle_sep` (`:1523`). Passing the documented name
 reaches `**engine_kwargs` and dies as an unexpected keyword argument, so the docstring
 sends the reader to a `TypeError`.
 
-*Fix:* name the two parameters that exist. Worth doing in the same pass as anything else
-that touches this signature — `n_frames` is itself due to be replaced by the frame-window
-work, so the passage needs rewriting rather than patching.
+*Fixed:* the passage now names `frame_count_fmt`, `suptitle_sep`, `frames` and `writer`,
+all of which exist. Rewritten rather than patched, because `n_frames` was replaced by
+`frames=` in the same change (decision `0014`).
 
 **C9. A stale "circular import" comment in `plot_power_series`.**
 `plotting.py:2646` reads `from .constants import HC_EV_NM  # local import to avoid circular
@@ -1529,10 +1530,11 @@ sequence. `animate_panels`' frame count only limits what is *drawn*: `init_artis
 receives `n_frames` and `_resolve_var` truncates the label array to it, but the analysis has
 already happened by then.
 
-So `animate_panels(panels, n_frames=5)` on a 500-frame scan does 100× the analysis it
+So `animate_panels(panels, frames=range(5))` on a 500-frame scan does 100× the analysis it
 needs — and cloud analysis is the expensive part, not the rendering. The frame-window work
-makes this sharper: a window exists precisely so a long scan becomes tractable, and for this
-panel it would save rendering while saving nothing on analysis.
+(decision `0014`) makes this sharper rather than better: a selection exists precisely so a
+long scan becomes tractable, and for this panel it saves rendering while saving nothing on
+analysis.
 
 *Fix:* pass the frames actually being shown into `analyse_diffusion_sequence`. It needs a
 frame-selection argument of its own to accept them, so this is a `diffusion` change with a

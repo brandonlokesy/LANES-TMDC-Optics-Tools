@@ -248,7 +248,7 @@ def test_panel_ylabel_defaults_to_the_scan(csv_path):
     scan = _scan(csv_path, "R")
     panel = plotting.SpectrumLinePanel(scan, sweep_attr="scanner_y")
     fig, ax = plt.subplots()
-    panel.init_artists(ax, panel.n_frames)
+    panel.init_artists(ax, range(panel.n_frames))
     assert ax.get_ylabel() == scan.signal_label
 
 
@@ -257,5 +257,5 @@ def test_panel_ylabel_override_is_verbatim(csv_path):
     panel = plotting.SpectrumLinePanel(scan, sweep_attr="scanner_y",
                                        ylabel=CUSTOM)
     fig, ax = plt.subplots()
-    panel.init_artists(ax, panel.n_frames)
+    panel.init_artists(ax, range(panel.n_frames))
     assert ax.get_ylabel() == CUSTOM

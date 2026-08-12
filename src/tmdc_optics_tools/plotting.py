@@ -1245,26 +1245,37 @@ class AnimationPanel:
 
     Subclasses implement the two halves of an animated panel:
 
-    * :meth:`init_artists` — draw frame 0 onto a given axes and stash the
-      dynamic artists.  It receives the engine-resolved ``n_frames`` so the
-      panel can truncate its data and fix its axes limits once (preventing the
-      autoscale "jump" you would otherwise get as frames advance).
+    * :meth:`init_artists` — draw the animation's first frame onto a given axes
+      and stash the dynamic artists.  It receives *frames*, the sequence of
+      frame indices the animation will show, so the panel can fix its axes
+      limits over exactly those frames (preventing the autoscale "jump" you
+      would otherwise get as frames advance).  The first frame to draw is
+      ``frames[0]``, which is not necessarily ``0``.
     * :meth:`update` — mutate the stored artists for ``frame`` and return the
       ones that changed.  The engine redraws in full rather than blitting, so the
       returned artists are not what makes the animation work; they are what lets
       a caller drive the panels itself, and what documents which artists a panel
       owns.
 
-    The :attr:`n_frames` property reports the panel's *native* number of frames;
-    the engine takes the minimum across all panels (unless overridden) so panels
-    of differing length stay in sync.
+    **Frame indices are always the panel's own.** ``frames`` may be any subset,
+    in any order — a window, a stride, a single frame — but every value in it
+    indexes the panel's data directly, and :meth:`update` is handed those same
+    values.  A panel therefore never tracks where a window started, and never
+    offsets an index; it keeps its full arrays and reads them at ``frame``.
+    Getting that wrong is silent — the animation plays real frames in a
+    plausible order while the shared title names different ones — which is why
+    the engine passes native indices rather than positions within the window.
+
+    The :attr:`n_frames` property reports the panel's number of frames.  Every
+    panel in one figure must report the same count; the engine refuses a
+    mismatch rather than quietly animating the shortest.
     """
 
     @property
     def n_frames(self) -> int:
         raise NotImplementedError
 
-    def init_artists(self, ax, n_frames: int) -> None:
+    def init_artists(self, ax, frames) -> None:
         raise NotImplementedError
 
     def update(self, frame: int) -> tuple:
@@ -1356,9 +1367,9 @@ class ImageSequencePanel(AnimationPanel):
     def n_frames(self) -> int:
         return self.scan.n_frames
 
-    def init_artists(self, ax, n_frames: int) -> None:
+    def init_artists(self, ax, frames) -> None:
         plot_real_space_PL_map(
-            self.scan, ax=ax, idx=0, cmap=self.cmap,
+            self.scan, ax=ax, idx=frames[0], cmap=self.cmap,
             xlabel=self.xlabel, ylabel=self.ylabel,
             frame_source=self.frame_source,
         )
@@ -1452,25 +1463,30 @@ class SpectrumLinePanel(AnimationPanel):
     def n_frames(self) -> int:
         return self.scan.n_sweeps
 
-    def init_artists(self, ax, n_frames: int) -> None:
+    def init_artists(self, ax, frames) -> None:
         x, xlabel = _resolve_x_axis(self.scan, self.x_axis)
-        y_full = _resolve_spectra(self.scan, "best", self.x_axis)
-        self._y          = np.asarray(y_full[:, :n_frames], dtype=float)
-        self._sweep_vals = np.asarray(getattr(self.scan, self.sweep_attr))[:n_frames]
+        # Both arrays stay full length and are read at the frame's own index, so
+        # the panel never has to know where the animated selection began.
+        self._y          = np.asarray(_resolve_spectra(self.scan, "best", self.x_axis),
+                                      dtype=float)
+        self._sweep_vals = np.asarray(getattr(self.scan, self.sweep_attr))
 
-        # Fix both axes over the truncated extent so the trace doesn't jump.
+        # (n_pixels, n_shown): only the columns actually animated, so the y-limits
+        # frame the traces on screen rather than the whole scan's dynamic range.
+        shown = self._y[:, list(frames)]
+
         ax.set_xlim(x.min(), x.max())
-        ax.set_ylim(self._y.min(), self._y.max())
+        ax.set_ylim(shown.min(), shown.max())
         ax.set_xlabel(xlabel)
         ax.set_ylabel(self.ylabel if self.ylabel is not None
                       else _signal_label(self.scan))
 
-        (self._line,) = ax.plot(x, self._y[:, 0], color=self.color)
+        (self._line,) = ax.plot(x, self._y[:, frames[0]], color=self.color)
         # show_sweep_title=True keeps the swept value in ax.set_title (useful
         # when this panel is used standalone).  Set to False when animate_panels
         # is already showing it in the suptitle to avoid duplication.
         if self.show_sweep_title:
-            self._title = ax.set_title(self._frame_title(0))
+            self._title = ax.set_title(self._frame_title(frames[0]))
         else:
             self._title = None
 
@@ -1514,9 +1530,78 @@ def _writer_for_path(path: str) -> str:
     return _WRITER_BY_EXT.get(Path(path).suffix.lower(), "pillow")
 
 
+def _panel_frame_count(panels) -> int:
+    """
+    The frame count every panel agrees on, or a ``ValueError`` naming the disagreement.
+
+    Refusing is the point.  Taking the minimum instead animates the shortest panel's
+    worth of frames and says nothing, so a figure built from a scan and an image
+    sequence that do not correspond renders happily and looks right.
+    """
+    counts = [p.n_frames for p in panels]
+    if len(set(counts)) == 1:
+        return counts[0]
+
+    listing = ", ".join(
+        f"{type(p).__name__} has {c}" for p, c in zip(panels, counts)
+    )
+    raise ValueError(
+        f"the panels disagree on how many frames they have: {listing}. Every panel "
+        f"in one figure must cover the same measurements, so there is no safe way to "
+        f"pick. The AttoCube exports one extra white-light frame by default, which is "
+        f"the usual cause of an off-by-one; drop the trailing frame(s) before "
+        f"animating. If the panels really do cover different measurements, animate "
+        f"them separately."
+    )
+
+
+def _resolve_frames(frames, n_frames: int):
+    """
+    Validate a caller's frame selection against the panels' frame count.
+
+    Returns a list of native frame indices.  Every refusal here is a case that would
+    otherwise fail deep inside a writer, halfway through a render, with an
+    ``IndexError`` naming neither the panel nor the offending index.
+    """
+    try:
+        selected = list(frames)
+    except TypeError as exc:
+        raise TypeError(
+            f"frames must be a sequence of frame indices, e.g. range(10, 20); "
+            f"got {type(frames).__name__}."
+        ) from exc
+
+    if not selected:
+        raise ValueError("frames is empty; an animation needs at least one frame.")
+
+    for value in selected:
+        # bool is an int subclass, and True would silently mean frame 1.
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise TypeError(
+                f"frames must contain whole frame indices; got {value!r}. To select "
+                f"by a physical coordinate rather than by index, resolve it against "
+                f"the scan first."
+            )
+        if value < 0:
+            raise ValueError(
+                f"frames contains {value}, but frame indices are counted from 0. "
+                f"For the last few frames write range(n - 10, n), not negatives — "
+                f"a negative mixed with positives would silently reorder the "
+                f"animation."
+            )
+        if value >= n_frames:
+            raise ValueError(
+                f"frames contains {value}, but the panels have {n_frames} frames "
+                f"(0 to {n_frames - 1})."
+            )
+
+    return [int(v) for v in selected]
+
+
 def animate_panels(
     panels,
-    n_frames           : int   = None,
+    *,
+    frames                     = None,
     panel_width        : float = 5.0,
     panel_height       : float = 4.0,
     figsize            : tuple = None,
@@ -1550,10 +1635,17 @@ def animate_panels(
     Parameters
     ----------
     panels : sequence of AnimationPanel
-        One panel per subplot, left to right.
-    n_frames : int, optional
-        Number of frames to animate.  Defaults to the minimum native
-        ``n_frames`` across all panels.
+        One panel per subplot, left to right.  All panels must report the same
+        ``n_frames``; a mismatch is refused rather than silently truncated.
+    frames : sequence of int, optional
+        Which frames to animate, in order.  Defaults to every frame.  Any
+        sequence of indices works, so one parameter covers a window
+        (``range(500, 520)``), a stride (``range(0, 2091, 10)``), a single
+        frame (``[7]``) or an arbitrary order — which is what makes a
+        thousand-frame scan quick to render and to embed.  Keyword-only,
+        because the parameter that used to sit in this position took a *count*
+        rather than indices and a stale positional call would otherwise be
+        read as a different window.
     panel_width, panel_height : float
         Per-panel figure size in inches (used when *figsize* is ``None``).
     figsize : tuple, optional
@@ -1565,8 +1657,14 @@ def animate_panels(
         Set to ``False`` to show only the swept-variable labels.
     frame_count_fmt : str
         Format string for the frame counter.  Available fields:
-        ``{frame}`` (0-based current frame) and ``{n_frames}`` (total).
-        Default ``"Frame {frame}/{n_frames}"``.
+        ``{frame}`` (the frame's own index in the scan) and ``{n_frames}``
+        (the panels' total), plus ``{position}`` (0-based place within the
+        animated selection) and ``{n_shown}`` (how many frames are shown).
+        Default ``"Frame {frame}/{n_frames}"``, so a windowed animation
+        captions its frames with the indices they have in the scan —
+        ``"Frame 203/2091"``, not ``"Frame 3/40"`` — and a still lifted from
+        one can be traced back to a file.  Use
+        ``"Frame {position}/{n_shown}"`` for the other reading.
     suptitle_sep : str
         Separator inserted between suptitle segments.
         Default ``"  |  "``.
@@ -1597,14 +1695,35 @@ def animate_panels(
     ... ]
     >>> # suptitle shows e.g. "Frame 3/78  |  Power: 1.23 uW"
     >>> fig, anim = animate_panels(panels, save="three_panel_scan.gif")
+
+    Animate one interval of a long scan, then every tenth frame of it:
+
+    >>> fig, anim = animate_panels(panels, frames=range(500, 520))     # doctest: +SKIP
+    >>> fig, anim = animate_panels(panels, frames=range(0, 2091, 10))  # doctest: +SKIP
     """
     panels = list(panels)
     n = len(panels)
     if n == 0:
         raise ValueError("animate_panels requires at least one panel.")
 
-    if n_frames is None:
-        n_frames = min(p.n_frames for p in panels)
+    # With no selection the panels must agree, because picking for them is what
+    # hides a mismatch.  With an explicit selection there is nothing to guess: the
+    # caller named the frames, so they only have to be valid for every panel.
+    counts = [p.n_frames for p in panels]
+    if frames is None:
+        n_frames = _panel_frame_count(panels)
+        selected = list(range(n_frames))
+    else:
+        n_frames = min(counts)
+        selected = _resolve_frames(frames, n_frames)
+    n_shown = len(selected)
+    # Where each frame sits in the animation, for {position} in the counter.  A
+    # frame may legitimately appear twice (a caller can repeat one to hold on it);
+    # the first occurrence is the one the counter names.
+    position_of = {}
+    for i, f in enumerate(selected):
+        position_of.setdefault(f, i)
+
     if figsize is None:
         figsize = (panel_width * n, panel_height)
 
@@ -1615,7 +1734,7 @@ def animate_panels(
     axes = axes[0]
 
     for panel, ax in zip(panels, axes):
-        panel.init_artists(ax, n_frames)
+        panel.init_artists(ax, selected)
 
     # _build_suptitle and _has_suptitle must be evaluated AFTER init_artists
     # has run on every panel.  DiffusionCloudPanel (and any other panel that
@@ -1626,7 +1745,10 @@ def animate_panels(
     def _build_suptitle(frame: int) -> str:
         parts = []
         if show_frame_count:
-            parts.append(frame_count_fmt.format(frame=frame, n_frames=n_frames))
+            parts.append(frame_count_fmt.format(
+                frame=frame, n_frames=n_frames,
+                position=position_of.get(frame, 0), n_shown=n_shown,
+            ))
         for panel in panels:
             lbl = panel.frame_label(frame)
             if lbl:
@@ -1634,7 +1756,7 @@ def animate_panels(
         return suptitle_sep.join(parts)
 
     _has_suptitle = show_frame_count or any(
-        panel.frame_label(0) is not None for panel in panels
+        panel.frame_label(selected[0]) is not None for panel in panels
     )
 
     # A real fig.suptitle, because it is the only shared title the layout engine
@@ -1645,7 +1767,7 @@ def animate_panels(
     # as a fraction of the panel slides down while the panel's own title stays at
     # the top.  Measured 20 px of overlap once a panel draws a secondary x-axis,
     # against 8.3 px of clearance here for every panel count and figure size tried.
-    suptitle = fig.suptitle(_build_suptitle(0)) if _has_suptitle else None
+    suptitle = fig.suptitle(_build_suptitle(selected[0])) if _has_suptitle else None
 
     def update(frame):
         artists = []
@@ -1664,8 +1786,11 @@ def animate_panels(
     # regardless (measured slightly *faster* without blit), and the notebook slider
     # steps through frames rendered in advance, which blitting cannot speed up.
     # Only live playback in a desktop window or %matplotlib widget redraws more.
+    # frames=<sequence> rather than a count, so FuncAnimation hands update() the
+    # frame's own index.  Every panel then reads its data at that index directly,
+    # with no window offset to carry and get wrong.
     anim = animation.FuncAnimation(
-        fig, update, frames=n_frames, blit=False, interval=interval_ms,
+        fig, update, frames=selected, blit=False, interval=interval_ms,
     )
 
     if save is not None:
@@ -1742,7 +1867,18 @@ def animate_wl_pl_spectra(
         :func:`animate_panels`.
     **engine_kwargs
         Forwarded to :func:`animate_panels` (e.g. ``interval_ms``,
-        ``suptitle_fmt``, ``n_frames``, ``writer``).
+        ``frame_count_fmt``, ``suptitle_sep``, ``frames``, ``writer``).
+        Pass ``frames=range(a, b)`` to animate only part of a long scan.
+
+    Notes
+    -----
+    The AttoCube exports **one more white-light frame than PL frames** by default;
+    the extra one has no PL frame to pair with.  When *wl* is exactly one frame
+    longer than the shortest other panel, that trailing frame is dropped and a
+    warning names the counts.  Any other disagreement is left to
+    :func:`animate_panels` to refuse, because only this function knows which of
+    its arguments is the white light, and so only here is the off-by-one
+    identifiable rather than guessed at.
 
     Returns
     -------
@@ -1818,6 +1954,25 @@ def animate_wl_pl_spectra(
         raise ValueError(
             "animate_wl_pl_spectra needs at least one of wl, pl, or spectra."
         )
+
+    # The AttoCube's trailing white-light frame.  This is the only place the
+    # off-by-one can be *identified* rather than guessed at, because only here is
+    # one panel known to be the white light — animate_panels sees a row of
+    # ImageSequencePanels and rightly refuses to pick among them.  Exactly one
+    # extra frame is the documented export quirk; anything else falls through to
+    # the engine's refusal.
+    if wl_scan is not None and len(panels) > 1 and "frames" not in engine_kwargs:
+        wl_count    = panels[0].n_frames          # wl is appended first
+        other_count = min(p.n_frames for p in panels[1:])
+        if wl_count == other_count + 1:
+            warnings.warn(
+                f"takes {other_count} images out of a possible {wl_count}: the "
+                f"AttoCube exports one more white-light frame than PL frames by "
+                f"default, and the last one has no PL frame to pair with. Pass "
+                f"frames= explicitly to override.",
+                UserWarning, stacklevel=2,
+            )
+            engine_kwargs["frames"] = range(other_count)
 
     return animate_panels(panels, save=save, **engine_kwargs)
 
@@ -2303,7 +2458,7 @@ class DiffusionCloudPanel(AnimationPanel):
             )
         return self._seq_result
 
-    def _resolve_var(self, seq, n_frames: int) -> None:
+    def _resolve_var(self, seq) -> None:
         """
         Resolve the swept-variable array and labels.
 
@@ -2313,12 +2468,15 @@ class DiffusionCloudPanel(AnimationPanel):
         2. ``seq_result.var_array`` / ``.var_label`` / ``.var_units`` — the
            values that were forwarded from ``analyse_diffusion_sequence``.
         3. ``None`` — no per-frame subtitle is shown.
+
+        The array is kept at full length and read at each frame's own index, so a
+        window shows the values belonging to the frames it displays.
         """
         arr = self._var_array_override
         if arr is None and seq.var_array is not None:
             arr = seq.var_array
         if arr is not None:
-            self._var_array = np.asarray(arr)[:n_frames]
+            self._var_array = np.asarray(arr)
         else:
             self._var_array = None
 
@@ -2344,13 +2502,13 @@ class DiffusionCloudPanel(AnimationPanel):
             return None
         return self._make_frame_title(frame)
 
-    def init_artists(self, ax, n_frames: int) -> None:
+    def init_artists(self, ax, frames) -> None:
         seq = self._get_seq_result()
-        self._resolve_var(seq, n_frames)
+        self._resolve_var(seq)
 
-        # Draw frame 0
-        frame0 = (self.scan.load_frame(0)
-                  if hasattr(self.scan, "load_frame") else self.scan[0])
+        first = frames[0]
+        frame0 = (self.scan.load_frame(first)
+                  if hasattr(self.scan, "load_frame") else self.scan[first])
         self._im = ax.imshow(
             np.asarray(frame0, float),
             cmap=get_cmap(self.cmap), origin="upper",
@@ -2374,8 +2532,8 @@ class DiffusionCloudPanel(AnimationPanel):
                 self.bg_region_color, label="bg region",
             )
 
-        r0 = seq.frames[0]
-        # Contour lines for frame 0
+        r0 = seq.frames[first]
+        # Contour lines for the first frame shown
         self._contour_lines = []
         for contour in r0.contours:
             (line,) = ax.plot(

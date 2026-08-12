@@ -141,7 +141,7 @@ def _line_column(scan) -> np.ndarray:
 def _panel_column(scan) -> np.ndarray:
     panel = plotting.SpectrumLinePanel(scan, x_axis="wavelength")
     _, ax = plt.subplots()
-    panel.init_artists(ax, N_SWEEPS)
+    panel.init_artists(ax, range(N_SWEEPS))
     return panel._y[:, CR_SWEEP].astype(float)
 
 

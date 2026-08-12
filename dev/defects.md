@@ -1427,7 +1427,7 @@ too, not just nm on an energy axis), used by every caller that wants a conjugate
 Migrating `plot_power_series` onto it changes its tick appearance, so it wants to land with
 **E16**'s return change as a single deliberate break rather than as two.
 
-**E18. The animation engine has no tests at all.** `animate_panels`,
+**E18. The animation engine has no tests at all.** **[FIXED — 2026-08-12]** `animate_panels`,
 `animate_wl_pl_spectra`, the shared-title composition, `frame_label`, and the frame-count
 minimum are entirely unpinned. Nothing anywhere calls `animate_panels`; the only panel
 method any test touches is `SpectrumLinePanel.init_artists`, at three call sites
@@ -1440,11 +1440,45 @@ That makes it the least-defended surface in `plotting`, and it is the one an out
 contributor is most likely to extend — the frame-window work in PR #16 landed two
 crash-on-render bugs there that a single render test would have caught.
 
-*Fix:* a `tests/test_plotting_animation.py` following the
-`tests/test_plotting_laser_circle.py` idiom — `matplotlib.use("Agg")`, duck-typed scan
+*Fixed:* `tests/test_plotting_animation.py`, 13 cases plus one `xfail`, following the
+`tests/test_plotting_laser_circle.py` idiom — `matplotlib.use("Agg")`, duck-typed panel
 stand-ins, an autouse figure-closing fixture, and a real `PillowWriter` save for anything
-the constructor cannot catch. This is a prerequisite for the #16 rewrite rather than
-optional work alongside it.
+the constructor cannot catch. Pins the frame-count minimum, an explicit `n_frames=`, lock-step
+advance, the suptitle composition (counter, panel labels, dropped `None`s, the
+nothing-to-say case), that the title tracks the frame *through a render* rather than
+freezing, and that a label resolved inside `init_artists` still reaches the title — the
+ordering the load-bearing comment at `plotting.py:1617` describes but nothing enforced.
+
+*Two things measuring it settled.* Building an animation and priming the writer both draw
+frame 0, so `update` sees `[0, 0, 0, 0, 1, 2, 3]` for a four-frame animation; the tests
+compare the sequence with consecutive repeats collapsed, so they pin our frame order rather
+than matplotlib's priming. And the layout assertion turned up **E20**.
+
+**E20. The shared title is placed from a hardcoded axes fraction and collides with anything
+the panels draw on top.** **[verified by running]** `animate_panels` puts its shared title at
+`transAxes` y=1.04, or y=1.12 with each panel's axes title nudged `pad=-4`
+(`plotting.py:1646-1674`). Both numbers are guesses about how tall the panels' decorations
+are, and the title is an axes artist so nothing lays it out.
+
+A panel that adds a secondary top axis is enough to break it. Matplotlib's
+`_update_title_position` lifts the axes title above the top spine's tick labels and axis
+label — roughly 30 pt — while `pad=-4` pulls it back only 4 pt, and the shared title's y
+knows nothing about either. Measured at `figsize=(10, 4)`: with an axes title and no top
+axis the shared title clears it by **20.6 px**; add a secondary top axis and the axes title's
+top rises to 395.8 px while the shared title starts at 375.7 px — **20.1 px of overlap**, the
+two strings drawn through each other.
+
+No shipped panel draws a top axis yet, which is why this has never been seen. It stops being
+hypothetical the moment one does.
+
+*Fix:* draw once inside `animate_panels` and place the title from the measured top of the
+panels' decorations instead of from 1.04/1.12/`pad=-4`. One extra `fig.canvas.draw()` is
+negligible against rendering an animation, and the text stays an axes artist so blit still
+repaints it.
+
+*Test:* `tests/test_plotting_animation.py::test_the_shared_title_clears_a_secondary_top_axis`
+is a **strict** `xfail` — it fails today by exactly this overlap and will report as
+unexpectedly passing the moment the placement is fixed.
 
 **E19. `DiffusionCloudPanel` analyses every frame even when the animation shows fewer.**
 `_get_seq_result` (`plotting.py:2309`) calls `analyse_diffusion_sequence(self.scan, …)` with
@@ -1497,12 +1531,13 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
    because it is the only breaking change on the list and touches `examples/`.
 
 **Opened 2026-08-12 by the review of PR #16** (`animate_panels` frame windowing):
-**A18**, **C8**, **C9**, **E16**, **E17**, **E18**, **E19**. **E18** is the only one that
-gates that work — the engine cannot be safely changed while it is untested — and it should
-land as the first commit of it. **A18** and **E19** are both `DiffusionCloudPanel` and both
-want `diffusion`'s first tests, so they go together, alongside **A5**/**E11**. **E16** and
-**E17** are one `plot_power_series` change, not two. **C8** and **C9** ride along with
-whatever touches their function.
+**A18**, **C8**, **C9**, **E16**, **E17**, **E18**, **E19**, and **E20** which pinning E18
+turned up. **E18 is fixed** — it gated the rest, because the engine could not be safely
+changed while it was untested. **E20** is next and must precede any panel that draws a top
+axis, so it comes before the conjugate-axis work. **A18** and **E19** are both
+`DiffusionCloudPanel` and both want `diffusion`'s first tests, so they go together, alongside
+**A5**/**E11**. **E16** and **E17** are one `plot_power_series` change, not two. **C8** and
+**C9** ride along with whatever touches their function.
 
 Outside this order: **E9 is largely closed** — sample files arrived, and R/RC and
 TRPL support landed on 2026-07-30 along with the rename and arbitrary-sweep rewrite

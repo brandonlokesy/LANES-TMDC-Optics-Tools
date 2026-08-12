@@ -259,3 +259,29 @@ def test_panel_ylabel_override_is_verbatim(csv_path):
     fig, ax = plt.subplots()
     panel.init_artists(ax, range(panel.n_frames))
     assert ax.get_ylabel() == CUSTOM
+
+
+def test_panel_colorbar_label_says_it_is_a_peak(csv_path):
+    """
+    The bar spans the range of per-frame *peaks* while the y-axis spans the full
+    data range, so labelling both the same would put identical words on two scales
+    that disagree.
+    """
+    scan = _scan(csv_path, "R")
+    panel = plotting.SpectrumLinePanel(scan, sweep_attr="scanner_y", cmap="viridis")
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+
+    assert panel.colorbar.ax.get_ylabel() == f"Peak {scan.signal_label}"
+    assert panel.colorbar.ax.get_ylabel() != ax.get_ylabel()
+
+
+def test_panel_colorbar_label_override_is_verbatim(csv_path):
+    """No "Peak " prefix on a caller's string — nothing is ever appended to one."""
+    scan = _scan(csv_path, "R")
+    panel = plotting.SpectrumLinePanel(scan, sweep_attr="scanner_y",
+                                       cmap="viridis", colorbar_label=CUSTOM)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+
+    assert panel.colorbar.ax.get_ylabel() == CUSTOM

@@ -1409,8 +1409,8 @@ class SpectrumLinePanel(AnimationPanel):
     of shape ``(n_pixels, n_sweeps)``).  The x-axis is fixed; each frame swaps
     the y-values and updates a per-panel subtitle showing the swept value.
 
-    Both axes limits are fixed once over the *truncated* extent
-    (``[:, :n_frames]``) so the trace does not rescale or jump between frames.
+    Both axes limits are fixed once over the frames being animated, so the trace
+    does not rescale or jump between frames.
 
     Parameters
     ----------
@@ -1426,11 +1426,38 @@ class SpectrumLinePanel(AnimationPanel):
     title_fmt : str
         Format string with ``{label}``, ``{value}`` and ``{unit}`` fields.
     color : str, optional
-        Line colour.  Matplotlib default when ``None``.
+        Line colour.  Matplotlib default when ``None``.  Cannot be combined with
+        *cmap*, which sets the colour itself every frame.
+    cmap : ColormapLike, optional
+        Encode each frame's **peak** value as the trace's colour, and draw a
+        colour bar for it.  ``None`` (default) leaves the line one colour, adds
+        no colour bar, and takes no axes space — an encoding is a claim about the
+        data, so it is asked for rather than assumed.
+        The scale spans the peaks of the **whole scan**, not of the frames being
+        animated, so the colour means "this frame's brightness" and two clips of
+        one scan can be compared.  Values are read through the same corrected
+        arrays the trace is drawn from.
     ylabel : str, optional
         Y-axis label.  Derived from the scan's measurement type when ``None``,
         so a reflectance sweep is not labelled as PL.  A string is used
         **verbatim**, so include the unit.
+    colorbar_label : str, optional
+        Colour-bar label.  Derived as ``"Peak <signal>"`` when ``None``; a string
+        is used **verbatim**.  It is deliberately not the y-axis label: the y-axis
+        spans the full data range while the bar spans the range of per-frame
+        peaks, so one label on both would put the same words on two scales that
+        disagree.
+
+    Attributes
+    ----------
+    line : matplotlib.lines.Line2D
+        The animated trace.  ``None`` until :meth:`init_artists` has run.
+    mappable : matplotlib.cm.ScalarMappable
+        Carries the colour scale; ``None`` unless *cmap* was given.  Restyle the
+        encoding through this — e.g. ``panel.mappable.set_clim(...)`` before
+        rendering — rather than through more constructor arguments.
+    colorbar : matplotlib.colorbar.Colorbar
+        ``None`` unless *cmap* was given.
     """
 
     def __init__(
@@ -1443,8 +1470,17 @@ class SpectrumLinePanel(AnimationPanel):
         title_fmt        : str  = "{label} = {value:.3g} {unit}",
         show_sweep_title : bool = True,
         color            : str  = None,
+        cmap             : ColormapLike = None,
         ylabel           : str  = None,
+        colorbar_label   : str  = None,
     ):
+        if cmap is not None and color is not None:
+            raise ValueError(
+                "pass either color= or cmap=, not both: cmap sets the line colour "
+                "from each frame's peak, so color= would be overwritten on the "
+                "first frame and silently ignored thereafter."
+            )
+
         self.scan             = scan
         self.x_axis           = x_axis
         self.sweep_attr       = sweep_attr
@@ -1453,8 +1489,12 @@ class SpectrumLinePanel(AnimationPanel):
         self.title_fmt        = title_fmt
         self.show_sweep_title = show_sweep_title
         self.color            = color
+        self.cmap             = cmap
         self.ylabel           = ylabel
-        self._line            = None
+        self.colorbar_label   = colorbar_label
+        self.line             = None
+        self.mappable         = None
+        self.colorbar         = None
         self._title           = None
         self._y               = None
         self._sweep_vals      = None
@@ -1481,7 +1521,27 @@ class SpectrumLinePanel(AnimationPanel):
         ax.set_ylabel(self.ylabel if self.ylabel is not None
                       else _signal_label(self.scan))
 
-        (self._line,) = ax.plot(x, self._y[:, frames[0]], color=self.color)
+        color = self.color
+        if self.cmap is not None:
+            # Max down the pixel axis of every column, so the scale spans the whole
+            # scan's peaks rather than the animated frames'.  A window-dependent
+            # scale would give one frame different colours in different clips.
+            peaks = self._y.max(axis=0)
+            self.mappable = ScalarMappable(
+                cmap=get_cmap(self.cmap),
+                norm=Normalize(vmin=peaks.min(), vmax=peaks.max()),
+            )
+            self.mappable.set_array([])
+
+            # Re-initialising a panel onto the same figure would otherwise add a
+            # second bar beside the first, shrinking the axes again each time.
+            if self.colorbar is not None:
+                self.colorbar.remove()
+            self.colorbar = ax.figure.colorbar(self.mappable, ax=ax, pad=0.02)
+            self.colorbar.set_label(self._colorbar_label())
+            color = self.mappable.to_rgba(peaks[frames[0]])
+
+        (self.line,) = ax.plot(x, self._y[:, frames[0]], color=color)
         # show_sweep_title=True keeps the swept value in ax.set_title (useful
         # when this panel is used standalone).  Set to False when animate_panels
         # is already showing it in the suptitle to avoid duplication.
@@ -1489,6 +1549,20 @@ class SpectrumLinePanel(AnimationPanel):
             self._title = ax.set_title(self._frame_title(frames[0]))
         else:
             self._title = None
+
+    def _colorbar_label(self) -> str:
+        """
+        Label the colour bar, deriving ``"Peak <signal>"`` when none was given.
+
+        Composed from the name and unit rather than by prefixing
+        :func:`_signal_label`'s output, so the unit stays inside the brackets:
+        "Peak PL intensity (counts)", not "Peak PL intensity (counts)" built by
+        string surgery that would break on a signal with no unit.
+        """
+        if self.colorbar_label is not None:
+            return self.colorbar_label
+        name, unit = _signal_name_unit(self.scan)
+        return f"Peak {name} ({unit})" if unit else f"Peak {name}"
 
     def _frame_title(self, frame: int) -> str:
         return self.title_fmt.format(
@@ -1504,8 +1578,11 @@ class SpectrumLinePanel(AnimationPanel):
         return self._frame_title(frame)
 
     def update(self, frame: int) -> tuple:
-        self._line.set_ydata(self._y[:, frame])
-        updated = [self._line]
+        y = self._y[:, frame]
+        self.line.set_ydata(y)
+        if self.mappable is not None:
+            self.line.set_color(self.mappable.to_rgba(y.max()))
+        updated = [self.line]
         if self._title is not None:
             self._title.set_text(self._frame_title(frame))
             updated.append(self._title)

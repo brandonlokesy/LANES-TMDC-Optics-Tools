@@ -165,6 +165,24 @@ def test_without_a_declaration_the_file_is_shown_unchanged(untouched, served):
     assert np.array_equal(served(untouched), _spike_column(untouched, "spectra"))
 
 
+def test_the_colour_scale_is_built_from_the_repair(repaired):
+    """
+    ``SpectrumLinePanel(cmap=…)`` colours each trace by its peak, and a cosmic ray is
+    the largest value in its column — so a scale built from the raw array would be
+    stretched by the artefact, and every real frame squashed into the bottom of the
+    colour map. A second consumer of the same array, so the same guard applies.
+    """
+    panel = plotting.SpectrumLinePanel(repaired, x_axis="wavelength", cmap="viridis")
+    _, ax = plt.subplots()
+    panel.init_artists(ax, range(N_SWEEPS))
+
+    repaired_peaks = np.asarray(repaired.spectra_cr, float).max(axis=0)
+    raw_peaks      = np.asarray(repaired.spectra,    float).max(axis=0)
+
+    assert panel.mappable.norm.vmax == repaired_peaks.max()
+    assert panel.mappable.norm.vmax != raw_peaks.max()
+
+
 def test_the_wavelength_axis_fits_the_repair(repaired):
     # Gaussian, because the fixture's peak is one — a converged fit on both sides
     # is what makes the comparison meaningful.

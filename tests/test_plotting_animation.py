@@ -309,6 +309,132 @@ def test_a_bare_count_is_refused():
 
 
 # ---------------------------------------------------------------------------
+# Encoding each frame's peak as the trace's colour
+# ---------------------------------------------------------------------------
+
+
+class _FakeSweep:
+    """
+    A spectral sweep with known per-frame peaks.
+
+    ``SpectrumLinePanel`` reads its data through ``_resolve_spectra(scan, "best", …)``
+    and ``_resolve_x_axis``, both of which only need attributes, so a stand-in can set
+    the peaks exactly — which is what makes "the colour scale spans the whole scan"
+    an assertion about numbers rather than about shape.
+    """
+
+    #: Column maxima, deliberately not monotonic so a window can exclude the extremes.
+    PEAKS = np.array([10.0, 90.0, 50.0, 30.0, 70.0])
+
+    def __init__(self):
+        n_px = 8
+        base = np.linspace(0.0, 1.0, n_px)[:, None]     # (n_px, 1)
+        # (n_px, 1) profile scaled by each column's peak -> column max is that peak.
+        self.best_energy_spectra = base * self.PEAKS[None, :]
+        self.best_spectra        = self.best_energy_spectra
+        self.energy              = np.linspace(1.5, 2.5, n_px)
+        self.wavelength          = np.linspace(500.0, 700.0, n_px)
+        self.n_sweeps            = len(self.PEAKS)
+        self.scanner_y           = np.arange(len(self.PEAKS), dtype=float)
+        self.signal_name         = "PL intensity"
+        self.signal_unit         = "counts"
+
+
+def test_no_colorbar_by_default():
+    """An encoding is a claim about the data, so it is asked for, not assumed."""
+    panel = plotting.SpectrumLinePanel(_FakeSweep(), show_sweep_title=False)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+
+    assert panel.colorbar is None
+    assert panel.mappable is None
+    assert fig.axes == [ax]          # nothing stole axes space
+
+
+def test_the_colour_scale_spans_the_whole_scan_not_the_animated_frames():
+    """
+    The colour then means "this frame's brightness", so two clips of one scan agree.
+    A window-derived scale would give the same frame different colours in different
+    clips, and a one-frame window a degenerate scale.
+    """
+    panel = plotting.SpectrumLinePanel(_FakeSweep(), cmap="viridis",
+                                       show_sweep_title=False)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, [2, 3])   # excludes both the dimmest and the brightest
+
+    assert panel.mappable.norm.vmin == _FakeSweep.PEAKS.min()
+    assert panel.mappable.norm.vmax == _FakeSweep.PEAKS.max()
+
+
+def test_two_windows_of_one_scan_agree_on_colour():
+    panels = []
+    for frames in ([0, 1], [3, 4]):
+        panel = plotting.SpectrumLinePanel(_FakeSweep(), cmap="viridis",
+                                           show_sweep_title=False)
+        fig, ax = plt.subplots()
+        panel.init_artists(ax, frames)
+        panels.append(panel)
+
+    a, b = panels
+    assert a.mappable.norm.vmin == b.mappable.norm.vmin
+    assert a.mappable.norm.vmax == b.mappable.norm.vmax
+
+
+def test_the_line_colour_tracks_each_frames_peak():
+    panel = plotting.SpectrumLinePanel(_FakeSweep(), cmap="viridis",
+                                       show_sweep_title=False)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+
+    for frame, peak in enumerate(_FakeSweep.PEAKS):
+        panel.update(frame)
+        assert panel.line.get_color() == panel.mappable.to_rgba(peak)
+
+
+def test_the_artists_are_reachable_from_the_panel():
+    """The return contract, at the only altitude a panel has: its attributes."""
+    panel = plotting.SpectrumLinePanel(_FakeSweep(), cmap="viridis",
+                                       show_sweep_title=False)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+
+    assert panel.line in ax.lines
+    assert panel.colorbar is not None
+    assert panel.mappable is not None
+
+
+def test_cmap_and_color_together_are_refused():
+    """cmap overwrites the colour every frame, so color= would be a silent no-op."""
+    with pytest.raises(ValueError, match="either color= or cmap="):
+        plotting.SpectrumLinePanel(_FakeSweep(), cmap="viridis", color="k")
+
+
+def test_reinitialising_does_not_stack_colorbars():
+    panel = plotting.SpectrumLinePanel(_FakeSweep(), cmap="viridis",
+                                       show_sweep_title=False)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+    panel.init_artists(ax, range(panel.n_frames))
+
+    # One panel axes plus exactly one colour-bar axes.
+    assert len(fig.axes) == 2
+
+
+def test_the_colormap_goes_through_get_cmap():
+    """
+    Every other cmap entry point in the module accepts the full ColormapLike
+    vocabulary; a raw ScalarMappable would take only registered names.
+    """
+    panel = plotting.SpectrumLinePanel(
+        _FakeSweep(), cmap=["#1b9e77", "#d95f02", "#7570b3"], show_sweep_title=False,
+    )
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+
+    assert panel.mappable.cmap.N == 3
+
+
+# ---------------------------------------------------------------------------
 # The AttoCube's trailing white-light frame
 # ---------------------------------------------------------------------------
 #

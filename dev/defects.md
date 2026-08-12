@@ -34,8 +34,8 @@ below tracks what is left.
 
 *(A1–A3 fixed; A4 deferred; A5 open; **A6 fixed 2026-07-30**; **A8 fixed 2026-08-06**
 with E14; **A10 and A7 fixed 2026-08-07**; **A9 and B1 both fixed 2026-08-10**, which
-closes the `AttoCubePLScanRealSpace` pass. **A5** is the one live bug left in this
-section.)*
+closes the `AttoCubePLScanRealSpace` pass. **A5** and **A18** are the live bugs left in
+this section.)*
 
 **A1. `processing.remove_cosmic_rays` cannot be called at all.** **[FIXED — 2026-07-28, e77fabf]**
 `processing.py:349-361` referenced `cosmic_mask`, which was never defined — the
@@ -789,6 +789,23 @@ Three things fell out of that:
 Not closed: `SingleSpectrum` still has no `energy_spectra_pre_jacobian` and no repair
 rung (it takes no `cosmic_rays=`, deliberately). Nothing reaches the former.
 
+**A18. `DiffusionCloudPanel` never checks `var_array` against the frame count, so a short
+one crashes mid-animation.** `_resolve_var` (`plotting.py:2341`) does
+`np.asarray(arr)[:n_frames]`, which truncates a *long* array silently and accepts a
+*short* one without comment. `_frame_title` then indexes `self._var_array[frame]`, so an
+array shorter than the animation raises `IndexError` partway through rendering — after
+`init_artists` has succeeded and, when saving, after some frames are already written.
+
+The array reaches the panel from two directions (an explicit `var_array=`, or
+`seq_result.var_array` forwarded from `analyse_diffusion_sequence`), and neither path knows
+the frame count, so nothing upstream can catch it either.
+
+*Fix:* validate in `_resolve_var`, where both paths meet and `n_frames` is already in
+scope — refuse a length that is neither `n_frames` nor longer, naming both numbers. A long
+array is a legitimate truncation (a windowed or `min()`-limited animation), so that case
+stays silent; only "too short to finish" is an error. Cheap to pin: `diffusion` has no
+tests at all today, so this wants the first one.
+
 ## B. Dead parameters — accepted, documented, silently ignored
 
 **B1. `AttoCubePLScanRealSpace(bg_region=, bg_stat=)` are stored and never read.**
@@ -950,6 +967,28 @@ classes therefore needs the built output counted, not merely built. The count is
 three lines of `re.findall` over `site/api/<page>/index.html` for
 `id="<module>.<Class>.<member>"`.
 
+**C8. `animate_wl_pl_spectra` documents a `suptitle_fmt` parameter that has never
+existed.** The `**engine_kwargs` passage at `plotting.py:1765` offers
+```suptitle_fmt``, ``n_frames``, ``writer``` as examples of what is forwarded to
+`animate_panels`. `animate_panels` has no `suptitle_fmt` — the shared title is assembled
+from `frame_count_fmt` (`:1522`) and `suptitle_sep` (`:1523`). Passing the documented name
+reaches `**engine_kwargs` and dies as an unexpected keyword argument, so the docstring
+sends the reader to a `TypeError`.
+
+*Fix:* name the two parameters that exist. Worth doing in the same pass as anything else
+that touches this signature — `n_frames` is itself due to be replaced by the frame-window
+work, so the passage needs rewriting rather than patching.
+
+**C9. A stale "circular import" comment in `plot_power_series`.**
+`plotting.py:2646` reads `from .constants import HC_EV_NM  # local import to avoid circular
+at module level`. There is no circularity to avoid: `constants.py` imports only
+`scipy.constants`, and `plotting` already does `from .constants import _x_axis_name_unit`
+at module level (`:28`). The comment asserts a constraint that does not exist, which is
+the kind of thing a later reader defers to.
+
+*Fix:* hoist the import and delete the comment. One line each way, but it belongs with
+whatever next edits that function rather than as a drive-by.
+
 ## D. Duplication
 
 **D1.** `_draw_region_box` existed **verbatim** in both `processing.py` and
@@ -973,10 +1012,15 @@ unreachable, so a regression check is the only check available. 420 tests green,
 change, and it wants the whole line checked rather than one name pulled out of it.
 
 **D2.** Two laser-circle drawers with different styling defaults:
-`loaders._AttoCubeImage._add_laser_circle` (dashed, no halo) and
-`plotting._draw_laser_circle` (solid + halo), plus a third inline copy at
-`plotting.py:674`.
+`loaders._AttoCubeImage._add_laser_circle` (dashed, no halo, `loaders.py:5088`) and
+`plotting._draw_laser_circle` (solid + halo, `plotting.py:1884`), plus a third inline copy
+in `ImageSequencePanel.init_artists` (`plotting.py:1367`).
 *Fix:* one helper in `plotting`; `loaders` calls it.
+
+*Reference corrected 2026-08-12:* this entry used to cite the inline copy at
+`plotting.py:674`, which was `animate_real_space_PL_map`'s — **A3** replaced that one with
+`_draw_laser_circle`. The surviving inline copy is `ImageSequencePanel`'s, and it is the
+one an `AnimationPanel` author would copy from.
 
 **D3.** `DeviceGeometry` precomputes `self.slabs` in `__init__` "for efficiency",
 then `eps_stack` calls `self._slabs()` again while `d_stack` uses the cached one.
@@ -1353,6 +1397,72 @@ scale override.
 
 ---
 
+**E16. `plot_power_series` draws a twin axis and does not return it.** With
+`twin_axis=True` the function creates `ax_twin = ax.twiny()` (`plotting.py:2731-2733`),
+labels it, and returns `fig, ax, cb, lines` (`:2759`). The axes object is unreachable, so
+restyling its ticks or label — the thing the return contract exists to make possible — is
+impossible without walking `fig.axes`.
+
+This is the same failure as **E11**, at a smaller scale: CLAUDE.md's rule is that a
+function drawing several artists returns all of them, and the return *is* the styling API.
+`plot_current` already gets this right, returning `ax_right` for its power trace.
+
+*Fix:* append `ax_twin` to the return, `None` when `twin_axis=False` — mirroring how `cb`
+is already handled. It is a breaking change to a 4-tuple, so it should land with something
+else that touches this function; the natural partner is migrating it onto a shared
+energy↔wavelength helper (see **E17**) rather than on its own.
+
+**E17. Two implementations of an energy↔wavelength second axis, and the newer mechanism is
+the better one.** `plot_power_series(twin_axis=)` builds it with `ax.twiny()` and manually
+relabelled ticks (`plotting.py:2733-2751`): tick *positions* stay in the primary unit and
+only their text is rewritten, so the nm labels fall wherever the eV ticks happened to land
+(2.048, 1.937 …) and the axis freezes if anyone later changes `set_xlim`.
+
+`ax.secondary_xaxis("top", functions=(f, f))` does the same job properly — matplotlib
+chooses ticks in the *target* unit, so the labels come out round, and the axis tracks later
+limit changes. `HC_EV_NM / x` is self-inverse, so the function pair is one function twice.
+
+*Fix:* one private helper in `plotting` covering both directions (eV on a wavelength axis
+too, not just nm on an energy axis), used by every caller that wants a conjugate axis.
+Migrating `plot_power_series` onto it changes its tick appearance, so it wants to land with
+**E16**'s return change as a single deliberate break rather than as two.
+
+**E18. The animation engine has no tests at all.** `animate_panels`,
+`animate_wl_pl_spectra`, the shared-title composition, `frame_label`, and the frame-count
+minimum are entirely unpinned. Nothing anywhere calls `animate_panels`; the only panel
+method any test touches is `SpectrumLinePanel.init_artists`, at three call sites
+(`tests/test_plotting_labels.py`, `tests/test_cosmic_rays_downstream.py`).
+`ImageSequencePanel` is reached only indirectly, through
+`tests/test_plotting_laser_circle.py`'s end-to-end render, and `DiffusionCloudPanel` not at
+all.
+
+That makes it the least-defended surface in `plotting`, and it is the one an outside
+contributor is most likely to extend — the frame-window work in PR #16 landed two
+crash-on-render bugs there that a single render test would have caught.
+
+*Fix:* a `tests/test_plotting_animation.py` following the
+`tests/test_plotting_laser_circle.py` idiom — `matplotlib.use("Agg")`, duck-typed scan
+stand-ins, an autouse figure-closing fixture, and a real `PillowWriter` save for anything
+the constructor cannot catch. This is a prerequisite for the #16 rewrite rather than
+optional work alongside it.
+
+**E19. `DiffusionCloudPanel` analyses every frame even when the animation shows fewer.**
+`_get_seq_result` (`plotting.py:2309`) calls `analyse_diffusion_sequence(self.scan, …)` with
+no frame limit, so the segmentation, smoothing and contour extraction run over the whole
+sequence. `animate_panels`' frame count only limits what is *drawn*: `init_artists`
+receives `n_frames` and `_resolve_var` truncates the label array to it, but the analysis has
+already happened by then.
+
+So `animate_panels(panels, n_frames=5)` on a 500-frame scan does 100× the analysis it
+needs — and cloud analysis is the expensive part, not the rendering. The frame-window work
+makes this sharper: a window exists precisely so a long scan becomes tractable, and for this
+panel it would save rendering while saving nothing on analysis.
+
+*Fix:* pass the frames actually being shown into `analyse_diffusion_sequence`. It needs a
+frame-selection argument of its own to accept them, so this is a `diffusion` change with a
+`plotting` caller, not a `plotting` fix — which is why it is filed rather than folded into
+the window work.
+
 
 ## Settled design decisions
 
@@ -1377,13 +1487,22 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
    A7 fixed 2026-08-07; A9 and B1 fixed 2026-08-10; A4 deferred.) **A11** (warning
    locations) and **A12** (duplicate iteration indices) were both opened by the A7
    work; A12 is fixed, A11 is still owed and is its own deliberate pass over 15 sites.
-2. **C1–C3** — the doc corrections, since they actively mislead.
+2. **C1–C3** — the doc corrections, since they actively mislead. **C8** and **C9** join
+   them, and both are cheapest taken by whatever next edits their function.
 3. **B2–B4, D1–D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
    2026-08-10, and was not mechanical: the sketched fix would have introduced a second
    instance of A5.)
 4. **E2, E3, E5** — the remaining design calls, one at a time.
 5. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
    because it is the only breaking change on the list and touches `examples/`.
+
+**Opened 2026-08-12 by the review of PR #16** (`animate_panels` frame windowing):
+**A18**, **C8**, **C9**, **E16**, **E17**, **E18**, **E19**. **E18** is the only one that
+gates that work — the engine cannot be safely changed while it is untested — and it should
+land as the first commit of it. **A18** and **E19** are both `DiffusionCloudPanel` and both
+want `diffusion`'s first tests, so they go together, alongside **A5**/**E11**. **E16** and
+**E17** are one `plot_power_series` change, not two. **C8** and **C9** ride along with
+whatever touches their function.
 
 Outside this order: **E9 is largely closed** — sample files arrived, and R/RC and
 TRPL support landed on 2026-07-30 along with the rename and arbitrary-sweep rewrite

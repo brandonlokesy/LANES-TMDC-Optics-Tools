@@ -20,13 +20,24 @@ matplotlib.use("Agg", force=True)      # headless: render without a display
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
-from matplotlib.animation import PillowWriter
+from matplotlib.animation import HTMLWriter, PillowWriter
 from matplotlib.text import Text
+from PIL import Image
 
 from tmdc_optics_tools import plotting
 
 
 SHAPE = (12, 16)      # (ny, nx) — non-square, so a transposed frame would show
+
+# Matplotlib warns from Animation.__del__ when an animation is collected having never
+# drawn. Many tests here deliberately build a figure and assert on it without
+# rendering, so the warning is expected noise for them rather than a signal — and a
+# noisy suite hides real warnings. It appears at all only because the engine does not
+# blit: setting up blitting used to force an init draw, which marked the animation as
+# started as a side effect. Scoped to this one message so anything else still surfaces.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Animation was deleted without rendering anything:UserWarning"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -113,13 +124,11 @@ def _shared_title(fig) -> Text:
     """
     The engine's shared title, or ``None``.
 
-    It is an *axes* text artist rather than ``fig.suptitle`` (blit never repaints
-    figure-level artists), so it is found on an axes, not on the figure.
+    A real ``fig.suptitle``, so it lives on the figure. That is what makes the layout
+    engine reserve room for it, which is what keeps it clear of whatever the panels
+    draw on top (E20).
     """
-    for ax in fig.axes:
-        for text in ax.texts:
-            return text
-    return None
+    return fig._suptitle if fig.texts else None
 
 
 def _render(fig, anim, tmp_path, name="anim.gif"):
@@ -237,15 +246,52 @@ def test_no_title_artist_when_there_is_nothing_to_say():
 
 def test_the_shared_title_tracks_the_frame(tmp_path):
     """
-    The reason the title is an axes artist at all: ``fig.suptitle`` is a figure-level
-    artist and ``blit=True`` never repaints those, so it would freeze on frame 0.
+    Blitting only repaints axes artists, so a figure-level title freezes on frame 0
+    under ``blit=True`` — verified frozen in both the notebook slider and MP4. The
+    engine therefore redraws in full, and this renders to prove the title moves.
     """
     fig, anim = plotting.animate_panels([_ProbePanel(n_frames=4)])
     title = _shared_title(fig)
     _render(fig, anim, tmp_path)
 
     assert title.get_text() == "Frame 3/4"
-    assert title in title.axes.texts      # an axes artist, so blit repaints it
+    assert title in fig.texts
+
+
+def test_the_engine_does_not_blit(tmp_path):
+    """
+    Pins the reason, not just the effect. If this is ever flipped back to ``True``,
+    the shared title silently freezes in the notebook slider and in MP4 — the two
+    paths that matter most here, and the two a GIF-only check would not catch.
+    """
+    fig, anim = plotting.animate_panels([_ProbePanel(n_frames=4)])
+    assert anim._blit is False
+
+
+def test_the_header_updates_in_the_notebook_player(tmp_path):
+    """
+    The workflow this package is actually used through: ``to_jshtml``'s player, whose
+    slider steps frame by frame.
+
+    Tested behaviourally rather than by checking the blit flag, because this is the
+    path that silently broke — with blitting on, every slider frame carried the
+    frame-0 header while the GIF looked fine. ``HTMLWriter`` is what ``to_jshtml``
+    uses; ``embed_frames=False`` makes it write the frames as real PNGs, which are
+    the pixels the slider shows.
+    """
+    fig, anim = plotting.animate_panels([_ProbePanel(n_frames=3)], figsize=(6, 3))
+    anim.save(str(tmp_path / "player.html"),
+              writer=HTMLWriter(fps=4, embed_frames=False))
+
+    headers = []
+    for png in sorted(tmp_path.rglob("frame*.png")):
+        with Image.open(png) as img:
+            img.load()
+            headers.append(np.asarray(img.convert("L"))[:40, :].copy())
+
+    assert len(headers) == 3
+    # Every frame's header strip must differ from the first: the counter changed.
+    assert all(not np.array_equal(h, headers[0]) for h in headers[1:])
 
 
 def test_a_label_resolved_in_init_artists_still_reaches_the_title():
@@ -276,20 +322,26 @@ def test_the_shared_title_clears_a_panel_title():
     assert shared_bottom >= title_top
 
 
-@pytest.mark.xfail(
-    reason="B5: the shared title's y is a hardcoded axes fraction (1.12) that knows "
-           "nothing about the panels' decorations, so a secondary top axis lifts the "
-           "axes title straight through it. Measured 20.1 px of overlap at "
-           "figsize=(10, 4). Fixed by placing the title from a measured extent.",
-    strict=True,
-)
-def test_the_shared_title_clears_a_secondary_top_axis():
-    fig, anim = plotting.animate_panels(
-        [_ProbePanel(n_frames=4, title="Panel A", top_axis=True)], figsize=(10, 4),
-    )
+@pytest.mark.parametrize("n_panels", [1, 2, 3, 4])
+@pytest.mark.parametrize("figsize", [(10, 4), (5, 4), (20, 4), (10, 2.5)])
+def test_the_shared_title_clears_a_secondary_top_axis(n_panels, figsize):
+    """
+    E20's regression guard, parametrised because the old bug was scale-dependent.
+
+    A panel that draws a secondary top axis is the case that broke: the layout engine
+    shrinks the panel rather than growing the figure, so a title positioned as a
+    fraction of the panel slid down into the panel's own title — measured 20.1 px of
+    overlap. A real suptitle is reserved space instead, and clears by ~8 px at every
+    panel count and figure size tried.
+    """
+    panels = [
+        _ProbePanel(n_frames=4, title=f"Panel {i}", top_axis=True)
+        for i in range(n_panels)
+    ]
+    fig, anim = plotting.animate_panels(panels, figsize=figsize)
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
 
-    title_top = fig.axes[0].title.get_window_extent(renderer).y1
+    title_top = max(ax.title.get_window_extent(renderer).y1 for ax in fig.axes[:n_panels])
     shared_bottom = _shared_title(fig).get_window_extent(renderer).y0
     assert shared_bottom >= title_top

@@ -1250,7 +1250,10 @@ class AnimationPanel:
       panel can truncate its data and fix its axes limits once (preventing the
       autoscale "jump" you would otherwise get as frames advance).
     * :meth:`update` — mutate the stored artists for ``frame`` and return the
-      ones that changed, so the engine can blit efficiently.
+      ones that changed.  The engine redraws in full rather than blitting, so the
+      returned artists are not what makes the animation work; they are what lets
+      a caller drive the panels itself, and what documents which artists a panel
+      owns.
 
     The :attr:`n_frames` property reports the panel's *native* number of frames;
     the engine takes the minimum across all panels (unless overridden) so panels
@@ -1634,46 +1637,15 @@ def animate_panels(
         panel.frame_label(0) is not None for panel in panels
     )
 
-    # fig.suptitle() is a Figure-level artist.  With blit=True, matplotlib
-    # only redraws Axes-level artists, so the suptitle text updates correctly
-    # in memory but is never repainted on screen — it appears frozen on the
-    # frame-0 string for the entire animation.
-    #
-    # Fix: place the shared title as a centred text artist on the top axes
-    # (the leftmost one when there are several panels).  It is an Axes artist
-    # so blit picks it up, yet with transform=fig.transFigure it sits at the
-    # same visual position as a suptitle would.
-    if _has_suptitle:
-        title_ax = axes[len(axes) // 2]   # centre panel (or only panel)
-
-        # Check whether any panel has set a non-empty axes title.
-        # If so, we need to stack the suptitle above the axes title rather
-        # than overlapping it.  We do this by:
-        #   - moving the suptitle text higher (y=1.12 instead of 1.04), and
-        #   - nudging each panel's axes title downward (pad=-4) so there is
-        #     clear vertical separation between the two lines.
-        any_panel_title = any(
-            ax.get_title() for ax in axes
-        )
-        if any_panel_title:
-            suptitle_y = 1.12
-            for ax in axes:
-                if ax.get_title():
-                    ax.set_title(ax.get_title(), pad=-4)
-        else:
-            suptitle_y = 1.04
-
-        suptitle = title_ax.text(
-            0.5, suptitle_y,
-            _build_suptitle(0),
-            transform      = title_ax.transAxes,
-            ha             = "center",
-            va             = "bottom",
-            fontsize       = plt.rcParams.get("figure.titlesize", "large"),
-            fontweight     = plt.rcParams.get("figure.titleweight", "normal"),
-        )
-    else:
-        suptitle = None
+    # A real fig.suptitle, because it is the only shared title the layout engine
+    # reserves vertical space for.  Anything placed in a panel's own coordinates
+    # instead — the obvious way to get a title blit can repaint — collides as soon
+    # as a panel gains furniture on top: constrained_layout does not grow the
+    # figure to fit a secondary axis, it *shrinks the panel*, so a position given
+    # as a fraction of the panel slides down while the panel's own title stays at
+    # the top.  Measured 20 px of overlap once a panel draws a secondary x-axis,
+    # against 8.3 px of clearance here for every panel count and figure size tried.
+    suptitle = fig.suptitle(_build_suptitle(0)) if _has_suptitle else None
 
     def update(frame):
         artists = []
@@ -1684,8 +1656,16 @@ def animate_panels(
             artists.append(suptitle)
         return tuple(artists)
 
+    # blit=False because the shared title is a Figure artist and blitting only
+    # repaints Axes ones, so with blit=True the title freezes on its frame-0 text.
+    # Verified across all three output paths: frozen in the notebook slider
+    # (to_jshtml) and in MP4, and updating only in GIF — a Pillow-writer accident,
+    # not a guarantee.  Nothing is given up: both save paths draw full frames
+    # regardless (measured slightly *faster* without blit), and the notebook slider
+    # steps through frames rendered in advance, which blitting cannot speed up.
+    # Only live playback in a desktop window or %matplotlib widget redraws more.
     anim = animation.FuncAnimation(
-        fig, update, frames=n_frames, blit=True, interval=interval_ms,
+        fig, update, frames=n_frames, blit=False, interval=interval_ms,
     )
 
     if save is not None:

@@ -27,6 +27,10 @@ from matplotlib.text import Text
 from PIL import Image
 
 from tmdc_optics_tools import plotting, processing
+from tmdc_optics_tools.loaders import AttoCubeSpectralSweep
+
+from test_loaders import make_spectral_csv
+from test_loaders_nesting import RASTER
 
 
 SHAPE = (12, 16)      # (ny, nx) — non-square, so a transposed frame would show
@@ -432,6 +436,126 @@ def test_the_colormap_goes_through_get_cmap():
     panel.init_artists(ax, range(panel.n_frames))
 
     assert panel.mappable.cmap.N == 3
+
+
+# ---------------------------------------------------------------------------
+# Selecting frames by coordinate
+# ---------------------------------------------------------------------------
+#
+# frame_window turns coordinates into the frame indices animate_panels takes. The
+# lookup is the scan's own, so these mostly check that its policies arrive intact
+# rather than re-testing them: an ambiguous coordinate refused, a distant one warned
+# about, a nest refused.
+
+
+@pytest.fixture
+def sweep(tmp_path):
+    """Sweep points 0, 1, 2 at Scanner Y = 7.0, 7.5, 8.0 V."""
+    path = tmp_path / "flat.csv"
+    make_spectral_csv(path)
+    return AttoCubeSpectralSweep(str(path), spectra_type="PL", sweep="piezo_y")
+
+
+@pytest.fixture
+def nested_sweep(tmp_path):
+    path = tmp_path / "raster.csv"
+    make_spectral_csv(path, params=RASTER)
+    return AttoCubeSpectralSweep(str(path), spectra_type="PL",
+                                 fast_sweep="piezo_x", slow_sweep="piezo_y")
+
+
+def test_a_coordinate_window_gives_frame_indices(sweep):
+    assert plotting.frame_window(sweep, 7.0, 8.0) == range(0, 3)
+
+
+def test_both_endpoints_are_inclusive(sweep):
+    """A caller who names two points is asking to see both of them."""
+    assert plotting.frame_window(sweep, 7.0, 7.5) == range(0, 2)
+
+
+def test_an_omitted_endpoint_runs_to_the_edge(sweep):
+    assert plotting.frame_window(sweep, 7.5) == range(1, 3)      # to the last frame
+    assert plotting.frame_window(sweep, end=7.5) == range(0, 2)  # from the first
+
+
+def test_the_whole_scan_when_neither_endpoint_is_given(sweep):
+    assert plotting.frame_window(sweep) == range(0, sweep.n_sweeps)
+
+
+def test_one_coordinate_twice_is_a_single_frame(sweep):
+    assert plotting.frame_window(sweep, 7.5, 7.5) == range(1, 2)
+
+
+def test_a_named_axis_is_honoured(sweep):
+    """
+    Any axis the scan can look up, not only the one the sweep was declared with. A raw
+    row label, because a role name like "top_voltage" needs gates= declared first —
+    that refusal reaches through frame_window too, which is the point of not
+    reimplementing the lookup.
+    """
+    assert plotting.frame_window(sweep, 0.0, 0.5, axis="V_A") == range(0, 2)
+
+
+def test_reversed_endpoints_are_refused(sweep):
+    """
+    Not swapped. A reversed pair is far more often a typo than a request to play
+    backwards, and swapping silently would make the typo invisible.
+    """
+    with pytest.raises(ValueError, match="does not do reverse playback"):
+        plotting.frame_window(sweep, 8.0, 7.0)
+
+
+def test_the_refusal_names_the_reverse_playback_idiom(sweep):
+    """
+    The refusal is only reasonable because the alternative is one slice away, so the
+    message has to carry it — otherwise this reads as a missing feature.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        plotting.frame_window(sweep, 8.0, 7.0)
+
+    message = str(excinfo.value)
+    assert "[::-1]" in message
+    assert "start must not come after end" in message
+    # The suggested call has the endpoints the right way round, so it can be copied.
+    assert "frame_window(scan, 7.0, 8.0)[::-1]" in message
+
+
+def test_reverse_playback_is_still_reachable(sweep):
+    """
+    What makes refusing cost nothing: `frames=` takes any order, and a range slices,
+    so the reversal is one slice away — and visible at the call site.
+    """
+    window = plotting.frame_window(sweep, 7.0, 8.0)
+    assert list(window[::-1]) == [2, 1, 0]
+
+    panel = _ProbePanel(n_frames=3)
+    fig, anim = plotting.animate_panels([panel], frames=window[::-1])
+    assert list(anim.new_frame_seq()) == [2, 1, 0]
+
+
+def test_a_distant_coordinate_warns_but_still_resolves(sweep):
+    """The scan's own policy, arriving through frame_window unchanged."""
+    with pytest.warns(UserWarning):
+        window = plotting.frame_window(sweep, 7.0, 40.0)
+    assert window.stop == sweep.n_sweeps      # clamped to the nearest, the last frame
+
+
+def test_a_nest_is_refused(nested_sweep):
+    """
+    A contiguous index range across a raster is a snake through acquisition order, not
+    a region, so a bare coordinate cannot mean what it looks like it means.
+    """
+    with pytest.raises(ValueError):
+        plotting.frame_window(nested_sweep, 0.0, 5.0)
+
+
+def test_the_window_feeds_animate_panels(sweep):
+    panel = plotting.SpectrumLinePanel(sweep, sweep_attr="scanner_y",
+                                       show_sweep_title=False)
+    window = plotting.frame_window(sweep, 7.5, 8.0)
+    fig, anim = plotting.animate_panels([panel], frames=window)
+
+    assert list(anim.new_frame_seq()) == [1, 2]
 
 
 # ---------------------------------------------------------------------------

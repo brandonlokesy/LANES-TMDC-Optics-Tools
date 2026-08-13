@@ -26,7 +26,7 @@ from matplotlib.animation import HTMLWriter, PillowWriter
 from matplotlib.text import Text
 from PIL import Image
 
-from tmdc_optics_tools import plotting
+from tmdc_optics_tools import plotting, processing
 
 
 SHAPE = (12, 16)      # (ny, nx) — non-square, so a transposed frame would show
@@ -432,6 +432,102 @@ def test_the_colormap_goes_through_get_cmap():
     panel.init_artists(ax, range(panel.n_frames))
 
     assert panel.mappable.cmap.N == 3
+
+
+# ---------------------------------------------------------------------------
+# The conjugate top axis
+# ---------------------------------------------------------------------------
+
+
+def _panel_with_twin(x_axis):
+    panel = plotting.SpectrumLinePanel(_FakeSweep(), x_axis=x_axis, twin_axis=True,
+                                       show_sweep_title=False)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+    return fig, ax, panel
+
+
+def test_no_conjugate_axis_by_default():
+    panel = plotting.SpectrumLinePanel(_FakeSweep(), show_sweep_title=False)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+
+    assert panel.ax_twin is None
+    assert ax.child_axes == []
+
+
+@pytest.mark.parametrize("x_axis, expected", [
+    ("energy",     "Wavelength (nm)"),
+    ("wavelength", "Energy (eV)"),
+])
+def test_the_conjugate_axis_shows_the_other_unit(x_axis, expected):
+    """
+    Both directions, because a wavelength panel wants eV on top just as much — and
+    an unreachable branch would be dead code.
+    """
+    fig, ax, panel = _panel_with_twin(x_axis)
+
+    assert panel.ax_twin is not None
+    assert panel.ax_twin.get_xlabel() == expected
+
+
+def test_the_conversion_is_the_packages_own_constant():
+    """
+    Guards against a hardcoded 1239.84 drifting from constants.HC_EV_NM, which is what
+    every other energy/wavelength conversion in the package goes through.
+
+    Read off the resulting limits rather than the transform callables, which are a
+    matplotlib private. Sorted because the reciprocal reverses the ordering: the low
+    energy edge is the long-wavelength one.
+    """
+    fig, ax, panel = _panel_with_twin("energy")
+    fig.canvas.draw()
+
+    expected = processing.energy_to_wavelength(np.asarray(ax.get_xlim()))
+    assert sorted(panel.ax_twin.get_xlim()) == pytest.approx(sorted(expected))
+
+
+def test_the_conjugate_axis_emits_no_divide_warning():
+    """
+    Matplotlib evaluates the transform across the axis, including 0, where the
+    reciprocal is undefined. Without the errstate guard every draw warns.
+    """
+    fig, ax, panel = _panel_with_twin("energy")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        fig.canvas.draw()
+
+
+def test_the_conjugate_axis_ticks_are_round_in_its_own_unit():
+    """
+    The reason for secondary_xaxis over twiny with relabelled ticks: matplotlib picks
+    the ticks in the displayed unit, so the nm labels land on round wavelengths rather
+    than wherever the eV ticks happened to fall.
+    """
+    fig, ax, panel = _panel_with_twin("energy")
+    fig.canvas.draw()
+
+    shown = [t for t in panel.ax_twin.get_xticks()
+             if panel.ax_twin.get_xlim()[0] <= t <= panel.ax_twin.get_xlim()[1]]
+    assert shown, "the secondary axis placed no ticks in range"
+    # Round in nm — the whole point. A relabelled eV tick would be 495.9, 550.4, …
+    assert all(float(t).is_integer() for t in shown)
+
+
+def test_the_conjugate_axis_clears_the_shared_title():
+    """
+    The combination E20 was fixed for: before that, the panel title was lifted above
+    the top axis' decorations and straight through the shared title.
+    """
+    panel = plotting.SpectrumLinePanel(_FakeSweep(), twin_axis=True, cmap="viridis")
+    fig, anim = plotting.animate_panels([panel], figsize=(10, 4))
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+
+    title_top     = fig.axes[0].title.get_window_extent(renderer).y1
+    shared_bottom = _shared_title(fig).get_window_extent(renderer).y0
+    assert shared_bottom >= title_top
 
 
 # ---------------------------------------------------------------------------

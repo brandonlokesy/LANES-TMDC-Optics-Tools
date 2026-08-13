@@ -25,7 +25,7 @@ from skimage.exposure import rescale_intensity
 
 from . import processing
 from . import diffusion as _diffusion
-from .constants import _x_axis_name_unit
+from .constants import HC_EV_NM, _x_axis_name_unit
 # The spectra- and frame-source registries name attributes on the loader classes,
 # so they live with them; the resolvers are imported here because this is where
 # callers of ``spectra_source=`` and ``frame_source=`` are.
@@ -195,6 +195,48 @@ def _resolve_x_axis(scan, x_axis: str) -> tuple:
     name, unit = _x_axis_name_unit(x_axis)
     values     = scan.energy if x_axis == "energy" else scan.wavelength
     return values, f"{name} ({unit})"
+
+
+#: The conjugate of each spectral x-axis: what a top axis shows, and its label.
+_CONJUGATE_AXIS = {"energy": "wavelength", "wavelength": "energy"}
+
+
+def _conjugate_x_axis(ax, x_axis: str):
+    """
+    Add a top x-axis showing the other spectral unit, and return it.
+
+    Energy and wavelength are reciprocal through ``HC_EV_NM``, and ``HC_EV_NM / x``
+    is its own inverse, so one function serves both directions of the transform.
+
+    Built with ``secondary_xaxis`` rather than ``twiny`` plus relabelled ticks.
+    Matplotlib then chooses the ticks in the *displayed* unit, so the nm labels come
+    out at round wavelengths instead of wherever the eV ticks happened to fall, and
+    the axis follows any later change to the primary limits instead of freezing at
+    the ticks that existed when it was built.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Its x-axis must already be in *x_axis* units.
+    x_axis : {"energy", "wavelength"}
+        The **primary** axis' quantity.  The secondary axis shows the other one.
+
+    Returns
+    -------
+    matplotlib.axis.SecondaryAxis
+    """
+    name, unit = _x_axis_name_unit(_CONJUGATE_AXIS[x_axis])
+
+    def _convert(values):
+        # Matplotlib evaluates the transform across the whole axis, including 0,
+        # where the reciprocal is undefined; without this the first draw emits a
+        # divide-by-zero RuntimeWarning that a -W error run would fail on.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return HC_EV_NM / np.asarray(values, dtype=float)
+
+    secondary = ax.secondary_xaxis("top", functions=(_convert, _convert))
+    secondary.set_xlabel(f"{name} ({unit})")
+    return secondary
 
 
 def _signal_name_unit(obj, source: str = None) -> tuple:
@@ -1447,6 +1489,9 @@ class SpectrumLinePanel(AnimationPanel):
         spans the full data range while the bar spans the range of per-frame
         peaks, so one label on both would put the same words on two scales that
         disagree.
+    twin_axis : bool
+        Add a top x-axis in the other spectral unit — wavelength above an energy
+        axis, energy above a wavelength one.  Default ``False``.
 
     Attributes
     ----------
@@ -1458,6 +1503,8 @@ class SpectrumLinePanel(AnimationPanel):
         rendering — rather than through more constructor arguments.
     colorbar : matplotlib.colorbar.Colorbar
         ``None`` unless *cmap* was given.
+    ax_twin : matplotlib.axis.SecondaryAxis
+        The conjugate top axis; ``None`` unless *twin_axis* was set.
     """
 
     def __init__(
@@ -1473,6 +1520,7 @@ class SpectrumLinePanel(AnimationPanel):
         cmap             : ColormapLike = None,
         ylabel           : str  = None,
         colorbar_label   : str  = None,
+        twin_axis        : bool = False,
     ):
         if cmap is not None and color is not None:
             raise ValueError(
@@ -1492,9 +1540,11 @@ class SpectrumLinePanel(AnimationPanel):
         self.cmap             = cmap
         self.ylabel           = ylabel
         self.colorbar_label   = colorbar_label
+        self.twin_axis        = twin_axis
         self.line             = None
         self.mappable         = None
         self.colorbar         = None
+        self.ax_twin          = None
         self._title           = None
         self._y               = None
         self._sweep_vals      = None
@@ -1520,6 +1570,10 @@ class SpectrumLinePanel(AnimationPanel):
         ax.set_xlabel(xlabel)
         ax.set_ylabel(self.ylabel if self.ylabel is not None
                       else _signal_label(self.scan))
+
+        # After set_xlim, so the secondary axis inherits the finished limits.
+        if self.twin_axis:
+            self.ax_twin = _conjugate_x_axis(ax, self.x_axis)
 
         color = self.color
         if self.cmap is not None:
@@ -2858,8 +2912,6 @@ def plot_power_series(
     ValueError
         If *sweep_step* is not a positive integer.
     """
-    from .constants import HC_EV_NM  # local import to avoid circular at module level
-
     if not isinstance(sweep_step, (int, np.integer)) or sweep_step < 1:
         raise ValueError(
             f"sweep_step must be a positive integer, got {sweep_step!r}.  "

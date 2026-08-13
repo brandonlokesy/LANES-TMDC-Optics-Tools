@@ -1729,6 +1729,83 @@ def _resolve_frames(frames, n_frames: int):
     return [int(v) for v in selected]
 
 
+def frame_window(scan, start=None, end=None, *, axis=None) -> range:
+    """
+    Frame indices between two coordinates on a scan, for :func:`animate_panels`.
+
+    ``animate_panels`` takes frame *indices*, which is the only thing every panel
+    understands — an image sequence has no coordinates at all.  This turns a pair of
+    physical coordinates into such a selection, naming the scan they belong to at the
+    call site, so the assumption that one scan's coordinates describe every panel in
+    the figure is written down rather than inferred.
+
+    Both endpoints are **inclusive**: a caller who names two points is asking to see
+    both of them.
+
+    Parameters
+    ----------
+    scan : AttoCubeSpectralSweep
+        The scan whose coordinates *start* and *end* refer to.
+    start, end : float, optional
+        Coordinates on *axis*.  Each resolves to its nearest sweep point, with the
+        scan's own policy: an ambiguous coordinate is refused and a distant one
+        warns, exactly as for ``get_spectrum_at``.  ``None`` means the first / last
+        frame.
+    axis : str, optional
+        Which coordinate *start* and *end* are on — ``"piezo_y"``,
+        ``"top_voltage"``, a raw row label, or anything else ``sweep=`` accepts.
+        Defaults to the scan's declared sweep axis.
+
+    Returns
+    -------
+    range
+        Frame indices, ascending, for ``animate_panels(panels, frames=…)``.
+
+    Raises
+    ------
+    ValueError
+        If *end* resolves before *start*.  Reversed endpoints are far more often a
+        typo than a request to play backwards, and playing backwards is still one
+        slice away — see below — so the reversal is made explicit rather than
+        guessed at.  Silently swapping them would make the typo invisible.
+
+    Examples
+    --------
+    >>> window = frame_window(sweep, 3.2, 4.8, axis="piezo_y")   # doctest: +SKIP
+    >>> fig, anim = animate_panels(panels, frames=window)        # doctest: +SKIP
+
+    Backwards, and every third frame — ``frames=`` takes any sequence, so slicing the
+    window is all either needs:
+
+    >>> animate_panels(panels, frames=window[::-1])              # doctest: +SKIP
+    >>> animate_panels(panels, frames=window[::3])               # doctest: +SKIP
+    """
+    n_frames = scan.n_sweeps
+
+    def _endpoint(value, default, what):
+        if value is None:
+            return default
+        return _select_sweep_point(
+            scan, value=value, axis=axis, index=None, fast=None, slow=None,
+            index_fast=None, index_slow=None, what=what,
+        )
+
+    first = _endpoint(start, 0,            "frame_window(start=…)")
+    last  = _endpoint(end,   n_frames - 1, "frame_window(end=…)")
+
+    if last < first:
+        raise ValueError(
+            f"frame_window does not do reverse playback: start must not come after "
+            f"end. start={start!r} resolves to frame {first}, end={end!r} to frame "
+            f"{last}. Swap them if they are the wrong way round. For reverse "
+            f"playback, reverse the window itself — "
+            f"frame_window(scan, {end!r}, {start!r})[::-1] — which says so, where a "
+            f"reversed pair would just read as a typo."
+        )
+
+    return range(first, last + 1)
+
+
 def animate_panels(
     panels,
     *,

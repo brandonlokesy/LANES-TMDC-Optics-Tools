@@ -112,5 +112,7 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0011](0011-label-contract-derive-or-verbatim.md) | Labels: `None` derives, a string is verbatim, nothing is appended | 2026-08-06 | Accepted |
 | [0012](0012-plot-spectrum-selects-like-the-accessors.md) | `plot_spectrum` selects by coordinate, keyword-only, through the accessors | 2026-08-10 | Accepted |
 | [0013](0013-power-series-thinning-and-stacking.md) | `plot_power_series` thins by slice step and stacks by an absolute offset | 2026-08-05 | Accepted |
+| [0014](0014-animate-by-frame-index.md) | An animation is driven by a sequence of frame indices | 2026-08-12 | Accepted |
+| [0015](0015-reversed-frame-window-endpoints-are-refused.md) | A reversed coordinate window is refused, not reversed for you | 2026-08-13 | Accepted |
 
 This table is the one mutable part of the folder.

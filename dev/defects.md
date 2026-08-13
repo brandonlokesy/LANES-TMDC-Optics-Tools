@@ -980,15 +980,18 @@ sends the reader to a `TypeError`.
 all of which exist. Rewritten rather than patched, because `n_frames` was replaced by
 `frames=` in the same change (decision `0014`).
 
-**C9. A stale "circular import" comment in `plot_power_series`.**
-`plotting.py:2646` reads `from .constants import HC_EV_NM  # local import to avoid circular
+**C9. A stale "circular import" comment in `plot_power_series`.** **[FIXED — 2026-08-13]**
+`plotting.py:2646` read `from .constants import HC_EV_NM  # local import to avoid circular
 at module level`. There is no circularity to avoid: `constants.py` imports only
-`scipy.constants`, and `plotting` already does `from .constants import _x_axis_name_unit`
-at module level (`:28`). The comment asserts a constraint that does not exist, which is
+`scipy.constants`, and `plotting` already did `from .constants import _x_axis_name_unit`
+at module level (`:28`). The comment asserted a constraint that does not exist, which is
 the kind of thing a later reader defers to.
 
-*Fix:* hoist the import and delete the comment. One line each way, but it belongs with
-whatever next edits that function rather than as a drive-by.
+*Fixed:* `HC_EV_NM` joined the module-level import, which made the local one provably
+redundant, and both it and the comment went. Landed with the conjugate-axis helper rather
+than as a drive-by — that helper needs `HC_EV_NM` at module scope, so leaving the local
+import would have meant a function-level import shadowing a module-level name for no
+reason.
 
 ## D. Duplication
 
@@ -1423,10 +1426,16 @@ only their text is rewritten, so the nm labels fall wherever the eV ticks happen
 chooses ticks in the *target* unit, so the labels come out round, and the axis tracks later
 limit changes. `HC_EV_NM / x` is self-inverse, so the function pair is one function twice.
 
-*Fix:* one private helper in `plotting` covering both directions (eV on a wavelength axis
-too, not just nm on an energy axis), used by every caller that wants a conjugate axis.
-Migrating `plot_power_series` onto it changes its tick appearance, so it wants to land with
-**E16**'s return change as a single deliberate break rather than as two.
+*Half done — 2026-08-13.* `_conjugate_x_axis(ax, x_axis)` now exists in `plotting`, covering
+both directions, and `SpectrumLinePanel(twin_axis=True)` uses it. Measured on an energy
+axis, it places ticks at 500, 550 … 800 nm; the `twiny` version relabels the eV ticks, so
+the same axis would read 495.9, 550.4, …
+
+**Still open:** `plot_power_series` remains on its own `twiny` implementation. Migrating it
+changes that function's tick appearance and should land with **E16**'s return change as a
+single deliberate break rather than as two — and it is a breaking change to a function the
+contributor whose PR introduced the helper never touched, which is why it was not bundled
+in.
 
 **E18. The animation engine has no tests at all.** **[FIXED — 2026-08-12]** `animate_panels`,
 `animate_wl_pl_spectra`, the shared-title composition, `frame_label`, and the frame-count

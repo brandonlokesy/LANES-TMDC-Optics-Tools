@@ -16,11 +16,13 @@ import warnings
 import numpy as np
 import pytest
 
+from tmdc_optics_tools.constants import EPS_HBN
 from tmdc_optics_tools.loaders import (
     AttoCubePLVabScan,
     AttoCubeSpectralSweep,
     AttoCubeTRPLSweep,
     DeviceGeometry,
+    StackLayer,
     _read_block_layout,
 )
 
@@ -993,3 +995,101 @@ def test_shim_translates_old_label_arguments(csv_path):
                               top_gate_label="V_B")
     assert s.curated_parameters["v_top"][0] == "V_B"
     assert np.allclose(s.power, s.parameters["Excitation Power"])
+
+
+# ---------------------------------------------------------------------------
+# DeviceGeometry.to_dict / from_dict
+# ---------------------------------------------------------------------------
+
+
+def test_to_dict_round_trips_a_single_material_stack():
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    geom2 = DeviceGeometry.from_dict(geom.to_dict())
+    assert [(l.material, l.n_layers, l.d_monolayer, l.eps) for l in geom2.tmdc_stack] == \
+           [(l.material, l.n_layers, l.d_monolayer, l.eps) for l in geom.tmdc_stack]
+    assert geom2.d_hbn_top == geom.d_hbn_top
+    assert geom2.d_hbn_bottom == geom.d_hbn_bottom
+    assert geom2.eps_hbn == geom.eps_hbn
+    assert geom2.eps_stack == pytest.approx(geom.eps_stack)
+
+
+def test_to_dict_round_trips_a_heterostructure():
+    # Two distinct layers: guards against a per-layer field (materially, the
+    # d_monolayer that was once lost to a variable-name collision in to_dict)
+    # being silently shared or overwritten across layers.
+    geom = DeviceGeometry(
+        tmdc_stack=[StackLayer("WS2", n_layers=2), StackLayer("MoS2", n_layers=1)],
+        d_hbn_top=30,
+        d_hbn_bottom=40,
+    )
+    geom2 = DeviceGeometry.from_dict(geom.to_dict())
+    assert len(geom2.tmdc_stack) == 2
+    assert [(l.material, l.n_layers, l.d_monolayer, l.eps) for l in geom2.tmdc_stack] == \
+           [(l.material, l.n_layers, l.d_monolayer, l.eps) for l in geom.tmdc_stack]
+
+
+def test_to_dict_output_is_actually_json_serializable():
+    # Regression test: the original to_dict built each layer's "d_monolayer"
+    # entry from the wrong name in scope, so it held a circular reference to
+    # the dict being constructed rather than the layer's own thickness.
+    import json
+
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    d = geom.to_dict()
+    assert d["tmdc_stack"][0]["d_monolayer"] == geom.tmdc_stack[0].d_monolayer
+    json.dumps(d)  # must not raise on a circular reference
+
+
+def test_to_dict_label_is_none_unless_explicitly_set():
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    assert geom.label is None
+    d = geom.to_dict()
+    assert d["label"] is None       # the raw label, not the derived stack_label
+    assert geom.stack_label          # stack_label itself still derives a string
+    geom2 = DeviceGeometry.from_dict(d)
+    assert geom2.label is None
+    assert geom2.stack_label == geom.stack_label
+
+
+def test_to_dict_preserves_an_explicit_label():
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46,
+                                       label="hBN/1L-WS2/hBN, back-gated")
+    d = geom.to_dict()
+    assert d["label"] == "hBN/1L-WS2/hBN, back-gated"
+    geom2 = DeviceGeometry.from_dict(d)
+    assert geom2.label == geom.label
+
+
+def test_to_dict_records_a_missing_top_hbn_as_none():
+    geom = DeviceGeometry.from_single("WSe2", d_hbn_bottom=46)
+    d = geom.to_dict()
+    assert d["d_hbn_top"] is None
+    geom2 = DeviceGeometry.from_dict(d)
+    assert geom2.d_hbn_top is None
+
+
+def test_from_dict_requires_only_tmdc_stack():
+    # d_hbn_top / d_hbn_bottom / eps_hbn / label are optional in from_dict,
+    # matching DeviceGeometry.__init__'s own defaults.
+    geom = DeviceGeometry.from_dict({"tmdc_stack": [{"material": "WS2"}]})
+    assert geom.d_hbn_top is None
+    assert geom.d_hbn_bottom is None
+    assert geom.eps_hbn == EPS_HBN
+    assert geom.label is None
+
+
+def test_from_dict_builds_stack_layers_from_plain_dicts():
+    geom = DeviceGeometry.from_dict({
+        "tmdc_stack": [
+            {"material": "WSe2", "n_layers": 1, "d_monolayer": 0.65, "eps": 7.0},
+        ],
+        "d_hbn_top": 12.0,
+        "d_hbn_bottom": 18.0,
+        "eps_hbn": 3.0,
+    })
+    layer = geom.tmdc_stack[0]
+    assert (layer.material, layer.n_layers, layer.d_monolayer, layer.eps) == \
+           ("WSe2", 1, 0.65, 7.0)
+    assert geom.d_hbn_top == 12.0
+    assert geom.d_hbn_bottom == 18.0
+    assert geom.eps_hbn == 3.0

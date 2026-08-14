@@ -272,6 +272,55 @@ class DeviceGeometry:
             label        = label,
         )
 
+    # --- Class method for generating DeviceGeometry from dict -------------
+    @classmethod
+    def from_dict(cls, device_dict: dict) -> "DeviceGeometry":
+        """
+        Build a DeviceGeometry from a Python dictionary.
+
+        Parameters
+        ----------
+        device_dict : dict
+            Dictionary describing the device stack, with the structure
+            shown in Examples below.  ``"tmdc_stack"`` is required;
+            ``"d_hbn_top"``, ``"d_hbn_bottom"``, ``"eps_hbn"``, and
+            ``"label"`` are optional and fall back to the same defaults
+            as :meth:`DeviceGeometry.__init__` when omitted.
+
+        Returns
+        -------
+        DeviceGeometry
+            The constructed device geometry.
+
+        See Also
+        --------
+        to_dict : Generate a Python dictionary from the DeviceGeometry class.
+
+        Examples
+        --------
+        >>> device_dict = {
+        ...     "tmdc_stack": [
+        ...         {"material": "WSe2", "n_layers": 1, "d_monolayer": 0.65, "eps": 7.0},
+        ...     ],
+        ...     "d_hbn_top": 12.0,      # nm; None if that side has no hBN
+        ...     "d_hbn_bottom": 18.0,   # nm
+        ...     "eps_hbn": 3.0,
+        ...     "label": "hBN/1L-WSe2/hBN on SiO2/Si, back-gated",
+        ... }
+        >>> geom = DeviceGeometry.from_dict(device_dict)
+        """
+        layers = []
+        for material in device_dict["tmdc_stack"]:
+            layers.append(StackLayer(**material))
+
+        return cls(
+            tmdc_stack   = layers,
+            d_hbn_top    = device_dict.get("d_hbn_top"),
+            d_hbn_bottom = device_dict.get("d_hbn_bottom"),
+            eps_hbn      = device_dict.get("eps_hbn", EPS_HBN),
+            label        = device_dict.get("label"),
+        )
+    
     # --- Internal: build the ordered slab list ----------------------------
 
     def _slabs(self) -> list:
@@ -379,6 +428,60 @@ class DeviceGeometry:
         if self.d_hbn_bottom is not None:
             parts.append(f"hBN({self.d_hbn_bottom:.0f} nm)")
         return " / ".join(parts)
+
+    def to_dict(self) -> dict:
+        """
+        Generate a Python dictionary from the DeviceGeometry class.
+
+        Returns
+        -------
+        dict
+            Dictionary describing the device stack, with the structure
+            shown in Examples below.  ``"label"`` is the raw ``label``
+            attribute, ``None`` unless a custom label was given at
+            construction — not the derived :attr:`stack_label`.
+
+        See Also
+        --------
+        from_dict : Build a DeviceGeometry from a Python dictionary.
+
+        Examples
+        --------
+        >>> geom.to_dict()
+        {
+            "tmdc_stack": [
+                {"material": "WSe2", "n_layers": 1, "d_monolayer": 0.65, "eps": 7.0},
+            ],
+            "d_hbn_top": 12.0,      # nm; None if that side has no hBN
+            "d_hbn_bottom": 18.0,   # nm
+            "eps_hbn": 3.0,
+            "label": "hBN/1L-WSe2/hBN on SiO2/Si, back-gated",  # or None
+        }
+        """
+
+        def format_tmdc_dict(
+                material : str,
+                n_layers : int,
+                d_monolayer : float,
+                eps : float
+            ) -> dict:
+
+            return {"material" : material, "n_layers" : n_layers, "d_monolayer" : d_monolayer, "eps" : eps}
+
+        d = {}
+        stacks = []
+        d["tmdc_stack"] = stacks
+        # if self.d_hbn_top is not None:
+        #     stacks.append(format_material_dict("hBN", np.nan, self.d_hbn_top, self.eps_hbn))
+        for layer in self.tmdc_stack:
+            stacks.append(format_tmdc_dict(layer.material, layer.n_layers, layer.d_monolayer, layer.eps))
+        # if self.d_hbn_bottom is not None:
+        #     stacks.append(format_material_dict("hBN", np.nan, self.d_hbn_bottom, self.eps_hbn))
+        d["d_hbn_top"] = self.d_hbn_top if self.d_hbn_top is not None else None
+        d["d_hbn_bottom"] = self.d_hbn_bottom if self.d_hbn_bottom is not None else None
+        d["eps_hbn"] = self.eps_hbn
+        d["label"] = self.label
+        return d
 
     def electric_field(
         self, v_top: np.ndarray, v_bot: np.ndarray

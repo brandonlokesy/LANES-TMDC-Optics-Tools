@@ -225,6 +225,16 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
 - Don't repair a gap or pick a winner among duplicate `_iter_N` indices.
 - `gate_axis` / `gate_axis_label` stay as aliases until `plot_pl_map_Vab_scan` is
   updated.
+- Don't reinstate `animate_panels(n_frames=)`, make the window positional, or hand
+  panels window-relative frame indices — `frames=` takes native indices, and a panel
+  never stores an offset.
+- Don't have `animate_panels` resolve a coordinate itself, or pick among panels for one:
+  it refuses a frame-count mismatch rather than animating the shortest, and
+  `animate_wl_pl_spectra` owns the white-light off-by-one because it alone knows which
+  panel is the white light.
+- Don't make `frame_window` swap reversed endpoints, or read them along the axis'
+  direction — it refuses, and `[::-1]` is reverse playback.
+- Don't label a peak colour bar with the y-axis label; the two span different ranges.
 
 ## Known issues — check before "helpfully" fixing
 
@@ -241,23 +251,31 @@ bwarea semantics are wanted at all.
   that already had `bg_region` applied at load. It also has ~30 parameters and returns
   `result` instead of its artists — the standing counter-example to *parameters earn
   their place*. New code must not copy it.
-- README §5/§6 reference APIs that don't exist (`AttoCubePLScan`, `plot_pl_map`,
-  `bg_region=` on `fit_scan_peak`).
+- README still names `AttoCubePLScan`, which does not exist — the class is
+  `AttoCubeSpectralSweep`. (`plot_pl_map` and `bg_region=` on `fit_scan_peak` are no
+  longer mentioned there; `__init__.py`'s quick start is fixed.)
 - `plot_current` is still named for the gate-sweep era, as are `plot_spectrum`'s
-  hand-rolled `E_F` legend default and `SpectrumLinePanel`'s `sweep_attr`/`sweep_unit`.
-  **Do the `plot_current` rename first** — two breaking changes to that one function are
-  owed, so land them together. See `dev/plan-E12.md`.
-- `_is_image_csv` accepts a two-row spectrum as an image, so a directory of single
-  spectra loads as 2×N "images". `_read_block_layout` already draws this distinction
-  correctly; copy that rule.
+  hand-rolled `E_F` legend default and `SpectrumLinePanel`'s
+  `sweep_attr`/`sweep_label`/`sweep_unit`. **Do the `plot_current` rename first** — two
+  breaking changes to that one function are owed, so land them together. The panel's
+  `color=` joins that same bundle, so don't spend a separate break on it.
+  See `dev/plan-E12.md`.
 - **Every `stacklevel` in `loaders.py` is unverified** — 15 `warnings.warn` calls, no
   test pinning where any of them points, and two chains confirmed wrong. A wrong value
   also *suppresses repeats*, so it is a diagnostics failure rather than a cosmetic one.
   Its own pass, not a character changed while passing through. **Trace by measuring,
   not by reading `def` lines.**
-- `plot_pl_map_Vab_scan`'s `median_kernel` should default to `1` (off). The current `3`
-  runs a 2-D median filter that smooths across gate voltage, mixing physically
-  independent sweeps. Keep 2-D available, just not by default.
+- `plot_spectral_map`'s `median_kernel` should default to `1` (off). The current `3`
+  runs a 2-D median filter that smooths across the sweep axis, mixing physically
+  independent sweeps. Keep 2-D available, just not by default. (`plot_pl_map_Vab_scan`
+  is only a deprecation shim onto it, so fixing the shim fixes nothing.)
+- `plot_power_series` draws a twin axis and never returns it, and still builds it with
+  `twiny()` plus relabelled ticks rather than the shared `_conjugate_x_axis` helper.
+  One breaking change to that function, not two: land the return fix and the migration
+  together.
+- `DiffusionCloudPanel` accepts a `var_array` shorter than the animation and raises
+  partway through rendering, and analyses every frame regardless of how many are being
+  shown. Both want `diffusion`'s first tests, which do not exist yet.
 
 ## Working style
 

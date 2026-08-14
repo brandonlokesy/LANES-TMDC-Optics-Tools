@@ -13,6 +13,14 @@ the export format in `dev/instruments/attocube.md`.
 
 Items marked **[verified by running]** were reproduced in the interpreter.
 
+**Name the symbol, not the line.** Entries point at functions, methods and classes —
+`plot_diffusion_cloud`, `DiffusionCloudPanel._resolve_var` — because line numbers rot on
+the first unrelated edit above them. They had rotted wholesale by 2026-08-13: `plotting.py`
+had moved by several hundred lines, so nearly every number in this file pointed at
+something else, and the entries most likely to be picked up next (**E16**, **E17**, **E11**)
+sent a reader into the wrong function. A number is worth keeping only where it identifies
+something a symbol cannot — a specific import line, one call site among several.
+
 Resolved findings keep their number and stay where they are, tagged
 **[FIXED — date, commit]** — never deleted, never struck through. `Suggested order`
 below tracks what is left.
@@ -38,7 +46,7 @@ closes the `AttoCubePLScanRealSpace` pass. **A5** and **A18** are the live bugs 
 this section.)*
 
 **A1. `processing.remove_cosmic_rays` cannot be called at all.** **[FIXED — 2026-07-28, e77fabf]**
-`processing.py:349-361` referenced `cosmic_mask`, which was never defined — the
+`remove_cosmic_rays`'s replacement loop referenced `cosmic_mask`, which was never defined — the
 variable built at the top is `cr_mask`. Every call raised `UnboundLocalError`, so
 the function had never run once. Two further problems in the same loop: `working`
 was rebuilt from the raw `spectra` on every pass, which made the iteration a no-op
@@ -69,7 +77,7 @@ the iteration fix — at `max_iter=1` only the spike edges are found, pixel 301 
 missed, which is exactly how the pre-fix code behaved on every pass.
 
 **A2. `DeviceGeometry.eps_hs` and `__repr__` raise `AttributeError`.** **[FIXED — 2026-07-30, eca60d4]** **[verified by running]**
-`loaders.py:291-293` calls `_slabs()`, which returns `(thickness, eps)` **tuples**,
+`DeviceGeometry.eps_hs` calls `_slabs()`, which returns `(thickness, eps)` **tuples**,
 then iterates them as if they were `StackLayer` objects (`layer.thickness`,
 `layer.eps`). Because `__repr__` prints `eps_hs`, `print(geom)` is broken for every
 geometry.
@@ -123,10 +131,9 @@ argument than a deliberately ungated device, and it would otherwise silently ret
 a ~100× too-large field.
 
 **A3. Laser circle in `animate_real_space_PL_map` passes a module as a path effect.** **[FIXED — 2026-07-30, 6f1b73a]** **[verified by running]**
-`plotting.py:681`: `circle.set_path_effects([path_effects])` hands matplotlib the
+In `animate_real_space_PL_map`, `circle.set_path_effects([path_effects])` handed matplotlib the
 imported *module* instead of an `AbstractPathEffect`; it fails when the artist is
-drawn. The correct call already exists twice elsewhere (`plotting.py:916` and
-`_draw_laser_circle`).
+drawn. The correct call already existed twice elsewhere, `_draw_laser_circle` among them.
 *Fix:* delete the line and call the shared `_draw_laser_circle` helper (see D2).
 
 *Fixed:* the eleven-line hand-rolled block is now
@@ -157,7 +164,7 @@ duck-typed scan stand-ins, and `PillowWriter` for the end-to-end `save`, so no
 `ffmpeg`.
 
 **A4. `diffusion._binary_area` has a wrong `bwarea` weight table.** — *deferred, see below*
-`diffusion.py:532-555`. MATLAB's `bwarea` weights are 0, ¼, ½ (adjacent pair),
+`diffusion._binary_area`. MATLAB's `bwarea` weights are 0, ¼, ½ (adjacent pair),
 **¾ (diagonal pair)**, **⅞ (three pixels)**, 1. The code puts the diagonal patterns
 `6` and `9` in the *adjacent* list at 0.5, then re-assigns them to 0.5 again in a
 no-op loop, and gives three-pixel patterns 0.75 instead of 0.875. Every reported
@@ -166,7 +173,7 @@ cloud area is biased low, systematically.
 all, or a plain pixel count would do. Do not fix unprompted.
 
 **A5. `plot_diffusion_cloud` can subtract the background twice.**
-`plotting.py:1534` pulls `image.img` — which is *already* background-subtracted when
+`plot_diffusion_cloud` pulls `image.img` — which is *already* background-subtracted when
 the loader was constructed with `bg_region` — and then passes `bg_region` on to
 `analyse_diffusion_cloud`, which subtracts again. The guard in
 `diffusion._load_image` (which deliberately uses `img_raw`) is bypassed because a
@@ -437,8 +444,8 @@ is what kept `diffusion` correct.
 values 2, 3, 4 and 5, and not one has a test pinning where it points. The one chain
 that has been traced is wrong: for `AttoCubeTRPLSweep`, `__init__` →
 `_decode_and_describe` → `_decode` → `_decode_dir` → `_order_by_iter` needs **6** to
-reach the researcher's line, and passes 4, which lands on `loaders.py:1176` inside
-`_decode_and_describe`.
+reach the researcher's line, and passes 4, which lands inside
+`_decode_and_describe` instead.
 
 Two consequences, and the second is the one that bites. The line number is useless —
 a notebook loading eight scans in a loop cannot tell which one complained. And
@@ -458,19 +465,19 @@ uses. Not a character changed in passing.
 out-of-range warning reaches the caller correctly from `nearest_index` (`depth=4`)
 but not from `get_spectrum_at`, where `_index_for_value` passes `depth=5` and the
 warning lands on the `self._sweep_selector(...)` call inside `get_spectrum_at`
-itself. **The uncounted frame is the `locate` lambda** (`loaders.py:2476`):
+itself. **The uncounted frame is the `locate` lambda** inside `_sweep_selector`:
 `_sweep_selector` wraps `_index_for_value` in a closure before calling it, so the
 chain is `_nearest` → `_index_for_value` → *lambda* → `_sweep_selector` →
 `get_spectrum_at` → caller, which needs **6**. Measured, not inferred — a
 `catch_warnings(record=True)` harness over all three entry points reports
-`nearest_index` → the caller's own line, `get_spectrum_at` → `loaders.py:3821`.
+`nearest_index` → the caller's own line, `get_spectrum_at` → a line inside the loader rather than the caller's.
 
 Worth keeping because a lambda is invisible when the chain is traced by reading
 `def` lines, which is how the other 14 values will be checked. Anything routing
 through `_sweep_selector` inherits it and needs one more again:
 `plotting.plot_spectrum` grew value-based selection on 2026-08-10 via a
-`_select_sweep_point` helper, so its chain needs **7** and it lands on
-`plotting.py:412`. That site is listed here rather than fixed locally — correcting
+`_select_sweep_point` helper, so its chain needs **7** and it lands inside
+`_select_sweep_point` itself. That site is listed here rather than fixed locally — correcting
 one chain by hand while the shared `depth=` stays wrong would just move the defect.
 
 **A12. `_order_by_iter` could not see duplicate iteration indices.**
@@ -790,7 +797,7 @@ Not closed: `SingleSpectrum` still has no `energy_spectra_pre_jacobian` and no r
 rung (it takes no `cosmic_rays=`, deliberately). Nothing reaches the former.
 
 **A18. `DiffusionCloudPanel` never checks `var_array` against the frame count, so a short
-one crashes mid-animation.** `_resolve_var` (`plotting.py:2341`) does
+one crashes mid-animation.** `_resolve_var` (`DiffusionCloudPanel._resolve_var`) does
 `np.asarray(arr)[:n_frames]`, which truncates a *long* array silently and accepts a
 *short* one without comment. `_frame_title` then indexes `self._var_array[frame]`, so an
 array shorter than the animation raises `IndexError` partway through rendering — after
@@ -821,7 +828,7 @@ they read as supported.
 double subtraction, and was not taken.** `analyse_diffusion_sequence` calls
 `scan.load_frame(i)` and forwards `bg_region` to `analyse_diffusion_cloud`, which
 subtracts again; `diffusion.py:403-411` is an explicit comment relying on `load_frame`
-being raw, and `DiffusionCloudPanel` (`plotting.py:2363`, `:2427`) would have been a
+being raw, and `DiffusionCloudPanel`'s `init_artists` and `update` would have been a
 second instance. That is the mechanism of **A5**, and `diffusion.py` has no tests at
 all to have caught it.
 
@@ -869,7 +876,7 @@ estimators giving different frames (209.0 vs 208.9512), and
 `analyse_diffusion_cloud(load_frame_bg(0))` to the last digit — the single-subtraction
 invariant, measured rather than assumed.
 
-Not done here: **A5**, and `animate_wl_pl_spectra` (`plotting.py:1795`) constructs its
+Not done here: **A5**, and `animate_wl_pl_spectra` constructs its
 scans internally with no `bg_region` passthrough, so it is the one public path that
 cannot reach this.
 
@@ -878,7 +885,7 @@ are forwarded but never stored; `DiffusionResult` has no such field, though its
 docstring says the unit is "used only in `__repr__`".
 *Fix:* add the field and use it in `__repr__`, or drop the parameter.
 
-**B3.** `AttoCubeSampleImage.__init__` (`loaders.py:1294`) doesn't forward
+**B3.** `AttoCubeSampleImage.__init__` (`AttoCubeSampleImage.__init__`) doesn't forward
 `bg_region`/`bg_stat` to `_AttoCubeImage`, so sample images can't be
 background-corrected even though the base class supports it.
 
@@ -889,10 +896,16 @@ entry point; `constants.py` imports `hbar` unused.
 
 Worse than missing docs, because they will be acted on.
 
-**C1.** `__init__.py:17-24` quick-start uses `AttoCubePLScan`,
-`plotting.plot_pl_map`, and `DeviceGeometry(t_hbn=..., b_hbn=..., tmdc=...)` —
-**none of these exist**. The real names are `AttoCubePLVabScan`,
-`plot_pl_map_Vab_scan`, `DeviceGeometry.from_single(...)`.
+**C1.** **[FIXED — before 2026-08-13; confirmed while repairing this file's references]**
+`__init__.py`'s quick start used `AttoCubePLScan`, `plotting.plot_pl_map`, and
+`DeviceGeometry(t_hbn=..., b_hbn=..., tmdc=...)` — **none of which existed**.
+
+*Fixed:* the quick start now reads `AttoCubeSpectralSweep`, `plot_spectral_map` and
+`DeviceGeometry.from_single(...)`, and declares `gates=` as the loader requires. It was
+carried along by the 2026-07-30 rewrite rather than by a change aimed at this entry, which
+is why it was never marked. Note that this entry's own suggested replacements
+(`AttoCubePLVabScan`, `plot_pl_map_Vab_scan`) had themselves been superseded by the time
+the fix landed — the first is deprecated, the second is a shim.
 
 **C2.** README §5 and §6 pass `bg_region=` to `fit_scan_peak` and
 `extract_dipole_length`; neither accepts it (background is a load-time concern).
@@ -968,7 +981,7 @@ three lines of `re.findall` over `site/api/<page>/index.html` for
 `id="<module>.<Class>.<member>"`.
 
 **C8. `animate_wl_pl_spectra` documents a `suptitle_fmt` parameter that has never
-existed.** **[FIXED — 2026-08-12]** The `**engine_kwargs` passage at `plotting.py:1765`
+existed.** **[FIXED — 2026-08-12]** The `**engine_kwargs` passage in `animate_wl_pl_spectra`
 offered
 ```suptitle_fmt``, ``n_frames``, ``writer``` as examples of what is forwarded to
 `animate_panels`. `animate_panels` has no `suptitle_fmt` — the shared title is assembled
@@ -981,8 +994,8 @@ all of which exist. Rewritten rather than patched, because `n_frames` was replac
 `frames=` in the same change (decision `0014`).
 
 **C9. A stale "circular import" comment in `plot_power_series`.** **[FIXED — 2026-08-13]**
-`plotting.py:2646` read `from .constants import HC_EV_NM  # local import to avoid circular
-at module level`. There is no circularity to avoid: `constants.py` imports only
+`plot_power_series` opened with `from .constants import HC_EV_NM  # local import to
+avoid circular at module level`. There is no circularity to avoid: `constants.py` imports only
 `scipy.constants`, and `plotting` already did `from .constants import _x_axis_name_unit`
 at module level (`:28`). The comment asserted a constraint that does not exist, which is
 the kind of thing a later reader defers to.
@@ -998,8 +1011,8 @@ reason.
 **D1.** `_draw_region_box` existed **verbatim** in both `processing.py` and
 `diffusion.py` — 12 lines, identical signature and defaults, confirmed by diff on
 2026-07-30 and again on 2026-08-10. Only the `processing` copy was ever reached:
-every call site qualifies it (`loaders.py:4760`, `plotting.py:1940/1943/2292/2298`),
-and nothing named the `diffusion` one.
+every call site qualifies it as `processing._draw_region_box`, in both `loaders` and
+`plotting`, and nothing named the `diffusion` one.
 
 **[FIXED — 2026-08-10]** **[verified by running]** Deleted the `diffusion` copy, and
 with it `import matplotlib.patches as patches` at the top of that module — the dead
@@ -1010,19 +1023,19 @@ Nothing to test, and that is the point of taking it first: the deleted name was
 unreachable, so a regression check is the only check available. 420 tests green,
 `mkdocs build --strict` green (the name is private, so it was never rendered).
 
-*Found while verifying this:* `loaders.py:58` imports the bare name
-(`from .processing import _draw_region_box, …`) but `loaders.py:4760` calls it as
+*Found while verifying this:* `loaders` imports the bare name
+(`from .processing import _draw_region_box, …`) but every call site spells it
 `processing._draw_region_box`, so **that import is unused**. Left alone — a separate
 change, and it wants the whole line checked rather than one name pulled out of it.
 
 **D2.** Two laser-circle drawers with different styling defaults:
 `loaders._AttoCubeImage._add_laser_circle` (dashed, no halo, `loaders.py:5088`) and
-`plotting._draw_laser_circle` (solid + halo, `plotting.py:1884`), plus a third inline copy
-in `ImageSequencePanel.init_artists` (`plotting.py:1367`).
+`plotting._draw_laser_circle` (solid + halo), plus a third inline copy in
+`ImageSequencePanel.init_artists`.
 *Fix:* one helper in `plotting`; `loaders` calls it.
 
-*Reference corrected 2026-08-12:* this entry used to cite the inline copy at
-`plotting.py:674`, which was `animate_real_space_PL_map`'s — **A3** replaced that one with
+*Reference corrected 2026-08-12:* this entry used to cite the inline copy in
+`animate_real_space_PL_map` — **A3** replaced that one with
 `_draw_laser_circle`. The surviving inline copy is `ImageSequencePanel`'s, and it is the
 one an `AnimationPanel` author would copy from.
 
@@ -1055,7 +1068,7 @@ loop.
 
 **D7.** `plotting` imports `from . import diffusion as _diffusion` at module top and
 then re-imports the same module inside `plot_diffusion_cloud` and
-`DiffusionCloudPanel._get_seq_result`. Similarly `plotting.py:2003` has a block
+`DiffusionCloudPanel._get_seq_result`. Similarly `plotting` has a block
 commented "Lazy imports" that is in fact executed at module import.
 
 **D8.** Plotting bypasses `processing`: `plot_spectrum` / `plot_single_spectrum` do
@@ -1136,7 +1149,7 @@ Whether the converters belong on `main` is a merge decision, not a packaging one
   gives different contours.
 - `analyse_diffusion_cloud` rebinds its own `threshold` parameter to the computed
   value (line 316).
-- `diffusion.py:35` uses an absolute `from tmdc_optics_tools.loaders import ...`
+- `diffusion` uses an absolute `from tmdc_optics_tools.loaders import ...`
   where the rest of the package uses relative imports.
 - `DiffusionSequenceResult.x_real` indexes `vals[0]` — `IndexError` on an empty
   sequence.
@@ -1253,19 +1266,19 @@ have to be guessed per task. Grouped here so they can be answered in one pass.
   filled by inference either way.
 
 **E11. `plot_diffusion_cloud` is over-parameterised because its return contract is
-broken.** `plotting.py:1438` takes ~30 keyword arguments, of which ~15 are pure
+broken.** `plot_diffusion_cloud` takes ~30 keyword arguments, of which ~15 are pure
 matplotlib styling: `contour_color`/`contour_lw`/`contour_ls`,
 `centroid_color`/`centroid_marker`/`centroid_ms`, `roi_color`, `bg_region_color`,
 `laser_color`/`laser_linewidth`/`laser_linestyle`/`laser_halo_color`,
 `xlabel`/`ylabel`, `colorbar_label`.
 
 The cause is the return, not the signature. The function returns `fig, ax, result`
-(`plotting.py:1592`) — a `DiffusionResult`, not an artist — so it breaks the
+— a `DiffusionResult`, not an artist — so it breaks the
 `(fig, ax, <artist>)` convention and hands back no handle for the image, contour,
 centroid marker, or laser circle. Callers therefore have **no** route to restyle
 after the fact, and the style parameters are the workaround. Every one of them is a
 permanent public commitment for something the caller could otherwise do in one line.
-A related symptom sits in the body: `ax.legend(fontsize=5)` (`plotting.py:1583`)
+A related symptom sits in the body: `ax.legend(fontsize=5, …)`
 hardcodes what `set_style`'s `legend.fontsize` already governs, overriding the user's
 own style with no opt-out.
 
@@ -1402,8 +1415,8 @@ scale override.
 ---
 
 **E16. `plot_power_series` draws a twin axis and does not return it.** With
-`twin_axis=True` the function creates `ax_twin = ax.twiny()` (`plotting.py:2731-2733`),
-labels it, and returns `fig, ax, cb, lines` (`:2759`). The axes object is unreachable, so
+`twin_axis=True` the function creates `ax_twin = ax.twiny()`, labels it, and
+returns `fig, ax, cb, lines`. The axes object is unreachable, so
 restyling its ticks or label — the thing the return contract exists to make possible — is
 impossible without walking `fig.axes`.
 
@@ -1418,7 +1431,7 @@ energy↔wavelength helper (see **E17**) rather than on its own.
 
 **E17. Two implementations of an energy↔wavelength second axis, and the newer mechanism is
 the better one.** `plot_power_series(twin_axis=)` builds it with `ax.twiny()` and manually
-relabelled ticks (`plotting.py:2733-2751`): tick *positions* stay in the primary unit and
+relabelled ticks: tick *positions* stay in the primary unit and
 only their text is rewritten, so the nm labels fall wherever the eV ticks happened to land
 (2.048, 1.937 …) and the axis freezes if anyone later changes `set_xlim`.
 
@@ -1457,7 +1470,7 @@ the constructor cannot catch. Pins the frame-count minimum, an explicit `n_frame
 advance, the suptitle composition (counter, panel labels, dropped `None`s, the
 nothing-to-say case), that the title tracks the frame *through a render* rather than
 freezing, and that a label resolved inside `init_artists` still reaches the title — the
-ordering the load-bearing comment at `plotting.py:1617` describes but nothing enforced.
+ordering the load-bearing comment in `animate_panels` describes but nothing enforced.
 
 *Two things measuring it settled.* Building an animation and priming the writer both draw
 frame 0, so `update` sees `[0, 0, 0, 0, 1, 2, 3]` for a four-frame animation; the tests
@@ -1467,8 +1480,7 @@ than matplotlib's priming. And the layout assertion turned up **E20**.
 **E20. The shared title is placed from a hardcoded axes fraction and collides with anything
 the panels draw on top.** **[FIXED — 2026-08-12]** **[verified by running]**
 `animate_panels` puts its shared title at
-`transAxes` y=1.04, or y=1.12 with each panel's axes title nudged `pad=-4`
-(`plotting.py:1646-1674`). Both numbers are guesses about how tall the panels' decorations
+`transAxes` y=1.04, or y=1.12 with each panel's axes title nudged `pad=-4`. Both numbers are guesses about how tall the panels' decorations
 are, and the title is an axes artist so nothing lays it out.
 
 A panel that adds a secondary top axis is enough to break it. Matplotlib's
@@ -1533,7 +1545,7 @@ docstring no longer claims it exists for blitting.
 `HTMLWriter`, so flipping blit back on fails on behaviour rather than on a flag.
 
 **E19. `DiffusionCloudPanel` analyses every frame even when the animation shows fewer.**
-`_get_seq_result` (`plotting.py:2309`) calls `analyse_diffusion_sequence(self.scan, …)` with
+`_get_seq_result` (`DiffusionCloudPanel._get_seq_result`) calls `analyse_diffusion_sequence(self.scan, …)` with
 no frame limit, so the segmentation, smoothing and contour extraction run over the whole
 sequence. `animate_panels`' frame count only limits what is *drawn*: `init_artists`
 receives `n_frames` and `_resolve_var` truncates the label array to it, but the analysis has

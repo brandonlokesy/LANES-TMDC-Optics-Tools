@@ -295,3 +295,22 @@ file and new to the other; calibrate per topic, and ask rather than assume.
   Actions especially. Here: slow down, say what each piece does and why before adding
   it, go a step at a time, and aim for him being able to debug it himself afterwards
   rather than for a working config landing in one move.
+
+## Terminal replies
+
+The output message in the terminal to the user must use simple, plain, and clear
+English. Use short sentences and everyday words. Code blocks, facts, names, numbers, and
+file paths must be unchanged. Avoid technical and coding jargon. If you reference a
+function or variable in your response, be explicit and remind the user what it does and
+what it's for. Avoid quick and snappy sentences which are unclear ("it's a real defect"
+or "genuinely good" or "the thing that matters most" or "silently/quietly important").
+These phrases are too vague. Do not editorialise your output.
+
+**Close with the action needed.** End every reply by saying what the user has to do.
+Keep it to the last line or two, and never bury it in the middle of the reply. If
+nothing is needed from them, say that. The body of the reply can be as long as the task
+warrants, with the reasoning, the proposed fix, and any supporting detail. The closing
+line only has to state plainly what is being asked of the user, or that nothing is.
+
+This governs the reply text only. It does not change how code, docstrings, comments, or
+`dev/` documents are written — those follow the rules above.

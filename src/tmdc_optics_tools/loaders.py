@@ -2510,7 +2510,7 @@ class _AttoCubeSweep:
 
     # --- Locating a sweep point ----------------------------------------------
 
-    def _lookup_axis(self, axis: str) -> tuple:
+    def _lookup_axis(self, axis: str, param : str = "axis") -> tuple:
         """
         Return ``(values, label, unit)`` for an axis name.
 
@@ -2518,17 +2518,20 @@ class _AttoCubeSweep:
         nest coordinates.  Anything else resolves the way ``sweep=`` does — a
         registry key or a raw row label — so any per-sweep-point quantity can be
         looked up, whether or not it is what the sweep was declared with.
+
+        *param* is the name of the argument being resolved, interpolated into
+        every message so the error names the argument the caller actually passed.
         """
         if axis == "sweep":
             return self.sweep_axis, self.sweep_label, self.sweep_unit
         if axis in ("fast", "slow"):
-            nest = self._require_nesting(f"axis={axis!r}")
+            nest = self._require_nesting(f"{param}={axis!r}")
             return (getattr(nest, f"{axis}_axis"),
                     getattr(nest, f"{axis}_label"),
                     getattr(nest, f"{axis}_unit"))
         try:
             _, source, label, unit = self._resolve_sweep(
-                axis, None, None, param="axis")
+                axis, None, None, param=param)
         except ValueError as exc:
             raise ValueError(
                 f"{exc}\n  Also accepted : 'sweep' (the declared sweep axis), "

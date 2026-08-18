@@ -903,13 +903,70 @@ Why the laser plateaued, and why `Fianium_Select_A4 = 160000` reads 417 µW here
 `161000` reads 0.83 µW in `PL_Vbot_power_sweep_26_08_10_…` under identical logged
 settings, is a lab question.
 
-**Also found, open:** `_axis_atol` miscounts a *constant* axis. For a row that only
-wobbles, `1e-3 ×` its noise-only span falls below the typical gap between readings, so a
-constant 500 µW row with 1 µW of noise counts as **62** distinct values instead of 1.
-This reaches `_warn_if_sweep_axis_repeats` and the accessor match, not the nest.
-`varying_parameters` already holds the sounder scale reference — span against the row's
-own RMS rather than against itself — for `_axis_atol` to borrow as a floor. Its own
-change; nothing was touched here.
+**Also found here, fixed separately as A20.** `_axis_atol` could not recognise an axis
+that never moved. The sketch left above — *"borrow `varying_parameters`' RMS scale as a
+floor"* — was **measured to be wrong** and was not taken; see A20 for what a floor does
+to a fine sweep on a large offset.
+
+**A20. A sweep axis that never moved was read as one setting per spectrum.**
+**[FIXED — 2026-08-18]** **[verified against real data]** Found 2026-08-17 while closing
+A19. `_axis_atol` answers *how far apart may two readings be and still be the same
+instrument setting*, and answered it with `1e-3 ×` the axis's own span. That is circular
+when the axis did not move: the span is then the instrument's own scatter, so the
+tolerance lands a thousandth of the scatter it exists to absorb, and a **quieter**
+instrument does not help — the tolerance shrinks in the same proportion. Measured across
+four scatter levels on a held 500 µW setting: 59, 62, 58 and 64 settings found, never 1.
+
+Not a cosmetic miscount. Two documented safeguards failed, neither loudly. On 12 spectra
+taken at one power setting:
+
+- `_warn_if_sweep_axis_repeats` **said nothing**. It compares settings against sweep
+  points, got 12 of 12, and concluded each spectrum had its own position — while its own
+  docstring names repeat measurements at one setting as part of what it catches.
+- `nearest_index(500.0)` returned index 5 of 12 equally good points **with no warning**,
+  and `get_spectrum_at` did not refuse, against decision `0004` §5.
+
+*Fixed* by `_axis_driven`, which asks whether a row was driven on **two independent
+signs, either sufficient**: its span exceeds `rtol ×` its RMS magnitude, or its readings
+step through that span a small part at a time *in acquisition order*. Each is blind where
+the other sees — the first misses a fine sweep on a large offset (300.0→300.2 K travels
+0.07% of its readings), the second misses a coarse sweep whose few points are as far
+apart as scatter would be. A row is called held only when both fail, so a false collapse
+needs both wrong at once. `varying_parameters` now shares the same helper, so the report
+and the grouping cannot contradict each other; its ranking by span/RMS is unchanged, and
+its membership is unchanged on every committed file.
+
+**The reach is narrower than it first appears, and is pinned by a test.** Because the
+first sign fires as soon as scatter exceeds `rtol` of the reading, a held setting is
+recognised only while the read-back is stable to better than that. Measured: 100% up to
+1e-4 relative scatter, 97%/94%/70% at 2e-4 for n = 12/20/66, and **0% from 1e-3**. So a
+source-meter holding a gate (20 µV on 5 V) is recognised; a power meter holding a power
+(3 µW on 800 µW) is not, and still reads as many settings exactly as before. Closing
+that would need a rule that survives both a log-spaced sweep and a flattened sawtooth —
+see the rejected alternatives in `0018`.
+
+Three call sites needed patching alongside, each an advice path that only became
+*reachable*: the repeat warning said *"1 different values"* and offered nest advice for a
+row that never moved; the accessor refusal did the same; and `_nearest`'s distance
+warning reported a value as absent from the only axis holding it, because on a held row
+the typical gap it compares against is scatter-sized. Its threshold is now floored at
+`_axis_atol`, which on a driven axis is far the smaller of the two and changes nothing.
+
+Verified not to disturb anything else, by measurement rather than reading: `_axis_atol`
+has exactly two callers; every tracked spectral export and the TRPL directory was
+reloaded and every parameter row reclassified, flipping exactly one — `V_A` in
+`PL_Vbot_power_sweep_26_08_10_…csv`, held at −5 V with 18 µV of scatter, which *should*
+be one setting and is not that file's sweep axis; and every module-level parameter dict
+in `tests/` was reclassified with zero flips, cross-checked by grep (tests add scatter
+only to counts, images and spectra, never to a parameter row). `sweep_grid()` counts with
+exact `np.unique` and was untouched. 676 tests pass.
+
+Covered by `tests/test_loaders_axis_tolerance.py`: ten axes parametrised against the
+settings they hold, a companion test pinning that each held row *would* defeat a
+span-only tolerance, the two restored safeguards, the absence of the spurious distance
+warning, the fine-sweep-on-an-offset regression, and
+`test_the_reach_of_the_detection_is_deliberate` fixing the boundary above. Fixtures draw
+from per-row seeded generators after an order-dependent draw made one assertion flaky.
 
 ## B. Dead parameters — accepted, documented, silently ignored
 

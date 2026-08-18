@@ -224,6 +224,12 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
 - Don't name an instrument in a parameter (`force_power_by_fianium=`); which row drives
   what is declared per session, through `*_group_by=`. Don't make a level's coordinate the
   mean or the first reading instead of the median.
+- Don't decide whether an axis was driven from one sign. Both are needed and either is
+  sufficient — dropping sign 1 collapses a flattened nest, dropping sign 2 collapses a
+  narrow sweep on a large offset (300.0–300.2 K). Don't floor `_axis_atol` at the row's
+  magnitude, respell sign 2 as a gap *ratio*, or scale its threshold by the point count:
+  all three are measured to collapse a real axis. Don't add `sweep_atol=` until a
+  committed file needs it.
 - Don't reshape `spectra` when a nest is declared; don't extend `axis=` to nests.
 - Don't make the accessors return one match for an ambiguous coordinate.
 - Don't give `plot_spectrum` a positional `value`, or truncate a fractional index.
@@ -257,11 +263,6 @@ bwarea semantics are wanted at all.
 - `_is_image_csv` accepts a two-row spectrum as an image, so a directory of single
   spectra loads as 2×N "images". `_read_block_layout` already draws this distinction
   correctly; copy that rule.
-- `_axis_atol` miscounts a **constant** axis: 0.1% of a noise-only span falls below the
-  typical gap between readings, so a 500 µW row wobbling by 1 µW counts as 62 distinct
-  values, not 1. Reaches `_warn_if_sweep_axis_repeats` and the accessor match, not the
-  nest. `varying_parameters` already has the scale reference to borrow (span against the
-  row's own RMS). Its own change.
 - **Every `stacklevel` in `loaders.py` is unverified** — 15 `warnings.warn` calls, no
   test pinning where any of them points, and two chains confirmed wrong. A wrong value
   also *suppresses repeats*, so it is a diagnostics failure rather than a cosmetic one.

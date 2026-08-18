@@ -1183,11 +1183,10 @@ class SweepGrid(NamedTuple):
                 f"{self.n_fast * self.n_slow}")
 
 
-# Fraction of an axis's own span by which two neighbouring readings may differ
-# and still count as the same value.  Scaled to the span rather than to the value
-# so that an axis crossing zero — an anti-symmetric field sweep, say — is handled
-# like any other, and loose enough for a derived axis that is recomputed per sweep
-# point rather than read back as a repeated literal.
+# Fraction by which two readings of a *driven* axis may differ and still count as the
+# same value, and — the same number used the other way round — the fraction of its own
+# magnitude a row must travel before it counts as driven at all.  Relative rather than
+# absolute so it carries across volts, microwatts and kelvin without a table.
 #
 # This describes and matches the *sweep axis*; it does not resolve a nest.  One
 # tolerance for a whole axis has to sit above the scatter within a level and below
@@ -1196,12 +1195,71 @@ class SweepGrid(NamedTuple):
 # does not.  ``_levels_separate`` compares each level against its neighbour instead.
 _AXIS_RTOL = 1e-3
 
+# Fraction of its own travel by which consecutive readings may step and still be a
+# sweep progressing through its range, rather than scatter jumping about inside one.
+# A driven axis of n points steps about 1/(n-1) of its travel each time — 10% at 11
+# points, 0.5% at 201 — whereas scatter sits near 40% however many readings there are.
+_AXIS_STEP_FRAC = 0.1
+
+
+def _axis_driven(values: np.ndarray, rtol: float = _AXIS_RTOL) -> bool:
+    """
+    Whether *values* record a driven axis rather than one setting plus scatter.
+
+    Two independent signs, either of which is enough, because each is blind where the
+    other sees.  **How far it travels for its own size** misses a fine sweep sitting on
+    a large offset — 300.0 K to 300.2 K travels 0.07% of its readings — while **how far
+    consecutive readings step** misses a coarse sweep, whose few points are as far apart
+    as scatter would be.  Requiring both to agree before calling an axis undriven is
+    what keeps a real sweep from being collapsed: the safe error here is leaving scatter
+    uncollapsed, which is what happens without either test.
+
+    That safety sets the reach.  Because the first sign fires as soon as a row's span
+    exceeds *rtol* of its magnitude, a held setting is recognised only while its
+    read-back is stable to better than that — reliably so for a commanded row (a
+    source-meter reports a 5 V gate to ~20 µV) and not at all for a power meter, whose
+    scatter runs to a few parts per thousand of the reading.  A noisy instrument holding
+    one setting therefore still reads as many, exactly as it did before.
+    """
+    finite = values[np.isfinite(values)]
+    if finite.size < 2:
+        return False
+    travel = float(np.ptp(finite))
+    if travel == 0.0:
+        return False        # every reading identical: one setting, nothing to judge
+
+    # RMS rather than |mean|, because a row can sit astride zero — an anti-symmetric
+    # gate pair sweeping the field does — and its mean is then no measure of how large
+    # it is.  Floored so an identically zero row cannot divide by nothing.
+    size = max(float(np.sqrt(np.mean(finite ** 2))), np.finfo(float).tiny)
+    if travel > rtol * size:
+        return True
+
+    # (n_finite - 1,) consecutive differences in *acquisition order*, which is what
+    # scatter destroys and a sweep preserves.  Median rather than mean, so the jump
+    # back at the end of each row of a flattened nest is outvoted rather than read as
+    # scatter.
+    return float(np.median(np.abs(np.diff(finite)))) < _AXIS_STEP_FRAC * travel
+
 
 def _axis_atol(values: np.ndarray, rtol: float = _AXIS_RTOL) -> float:
-    """Absolute tolerance for *values*, scaled to their span."""
+    """
+    How far apart two readings may be and still count as the same setting.
+
+    A driven axis is judged on a fraction of its travel, which is a fair proxy for how
+    finely it steps.  An undriven one is judged on the whole of it: there the travel
+    *is* the instrument's scatter, so everything inside it is the one setting that was
+    set.  Taking a fraction of the travel in that case is circular — the tolerance
+    shrinks with the scatter it exists to absorb, so it never absorbs it, and a quieter
+    instrument does not help.
+    """
     finite = values[np.isfinite(values)]
-    span   = float(np.ptp(finite)) if finite.size else 0.0
-    return max(rtol * span, np.finfo(float).tiny)
+    if finite.size == 0:
+        return np.finfo(float).tiny
+    travel = float(np.ptp(finite))
+    if _axis_driven(values, rtol):
+        return max(rtol * travel, np.finfo(float).tiny)
+    return max(travel, np.finfo(float).tiny)
 
 
 def _level_labels(values: np.ndarray, atol: float) -> tuple:
@@ -1730,9 +1788,16 @@ class _AttoCubeSweep:
             return
 
         # For the message only: naming the nest, when there is one to name, turns
-        # "this is wrong" into "here is what to use instead".
+        # "this is wrong" into "here is what to use instead".  A single value is its
+        # own case — the row was held still, so it is not a nest axis at all and
+        # pointing at fast_sweep= would send the reader the wrong way.
         structure = self._nesting if self._nesting is not None else self.sweep_grid()
-        if structure is not None:
+        if n_distinct == 1:
+            fix = (" This row was held at one setting for the whole file, so these "
+                   "are repeat measurements rather than a sweep: varying_parameters()"
+                   " lists the rows that did move, and sweep=None gives the flat "
+                   "index.")
+        elif structure is not None:
             fix = (f" These points are a 2-D nest ({structure}) — address it with "
                    f"as_grid() and get_spectrum_at(fast=..., slow=...).")
         else:
@@ -1740,9 +1805,10 @@ class _AttoCubeSweep:
                    "slow_sweep=; if they are repeat measurements at each setting, "
                    "sweep=None gives the flat index.")
 
-        unit = f" {self._sweep_unit}" if self._sweep_unit else ""
+        unit  = f" {self._sweep_unit}" if self._sweep_unit else ""
+        value = "value" if n_distinct == 1 else "different values"
         warnings.warn(
-            f"sweep={self.sweep_type!r} takes only {n_distinct} different values "
+            f"sweep={self.sweep_type!r} takes only {n_distinct} {value} "
             f"across {finite.size} sweep points in '{self.path}' "
             f"({finite.min():.4g} → {finite.max():.4g}{unit}), so it does not "
             f"label them individually. Plotted against it, points sharing a value "
@@ -2851,7 +2917,12 @@ class _AttoCubeSweep:
                   if finite.size > 1 else 0.0)
         suffix = f" {unit}" if unit else ""
 
-        if abs(found - value) > 0.5 * step:
+        # Half a typical gap is the distance at which a request has clearly missed a
+        # grid point.  On an undriven axis those gaps are scatter-sized, so that alone
+        # would report a value as absent when it is the only value the axis holds; the
+        # tolerance floors it, and on a driven axis it is far the smaller of the two
+        # and changes nothing.
+        if abs(found - value) > max(0.5 * step, _axis_atol(values)):
             warnings.warn(
                 f"Looking up {value:.6g}{suffix} on {label} (axis={axis!r}) found "
                 f"no point there; using index {idx} at {found:.6g}{suffix}, which "
@@ -2882,7 +2953,14 @@ class _AttoCubeSweep:
             return idx
 
         grid = self.sweep_grid()
-        if grid is not None:
+        if matches.size == self.n_sweeps:
+            # Every point matched, so the axis holds one setting and nothing to select
+            # between.  A nest is the wrong suggestion here: a row that never moved is
+            # not an axis of one.
+            fix = (" This row was held at one setting for the whole file, so no value "
+                   "on it picks out a spectrum. varying_parameters() lists the rows "
+                   "that did move.")
+        elif grid is not None:
             fix = (f" This file looks like {grid} — declare it with "
                    f"fast_sweep='{grid.fast_label}', slow_sweep='{grid.slow_label}', "
                    f"and fast= / slow= then return every spectrum at a coordinate "
@@ -3028,16 +3106,20 @@ class _AttoCubeSweep:
         Report which parameter rows actually changed across the sweep.
 
         Evidence for choosing a *sweep*, and the check for "was only one gate
-        driven?".  A row counts as varying when its span exceeds *rtol* times its
-        own RMS magnitude, so instrument read-back jitter on a nominally static
-        channel does not register.  RMS rather than mean, so that a row straddling
-        zero — an anti-symmetric gate pair, say — is measured by how large it is
-        rather than by how nearly it cancels.
+        driven?".  A row counts as varying on either of two signs: its span exceeds
+        *rtol* times its own RMS magnitude, or its readings step through that span a
+        small part at a time in acquisition order.  Read-back jitter on a nominally
+        static channel satisfies neither, so it does not register; a fine sweep
+        sitting on a large offset satisfies the second even though it fails the
+        first.  RMS rather than mean, so that a row straddling zero — an
+        anti-symmetric gate pair, say — is measured by how large it is rather than
+        by how nearly it cancels.
 
         Parameters
         ----------
         rtol : float
-            Relative span above which a row is reported.  Default ``1e-3``.
+            Relative span above which a row is reported, and the threshold the
+            same test applies inside the loader.  Default ``1e-3``.
 
         Returns
         -------
@@ -3065,22 +3147,22 @@ class _AttoCubeSweep:
             finite = arr[np.isfinite(arr)]
             if finite.size < 2:
                 continue
-            span  = float(np.ptp(finite))
-            # Relative to the row's own magnitude: a 1 mV wobble on a 10 V gate
-            # is noise, the same wobble on a 2 mV channel is a sweep.
-            #
-            # RMS rather than |mean|, because a row can sit astride zero — an
-            # anti-symmetric gate pair sweeping the field does, and is routine —
-            # and its mean is then no measure of how large it is.  Flooring a
-            # vanishing mean at finfo.tiny turned the division by zero into a
-            # division by 2.2e-308, i.e. into inf.  RMS cannot vanish unless the
-            # row is identically zero, which a zero span already excludes; the
-            # floor below is belt and braces.  The threshold uses the same scale
-            # as the ranking, so the two cannot disagree about what is noise.
+            span = float(np.ptp(finite))
+            # Ranked by span relative to the row's own magnitude.  RMS rather than
+            # |mean|, because a row can sit astride zero — an anti-symmetric gate
+            # pair sweeping the field does, and is routine — and its mean is then no
+            # measure of how large it is.  Flooring a vanishing mean at finfo.tiny
+            # turned the division by zero into a division by 2.2e-308, i.e. into
+            # inf.  RMS cannot vanish unless the row is identically zero, which a
+            # zero span already excludes; the floor below is belt and braces.
             scale = max(float(np.sqrt(np.mean(finite ** 2))),
                         np.finfo(float).tiny)
-            # Checks if span of the data is bigger than the defined jitter threshold
-            if span > rtol * scale:
+            # Membership comes from the same helper the loader groups readings with,
+            # so this report and the tolerance behind get_spectrum_at() cannot
+            # disagree about which rows are only jittering.  It is the wider test of
+            # the two: a fine sweep on a large offset fails span-against-RMS and is
+            # still caught, which the ranking below then places low, correctly.
+            if _axis_driven(arr, rtol):
                 found.append((span / scale, label,
                               (float(finite.min()), float(finite.max()), span)))
         found.sort(reverse=True)

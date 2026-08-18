@@ -116,5 +116,6 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0015](0015-reversed-frame-window-endpoints-are-refused.md) | A reversed coordinate window is refused, not reversed for you | 2026-08-13 | Accepted |
 | [0016](0016-nest-levels-must-hold-apart.md) | A nest is verified by levels holding apart, not by a tolerance | 2026-08-17 | Accepted |
 | [0017](0017-asserted-shape-and-grouping-row.md) | A nest's shape and its grouping row are declared with named keywords | 2026-08-17 | Accepted |
+| [0018](0018-a-held-axis-is-recognised-by-two-signs.md) | An axis that never moved is recognised by two signs, either sufficient | 2026-08-18 | Accepted |
 
 This table is the one mutable part of the folder.

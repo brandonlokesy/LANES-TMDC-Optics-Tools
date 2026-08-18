@@ -511,9 +511,9 @@ real-space directory is excluded by `_classify_csv` — both pinned by the exist
 no-warning tests.
 
 **A13. A declared nest was refused when a level was wider than the axis tolerance.**
-**[FIXED — 2026-08-07]** **[verified against real data]** Reported 2026-08-07 from
-`examples/data/voltage-power-sweep/PL_Vbot_power_sweep_test_3_…_iter_0.csv` — a
-5-point `V_A` sweep inside 3 power levels, which
+**[FIXED — 2026-08-07]** **[verified against real data]** Reported 2026-08-07 from the
+uncommitted export `PL_Vbot_power_sweep_test_3_…_iter_0.csv` — a 5-point `V_A` sweep
+inside 3 power levels, which
 `fast_sweep="bottom_voltage", slow_sweep="power"` refused with *"the counts multiply
 correctly, but the values do not repeat in a regular nest"*.
 
@@ -808,9 +808,9 @@ stays silent; only "too short to finish" is an error. Cheap to pin: `diffusion` 
 tests at all today, so this wants the first one.
 
 **A19. A measured nest axis could not be resolved at all, in either orientation.**
-**[FIXED — 2026-08-17]** **[verified against real data]** Reported 2026-08-14 from
-`examples/data/voltage-power-sweep/PL_Vbot_power_sweep_test_26_08_07_16_25_51_iter_0.csv`
-— 11 `V_A` steps inside 6 power levels, 66 spectra, which
+**[FIXED — 2026-08-17]** **[verified against real data]** Reported 2026-08-14 from the
+uncommitted export `PL_Vbot_power_sweep_test_26_08_07_16_25_51_iter_0.csv` — 11 `V_A`
+steps inside 6 power levels, 66 spectra, which
 `fast_sweep="bottom_voltage", slow_sweep="power"` refused.
 
 This is the case **A13 named and left open**: *"an axis whose scatter approaches its

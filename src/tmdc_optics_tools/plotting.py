@@ -2818,11 +2818,16 @@ from matplotlib.colors import Normalize, LogNorm, BoundaryNorm
 from matplotlib.cm import ScalarMappable
 
 
-def plot_power_series(
+def plot_spectral_series(
     scan,
     ax               = None,
     figsize          : tuple  = (6, 4),
     dpi              : int    = None,
+    # --- nest pinning (nested scans only) ---
+    fast             : float  = None,
+    index_fast       : int    = None,
+    slow             : float  = None,
+    index_slow       : int    = None,
     # --- x-axis ---
     x_axis           : str    = "energy",
     x_range          : tuple  = None,
@@ -2831,21 +2836,23 @@ def plot_power_series(
     spectra_source   : str    = "best",
     # --- background subtraction (post-load, in addition to loader bg) ---
     bg_region        : tuple  = None,
-    # --- sweep selection and stacking ---
+    # --- series selection and stacking ---
+    series_axis      : str    = "sweep",
+    series_range     : tuple  = None,
     sweep_step       : int    = 1,
     spectrum_offset  : float  = 0.0,
     # --- colour mapping ---
-    cmap             : ColormapLike = "viridis",
-    power_scale      : str    = "linear",
-    power_range      : tuple  = None,
+    cmap             : ColormapLike = "magma",
+    color_scale      : str    = "linear",
+    color_range      : tuple  = None,
     # --- line style ---
     lw               : float  = 1.0,
     alpha            : float  = 1.0,
-    alpha_by_power   : bool   = False,
+    alpha_by_series  : bool   = False,
     alpha_min        : float  = 0.2,
     # --- colorbar ---
     colorbar         : bool   = True,
-    cb_label         : str    = "Power (µW)",
+    cb_label         : str    = None,
     cb_labelpad      : float  = 12.0,
     # --- peak marker ---
     peak_marker      : bool   = False,
@@ -2856,26 +2863,40 @@ def plot_power_series(
     ylabel           : str    = None,
 ) -> tuple:
     """
-    Plot a power-series of PL spectra with each line coloured by optical power.
+    Plot a series of spectra, one line per sweep point, coloured by coordinate.
 
-    Each sweep in *scan* is drawn as a line whose colour is taken from *cmap*
-    mapped linearly (or logarithmically) onto the ``scan.power`` array.  A
-    colorbar indicates the optical power scale.
+    Every point of the series is drawn as a line whose colour is taken from
+    *cmap* mapped onto the series coordinate, with a colorbar naming that
+    coordinate.  A flat sweep is itself the series.  A declared nest is pinned
+    on one of its two axes, and the axis left free becomes the series.
 
     Parameters
     ----------
     scan : AttoCubeSpectralSweep
-        Must expose ``power`` (µW), ``energy``/``wavelength``, and the chosen
-        *spectra_source* attribute.
+        Must expose ``sweep_axis``, ``energy`` / ``wavelength``, and the chosen
+        *spectra_source* attribute.  A nested scan must have been loaded with
+        ``fast_sweep=`` and ``slow_sweep=``.
     ax : matplotlib.axes.Axes, optional
         Axes to draw into.  A new figure is created when ``None``.
     figsize : tuple
-        Figure size in inches (used when *ax* is ``None``).
+        Figure size, used only when *ax* is ``None``.
     dpi : int, optional
-        Figure DPI (used when *ax* is ``None``).
+        Figure resolution, used only when *ax* is ``None``.
 
-    x-axis
-    ------
+    Nest pinning
+    ------------
+    fast, slow : float, optional
+        Coordinate at which to hold that nest axis.  The other axis becomes the
+        series.  Nested scans only.
+    index_fast, index_slow : int, optional
+        The same, by integer position rather than by coordinate.
+
+        Name exactly one of these four on a nested scan and none of them on a
+        flat one.  Holding the fast axis returns one spectrum per slow point and
+        vice versa, so the series always runs along the axis *not* named.
+
+    Axes
+    ----
     x_axis : {"energy", "wavelength"}
         Primary x-axis.  Default ``"energy"``.
     x_range : tuple of (x_min, x_max), optional
@@ -2902,11 +2923,35 @@ def plot_power_series(
         Additional background region subtracted *after* loading (same units
         as *x_axis*).  Applied on top of any background already baked into
         *spectra_source*.  ``None`` (default) skips this step.
+
+    Series
+    ------
+    series_axis : str
+        Which quantity the series is read against — the coordinate that colours
+        the lines, labels the colorbar, and *series_range* is measured in.
+        ``"sweep"`` (default) is the scan's declared sweep axis.  Anything else
+        is spelled as ``sweep=`` spells it: a registry key such as
+        ``"top_voltage"`` or ``"carrier_density"``, or a raw row label such as
+        ``"V_A"``.  Use it when a scan is declared in one coordinate and the
+        figure is wanted in another — a displacement-field sweep driven by both
+        gates, read in top-gate volts.
+
+        Flat sweeps only.  On a nest the free axis carries its own coordinate,
+        label and unit, and the colours follow it.
+    series_range : tuple of (low, high), optional
+        Draw only the points whose series coordinate falls within these bounds,
+        in the units of *series_axis*.  Inclusive at both ends.  ``None`` for
+        either end leaves it unbounded, ``None`` for the whole argument (default)
+        draws every point.
+
+        The endpoints are bounds on the coordinate, not a direction of travel, so
+        a descending sweep still takes them low-to-high; reversed endpoints
+        raise.  A non-finite coordinate never falls inside a bound, so a derived
+        axis with gaps drops those points.
     sweep_step : int
-        Plot every *sweep_step*-th sweep, starting from the first.  ``1``
-        (default) plots all of them, ``2`` every other one, and so on.  Must
-        be a positive integer.  Thinning the lines does not change the
-        colorbar, which always spans the whole scan's power range.
+        Plot every *sweep_step*-th point of what *series_range* kept, starting
+        from the first.  ``1`` (default) plots all of them, ``2`` every other
+        one, and so on.  Must be a positive integer.
     spectrum_offset : float
         Stack the plotted spectra by adding a cumulative vertical shift, in
         the units of the plotted array: the first drawn spectrum is shifted by
@@ -2927,30 +2972,35 @@ def plot_power_series(
     --------------
     cmap : str, Colormap, or sequence of colours
         Passed to :func:`get_cmap`.  Default ``"viridis"``.
-    power_scale : {"linear", "log"}
-        Colormap normalisation.  Default ``"linear"``.
-    power_range : tuple of (p_min, p_max), optional
-        Clip the colormap to this power range (µW).  Defaults to
-        ``(scan.power.min(), scan.power.max())``.
+    color_scale : {"linear", "log"}
+        Colormap normalisation.  Default ``"linear"``.  A log scale needs a
+        positive coordinate; on one that crosses zero the lower limit is clamped
+        and the colours no longer report the value.
+    color_range : tuple of (low, high), optional
+        Clip the colormap to this range, in the units of *series_axis*.
+        Defaults to the span of the points actually drawn, so *series_range*
+        shrinks it and the drawn lines always use the whole colormap.  Set it
+        explicitly to hold one scale across several figures.
 
     Line style
     ----------
     lw : float
         Line width.
     alpha : float
-        Global line opacity (0–1).  Ignored when *alpha_by_power* is ``True``.
-    alpha_by_power : bool
-        Scale each line's alpha linearly from *alpha_min* (lowest power) to
-        1.0 (highest power).  Overrides *alpha*.
+        Global line opacity (0–1).  Ignored when *alpha_by_series* is ``True``.
+    alpha_by_series : bool
+        Scale each line's alpha linearly from *alpha_min* at the low end of the
+        colour range to 1.0 at the high end.  Overrides *alpha*.
     alpha_min : float
-        Minimum alpha used when *alpha_by_power* is ``True``.
+        Minimum alpha used when *alpha_by_series* is ``True``.
 
     Colorbar
     --------
     colorbar : bool
         Show a colorbar.  Default ``True``.
-    cb_label : str
-        Colorbar axis label.  Default ``"Power (µW)"``.
+    cb_label : str, optional
+        Colorbar label.  ``None`` (default) takes it from *series_axis*, with
+        its unit.  A string is used **verbatim**, so include the unit.
     cb_labelpad : float
         Padding between colorbar tick labels and the axis label.
 
@@ -2963,8 +3013,8 @@ def plot_power_series(
     peak_marker_lw : float
     peak_marker_ls : str
 
-    Axes
-    ----
+    Signal axis
+    -----------
     ylabel : str, optional
         Y-axis label.  ``None`` (default) takes it from the scan's
         spectroscopy type, so a reflectance scan is not labelled as PL; a
@@ -2980,14 +3030,36 @@ def plot_power_series(
     cb : matplotlib.colorbar.Colorbar or None
         Colorbar object, or ``None`` when *colorbar* is ``False``.
     lines : list of matplotlib.lines.Line2D
-        One Line2D per *drawn* sweep, in sweep order — so ``lines[j]`` is the
-        spectrum taken at ``scan.power[::sweep_step][j]``.  Their y data
-        includes any *spectrum_offset*.
+        One Line2D per *drawn* point, in series order — so ``lines[j]`` is the
+        spectrum taken at the *j*-th coordinate surviving *series_range* and
+        *sweep_step*.  Their y data includes any *spectrum_offset*.
 
     Raises
     ------
     ValueError
-        If *sweep_step* is not a positive integer.
+        If *sweep_step* is not a positive integer; if the nest pinning does not
+        match the scan (none named on a nest, or any named on a flat sweep); if
+        *series_axis* is not ``"sweep"`` on a nested scan, or names no quantity
+        this scan holds; or if *series_range* runs backwards or selects no point.
+
+    See Also
+    --------
+    tmdc_optics_tools.loaders.AttoCubeSpectralSweep.get_spectrum_at :
+        one spectrum at a coordinate, rather than the series.
+    tmdc_optics_tools.loaders.AttoCubeSpectralSweep.as_grid :
+        a nested sweep reshaped onto its grid, rather than pinned to a line.
+
+    Examples
+    --------
+    >>> fig, ax, cb, lines = plot_spectral_series(power_scan)   # doctest: +SKIP
+
+    A displacement-field sweep, read in top-gate volts instead:
+
+    >>> plot_spectral_series(field_scan, series_axis="top_voltage")  # doctest: +SKIP
+
+    A raster, holding the slow axis and drawing the fast line, over part of it:
+
+    >>> plot_spectral_series(raster, slow=2.0, series_range=(10.0, 20.0))  # doctest: +SKIP
     """
     if not isinstance(sweep_step, (int, np.integer)) or sweep_step < 1:
         raise ValueError(
@@ -3003,8 +3075,105 @@ def plot_power_series(
     # --- x-axis array and label -------------------------------------------
     x, xlabel = _resolve_x_axis(scan, x_axis)
 
-    # --- spectra array (n_pixels, n_sweeps) --------------------------------
-    data = _resolve_spectra(scan, spectra_source, x_axis)
+    # --- which spectra become the series -----------------------------------
+    # A nest is pinned on one axis and the free axis becomes the series; a flat
+    # sweep is already the series.  Either way `data` ends up (n_pixels, n) and
+    # `series` is the matching (n,) coordinate that colours the lines.
+    pinned = [name for name, arg in (("fast", fast), ("index_fast", index_fast),
+                                     ("slow", slow), ("index_slow", index_slow))
+              if arg is not None]
+
+    if scan.is_nested:
+        if len(pinned) != 1:
+            raise ValueError(
+                f"plot_spectral_series(): this sweep is a declared nest "
+                f"({scan.nesting}), so name exactly one axis to hold: fast=, "
+                f"index_fast=, slow= or index_slow=. The axis left free becomes "
+                f"the series. Got {', '.join(pinned) if pinned else 'none'}. "
+                f"Naming two pins every axis and leaves a single spectrum, "
+                f"which is get_spectrum_at(); for the whole grid, use "
+                f"scan.as_grid()."
+            )
+        if series_axis != "sweep":
+            raise ValueError(
+                f"plot_spectral_series(): series_axis={series_axis!r} reads the "
+                f"series against another quantity, which applies to a flat "
+                f"sweep. This one is a declared nest ({scan.nesting}), where the "
+                f"free axis already carries its own coordinate, label and unit, "
+                f"so the colours follow it. To colour by a different quantity, "
+                f"declare the nest in it with fast_sweep= / slow_sweep= at load "
+                f"time."
+            )
+
+        held_fast = fast is not None or index_fast is not None
+
+        if index_fast is not None:
+            data = scan.get_spectrum_by_index(
+                fast=index_fast, source=spectra_source, x_axis=x_axis)
+        elif fast is not None:
+            data = scan.get_spectrum_at(
+                fast=fast, source=spectra_source, x_axis=x_axis)
+        elif index_slow is not None:
+            data = scan.get_spectrum_by_index(
+                slow=index_slow, source=spectra_source, x_axis=x_axis)
+        else:
+            data = scan.get_spectrum_at(
+                slow=slow, source=spectra_source, x_axis=x_axis)
+
+        # Holding the fast axis strides across the grid and returns one spectrum
+        # per *slow* point, so the free axis — the other one — is what varies
+        # along the columns of `data`, and therefore what the colours mean.
+        nest         = scan.nesting
+        series       = np.asarray(
+            nest.slow_axis if held_fast else nest.fast_axis, dtype=float)
+        series_label = nest.slow_axis_label if held_fast else nest.fast_axis_label
+    else:
+        if pinned:
+            raise ValueError(
+                f"plot_spectral_series(): {', '.join(pinned)} needs a declared "
+                f"nest, and this sweep is flat ({scan.n_sweeps} points). A flat "
+                f"sweep is already the series, so pass none of fast=, "
+                f"index_fast=, slow=, index_slow=. If these points are a grid, "
+                f"declare it with fast_sweep= and slow_sweep= at load time."
+            )
+        data = _resolve_spectra(scan, spectra_source, x_axis)
+        # param= so a bad name reports itself as series_axis=, not as the axis=
+        # of the loader accessors the resolver is shared with.
+        values, label, unit = scan._lookup_axis(series_axis, param="series_axis")
+        series       = np.asarray(values, dtype=float)
+        series_label = f"{label} ({unit})" if unit else label
+
+    # --- subset: which points of the series are drawn -----------------------
+    # Bounds are read on `series`, the same coordinate that colours the lines,
+    # so the selection and the colorbar can never disagree about units.  A
+    # nested scan needs no special case: `series` is already the free axis.
+    if series_range is not None:
+        low_given, high_given = series_range
+        low  = -np.inf if low_given  is None else float(low_given)
+        high =  np.inf if high_given is None else float(high_given)
+
+        if low > high:
+            raise ValueError(
+                f"plot_spectral_series(): series_range={series_range!r} runs "
+                f"backwards. Give it low-to-high in {series_label}. The "
+                f"endpoints are bounds on the coordinate, not a direction of "
+                f"travel, so a descending sweep still takes (low, high). Pass "
+                f"None for either end to leave it unbounded."
+            )
+
+        keep = (series >= low) & (series <= high)   # inclusive, as x_range is
+        if not keep.any():
+            raise ValueError(
+                f"plot_spectral_series(): series_range={series_range!r} selects "
+                f"no sweep point. {series_label} runs {series.min():.4g} to "
+                f"{series.max():.4g} across {series.size} points."
+            )
+
+        # Boolean indexing copies, unlike the selection above, which returned a
+        # view: the kept columns are an arbitrary subset, so no slice expresses
+        # them.  The copy is the plotted subset, not the whole scan.
+        data   = data[:, keep]
+        series = series[keep]
 
     # --- optional post-load background subtraction -------------------------
     if bg_region is not None:
@@ -3016,31 +3185,34 @@ def plot_power_series(
         x      = x[mask]
         data   = data[mask, :]
 
-    # --- colour norm ----------------------------------------------------------
-    power   = np.asarray(scan.power, dtype=float)
-    p_min, p_max = power_range if power_range is not None else (power.min(), power.max())
+    # --- colour norm --------------------------------------------------------
+    # Defaults to the span of what survived series_range, so the drawn lines use
+    # the whole colormap.  sweep_step does not shrink it further: thinning
+    # samples the kept span evenly and its endpoints stay in the figure.
+    c_min, c_max = color_range if color_range is not None \
+        else (series.min(), series.max())
 
-    if power_scale == "log":
-        norm = LogNorm(vmin=max(p_min, 1e-12), vmax=p_max)
+    if color_scale == "log":
+        norm = LogNorm(vmin=max(c_min, 1e-12), vmax=c_max)
     else:
-        norm = Normalize(vmin=p_min, vmax=p_max)
+        norm = Normalize(vmin=c_min, vmax=c_max)
 
     sm      = ScalarMappable(norm=norm, cmap=get_cmap(cmap))
     sm.set_array([])   # required for standalone colorbars
 
     # --- per-line alpha if requested ---------------------------------------
-    power_norm_linear = (power - p_min) / max(p_max - p_min, 1e-12)
+    series_norm_linear = (series - c_min) / max(c_max - c_min, 1e-12)
 
     # --- draw lines --------------------------------------------------------
-    # Two counters, and they differ once sweep_step > 1: i indexes the scan, so
-    # colour and alpha keep tracking each line's own power, while j counts drawn
-    # lines, so the offsets stack contiguously instead of leaving gaps where a
-    # skipped sweep would have been.
+    # Two counters, and they differ once sweep_step > 1: i indexes the series, so
+    # colour and alpha keep tracking each line's own coordinate, while j counts
+    # drawn lines, so the offsets stack contiguously instead of leaving gaps
+    # where a skipped point would have been.
     lines = []
-    for j, i in enumerate(range(0, len(power), sweep_step)):
-        colour = sm.to_rgba(power[i])
-        a = float(alpha_min + (1.0 - alpha_min) * power_norm_linear[i]) \
-            if alpha_by_power else float(alpha)
+    for j, i in enumerate(range(0, len(series), sweep_step)):
+        colour = sm.to_rgba(series[i])
+        a = float(alpha_min + (1.0 - alpha_min) * series_norm_linear[i]) \
+            if alpha_by_series else float(alpha)
         y = data[:, i] + j * spectrum_offset
         (line,) = ax.plot(x, y, color=colour, lw=lw, alpha=a)
         lines.append(line)
@@ -3098,6 +3270,7 @@ def plot_power_series(
     cb = None
     if colorbar:
         cb = fig.colorbar(sm, ax=ax, pad=0.02)
-        cb.set_label(cb_label, labelpad=cb_labelpad)
+        cb.set_label(series_label if cb_label is None else cb_label,
+                     labelpad=cb_labelpad)
 
     return fig, ax, cb, lines

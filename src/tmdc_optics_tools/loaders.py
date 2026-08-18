@@ -1976,7 +1976,7 @@ class _AttoCubeSweep:
                 f"plotting against it misleads and get_spectrum_at() on it is "
                 f"ambiguous. Use {grouped_by!r} as the axis if you need to address the "
                 f"nest by value.",
-                UserWarning, stacklevel=5,
+                UserWarning, stacklevel=4,
             )
 
         return SweepNesting(

@@ -423,6 +423,26 @@ def test_the_spread_behind_each_level_is_exposed(grouped_csv):
     assert np.allclose(scan.nesting.fast_spread, 0.0)
 
 
+def test_the_overlap_warning_points_at_the_caller(grouped_csv):
+    """
+    Measured rather than counted off ``def`` lines, which is how it went wrong.
+
+    The warning is raised inline in ``_resolve_nesting``, so the frames between it and
+    the researcher are ``_resolve_nesting`` → ``_bind_nesting`` → ``__init__``. Both
+    sweep classes call ``_bind_nesting`` from their own ``__init__`` rather than through
+    a shared one, so a single depth is right for both. A wrong value blames a line inside
+    the package, and — worse than useless — keys the wrong module's
+    ``__warningregistry__``, so the default filter dedups against an entry no one is
+    looking at.
+    """
+    with pytest.warns(UserWarning, match="levels overlap") as caught:
+        AttoCubeSpectralSweep(str(grouped_csv), spectra_type="PL",
+                              fast_sweep="V_B", slow_sweep="power",
+                              slow_group_by="Fianium_Select_A4")
+
+    assert caught[0].filename == __file__
+
+
 def test_grouping_does_not_warn_when_the_label_is_also_clean(tmp_path):
     """The warning is about an unusable coordinate, not about grouping as such."""
     params = dict(GROUPED_SWEEP, **{"Excitation Power": _READBACK / 0.303e6})

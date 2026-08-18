@@ -83,29 +83,29 @@ def _ydata(line) -> np.ndarray:
 @pytest.mark.parametrize("i", range(len(PARAMS["Scanner Y"])))
 def test_a_coordinate_selects_the_point_holding_it(flat, i):
     """Scanner Y = 7.5 must draw the same line as index 1."""
-    _, _, by_value = plotting.plot_spectrum(flat, value=PARAMS["Scanner Y"][i])
-    _, _, by_index = plotting.plot_spectrum(flat, index=i)
+    _, _, by_value, _ = plotting.plot_spectrum(flat, value=PARAMS["Scanner Y"][i])
+    _, _, by_index, _ = plotting.plot_spectrum(flat, index=i)
     assert np.array_equal(_ydata(by_value), _ydata(by_index))
 
 
 def test_the_selected_spectrum_is_the_scans_own_column(flat):
-    _, _, line = plotting.plot_spectrum(flat, value=8.0)
+    _, _, line, _ = plotting.plot_spectrum(flat, value=8.0)
     assert np.array_equal(_ydata(line), flat.best_energy_spectra[:, 2])
 
 
 def test_a_negative_index_counts_from_the_end(flat):
-    _, _, last = plotting.plot_spectrum(flat, index=-1)
+    _, _, last, _ = plotting.plot_spectrum(flat, index=-1)
     assert np.array_equal(_ydata(last), flat.best_energy_spectra[:, -1])
 
 
 def test_wavelength_axis_selects_the_same_column(flat):
-    _, _, line = plotting.plot_spectrum(flat, value=8.0, x_axis="wavelength")
+    _, _, line, _ = plotting.plot_spectrum(flat, value=8.0, x_axis="wavelength")
     assert np.array_equal(_ydata(line), flat.spectra[:, 2].astype(float))
 
 
 def test_a_coordinate_can_be_read_against_another_quantity(flat):
     """The sweep is declared in piezo_y; the point is asked for in V_A."""
-    _, _, line = plotting.plot_spectrum(flat, value=1.0, axis="V_A")
+    _, _, line, _ = plotting.plot_spectrum(flat, value=1.0, axis="V_A")
     assert np.array_equal(_ydata(line), flat.best_energy_spectra[:, 2])
 
 
@@ -115,7 +115,7 @@ def test_a_coordinate_can_be_read_against_another_quantity(flat):
 
 def test_both_nest_coordinates_pin_one_spectrum(nested):
     i_fast, i_slow = 1, 2
-    _, _, line = plotting.plot_spectrum(
+    _, _, line, _ = plotting.plot_spectrum(
         nested, fast=FAST_VALUES[i_fast], slow=SLOW_VALUES[i_slow])
     expected = nested.best_energy_spectra[:, i_slow * N_FAST + i_fast]
     assert np.array_equal(_ydata(line), expected)
@@ -123,9 +123,9 @@ def test_both_nest_coordinates_pin_one_spectrum(nested):
 
 def test_nest_positions_select_the_same_point_as_nest_coordinates(nested):
     i_fast, i_slow = 1, 2
-    _, _, by_value = plotting.plot_spectrum(
+    _, _, by_value, _ = plotting.plot_spectrum(
         nested, fast=FAST_VALUES[i_fast], slow=SLOW_VALUES[i_slow])
-    _, _, by_index = plotting.plot_spectrum(
+    _, _, by_index, _ = plotting.plot_spectrum(
         nested, index_fast=i_fast, index_slow=i_slow)
     assert np.array_equal(_ydata(by_value), _ydata(by_index))
 
@@ -177,15 +177,15 @@ def test_axis_none_searches_the_declared_sweep_axis(flat):
     Left to reach the scan, an undeclared axis reads as the flat index, so the
     coordinate would be searched against 0, 1, 2, ... instead of the sweep.
     """
-    _, _, explicit = plotting.plot_spectrum(flat, value=8.0, axis="sweep")
-    _, _, defaulted = plotting.plot_spectrum(flat, value=8.0, axis=None)
+    _, _, explicit, _ = plotting.plot_spectrum(flat, value=8.0, axis="sweep")
+    _, _, defaulted, _ = plotting.plot_spectrum(flat, value=8.0, axis=None)
     assert np.array_equal(_ydata(defaulted), _ydata(explicit))
     assert np.array_equal(_ydata(defaulted), flat.best_energy_spectra[:, 2])
 
 
 def test_axis_none_is_accepted_alongside_a_position(flat):
     """The same word cannot be the default in one spelling and refused in the other."""
-    _, _, line = plotting.plot_spectrum(flat, index=0, axis=None)
+    _, _, line, _ = plotting.plot_spectrum(flat, index=0, axis=None)
     assert np.array_equal(_ydata(line), flat.best_energy_spectra[:, 0])
 
 
@@ -194,7 +194,7 @@ def test_axis_none_labels_the_axis_that_was_searched(flat):
     The legend is built from the axis name too, so an unresolved None names the
     point after an axis that was never searched even when the data is right.
     """
-    _, _, line = plotting.plot_spectrum(flat, value=8.0, axis=None)
+    _, _, line, _ = plotting.plot_spectrum(flat, value=8.0, axis=None)
     assert line.get_label() == r"Piezo $y$ (V) = 8"
     assert "Sweep index" not in line.get_label()
 
@@ -214,8 +214,8 @@ def test_a_bare_number_is_refused(flat):
 
 def test_both_spellings_state_which_they_mean(flat):
     """value= and index= are symmetric — neither gets the shorter call."""
-    _, _, by_value = plotting.plot_spectrum(flat, value=7.5)
-    _, _, by_index = plotting.plot_spectrum(flat, index=1)
+    _, _, by_value, _ = plotting.plot_spectrum(flat, value=7.5)
+    _, _, by_index, _ = plotting.plot_spectrum(flat, index=1)
     assert np.array_equal(_ydata(by_value), _ydata(by_index))
 
 
@@ -245,7 +245,7 @@ def test_an_unrecognised_selector_of_any_name_is_named(flat):
 
 def test_style_kwargs_are_not_reported_when_a_point_was_given(flat):
     """The passthrough is only named when it is the likely cause."""
-    _, _, line = plotting.plot_spectrum(flat, value=7.5, color="k", lw=2)
+    _, _, line, _ = plotting.plot_spectrum(flat, value=7.5, color="k", lw=2)
     assert line.get_color() == "k"
 
 
@@ -279,8 +279,8 @@ def test_the_fractional_position_message_offers_the_coordinate(nested):
 
 def test_numpy_integers_are_still_positions(nested):
     """An index out of argmin/argmax is np.int64, not int."""
-    _, _, line = plotting.plot_spectrum(nested, index_fast=np.int64(1),
-                                        index_slow=np.int64(2))
+    _, _, line, _ = plotting.plot_spectrum(nested, index_fast=np.int64(1),
+                                           index_slow=np.int64(2))
     assert np.array_equal(_ydata(line),
                           nested.best_energy_spectra[:, 2 * N_FAST + 1])
 
@@ -318,7 +318,7 @@ def test_following_the_advice_selects_what_was_asked_for(nested):
 
     # 3 = slow 0, fast 3 in a 4-fast nest; the coordinate spelling of the same
     # request would be fast=6.0, and fast=3 would land somewhere else entirely.
-    _, _, line = plotting.plot_spectrum(nested, index_fast=3, index_slow=0)
+    _, _, line, _ = plotting.plot_spectrum(nested, index_fast=3, index_slow=0)
     assert np.array_equal(_ydata(line), nested.best_energy_spectra[:, 3])
 
 
@@ -355,34 +355,34 @@ def test_an_exact_coordinate_does_not_warn(flat):
 # ---------------------------------------------------------------------------
 
 def test_the_legend_names_the_declared_sweep_axis(flat):
-    _, _, line = plotting.plot_spectrum(flat, value=7.5)
+    _, _, line, _ = plotting.plot_spectrum(flat, value=7.5)
     assert line.get_label() == r"Piezo $y$ (V) = 7.5"
 
 
 def test_the_legend_names_the_axis_that_was_searched(flat):
     """Addressed in V_A, so labelling it with piezo_y would misreport it."""
-    _, _, line = plotting.plot_spectrum(flat, value=1.0, axis="V_A")
+    _, _, line, _ = plotting.plot_spectrum(flat, value=1.0, axis="V_A")
     assert line.get_label().startswith("V_A = 1")
 
 
 def test_the_legend_names_both_nest_coordinates(nested):
-    _, _, line = plotting.plot_spectrum(nested, fast=FAST_VALUES[1],
-                                        slow=SLOW_VALUES[2])
+    _, _, line, _ = plotting.plot_spectrum(nested, fast=FAST_VALUES[1],
+                                           slow=SLOW_VALUES[2])
     assert line.get_label() == "Scanner X = 2, Scanner Y = 10"
 
 
 def test_a_curated_nest_axis_carries_its_unit(nested_curated):
     """A raw row states no unit; a registry key does, and the legend shows it."""
-    _, _, line = plotting.plot_spectrum(nested_curated, fast=FAST_VALUES[1],
-                                        slow=SLOW_VALUES[2])
+    _, _, line, _ = plotting.plot_spectrum(nested_curated, fast=FAST_VALUES[1],
+                                           slow=SLOW_VALUES[2])
     assert line.get_label() == r"Piezo $x$ (V) = 2, Piezo $y$ (V) = 10"
 
 
 def test_an_undeclared_sweep_is_labelled_by_index(undeclared):
-    _, _, line = plotting.plot_spectrum(undeclared, index=1)
+    _, _, line, _ = plotting.plot_spectrum(undeclared, index=1)
     assert line.get_label() == "Sweep index = 1"
 
 
 def test_a_supplied_label_is_used_verbatim(flat):
-    _, _, line = plotting.plot_spectrum(flat, value=7.5, label="my spectrum")
+    _, _, line, _ = plotting.plot_spectrum(flat, value=7.5, label="my spectrum")
     assert line.get_label() == "my spectrum"

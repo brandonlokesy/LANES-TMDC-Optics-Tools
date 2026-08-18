@@ -575,6 +575,7 @@ def plot_spectrum(
     normalize  : bool  = False,
     label      : str   = None,
     ylabel     : str   = None,
+    twin_axis  : bool  = False,
     **line_kwargs,
 ) -> tuple:
     """
@@ -625,13 +626,19 @@ def plot_spectrum(
         Y-axis label.  Derived from the scan's measurement type when ``None``,
         so a reflectance sweep is not labelled as PL.  A string is used
         **verbatim**, so include the unit.
+    twin_axis : bool
+        Add a top x-axis in the other spectral unit — wavelength above an energy
+        axis, energy above a wavelength one.  Default ``False``.
     **line_kwargs
         Passed directly to ``ax.plot``.  A keyword that is not a selector lands
         here, so the no-point error names whatever arrived.
 
     Returns
     -------
-    fig, ax, line
+    fig, ax, line, ax_twin
+        *ax_twin* is the conjugate top axis, or ``None`` when *twin_axis* is
+        ``False``.  Returned so its ticks and label can be restyled without a
+        parameter per property.
 
     Raises
     ------
@@ -693,7 +700,9 @@ def plot_spectrum(
     ax.set_ylabel(ylabel if ylabel is not None
                   else _signal_label(scan, normalized=normalize))
 
-    return fig, ax, line
+    ax_twin = _conjugate_x_axis(ax, x_axis) if twin_axis else None
+
+    return fig, ax, line, ax_twin
 
 
 def plot_single_spectrum(
@@ -3055,6 +3064,10 @@ def plot_spectral_series(
         One Line2D per *drawn* point, in series order — so ``lines[j]`` is the
         spectrum taken at the *j*-th coordinate surviving *series_range* and
         *sweep_step*.  Their y data includes any *spectrum_offset*.
+    ax_twin : matplotlib.axis.SecondaryAxis or None
+        The conjugate top axis, or ``None`` when *twin_axis* is ``False``.
+        Returned so its ticks and label can be restyled without a parameter per
+        property.
 
     Raises
     ------
@@ -3265,29 +3278,6 @@ def plot_spectral_series(
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
 
-    # --- twin axis --------------------------------------------------------
-    ax_twin = None
-    if twin_axis:
-        ax_twin = ax.twiny()
-        if x_axis == "energy":
-            # top axis in nm; tick positions derived from bottom energy ticks
-            e_ticks = ax.get_xticks()
-            # keep only ticks in range to avoid division by zero / overflow
-            e_ticks = e_ticks[(e_ticks > 0) & (e_ticks >= x.min()) & (e_ticks <= x.max())]
-            wl_ticks = HC_EV_NM / e_ticks
-            ax_twin.set_xlim(ax.get_xlim())
-            ax_twin.set_xticks(e_ticks)
-            ax_twin.set_xticklabels([f"{w:.0f}" for w in wl_ticks])
-            ax_twin.set_xlabel("Wavelength (nm)")
-        else:
-            wl_ticks = ax.get_xticks()
-            wl_ticks = wl_ticks[(wl_ticks > 0) & (wl_ticks >= x.min()) & (wl_ticks <= x.max())]
-            e_ticks  = HC_EV_NM / wl_ticks
-            ax_twin.set_xlim(ax.get_xlim())
-            ax_twin.set_xticks(wl_ticks)
-            ax_twin.set_xticklabels([f"{e:.3f}" for e in e_ticks])
-            ax_twin.set_xlabel("Energy (eV)")
-
     # --- colorbar ---------------------------------------------------------
     cb = None
     if colorbar:
@@ -3295,4 +3285,6 @@ def plot_spectral_series(
         cb.set_label(series_label if cb_label is None else cb_label,
                      labelpad=cb_labelpad)
 
-    return fig, ax, cb, lines
+    ax_twin = _conjugate_x_axis(ax, x_axis) if twin_axis else None
+
+    return fig, ax, cb, lines, ax_twin

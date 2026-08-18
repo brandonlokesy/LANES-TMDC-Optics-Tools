@@ -134,7 +134,7 @@ def _map_column(scan) -> np.ndarray:
 
 
 def _line_column(scan) -> np.ndarray:
-    _, _, line = plotting.plot_spectrum(scan, index=CR_SWEEP, x_axis="wavelength")
+    _, _, line, _ = plotting.plot_spectrum(scan, index=CR_SWEEP, x_axis="wavelength")
     return np.asarray(line.get_ydata(), dtype=float)
 
 
@@ -206,6 +206,6 @@ def test_the_wavelength_axis_fits_the_repair(repaired):
 
 
 def test_the_energy_axis_is_untouched_by_the_change(repaired):
-    _, _, line = plotting.plot_spectrum(repaired, index=CR_SWEEP, x_axis="energy")
+    _, _, line, _ = plotting.plot_spectrum(repaired, index=CR_SWEEP, x_axis="energy")
     assert np.array_equal(np.asarray(line.get_ydata(), dtype=float),
                           _spike_column(repaired, "best_energy_spectra"))

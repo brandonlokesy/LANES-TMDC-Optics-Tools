@@ -154,7 +154,7 @@ The y-axis is whatever was declared as `sweep=` at load time — displacement fi
 Name the point the way you took the measurement — a coordinate on the sweep axis, in its own units:
 
 ```python
-fig, ax, line = plotting.plot_spectrum(
+fig, ax, line, _ = plotting.plot_spectrum(
     scan,
     value     = 2.5,               # sweep axis units: V, mV/nm, µW, …
     x_axis    = "energy",

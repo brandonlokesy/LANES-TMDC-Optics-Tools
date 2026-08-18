@@ -24,6 +24,9 @@ Layout
     │   │                                 sweep_label, sweep_unit, source_file,
     │   │                                 curated_labels, curated_scales,
     │   │                                 gates, fast_sweep, slow_sweep,
+    │   │                                 n_fast, n_slow (only if the shape was
+    │   │                                 asserted), fast_group_by, slow_group_by
+    │   │                                 (only where they differ from the axis),
     │   │                                 cosmic_rays (each only if declared),
     │   │                                 + provenance (see below)
     │   └── geometry/              attrs: d_hbn_top, d_hbn_bottom, eps_hbn, label
@@ -69,9 +72,14 @@ Everything derivable from what is:
 * **The nest coordinates** — ``fast_sweep`` / ``slow_sweep`` record the two axis
   *names*, and the values come back off the parameter rows the same way they were
   read the first time.  A stored copy could disagree with the rows beside it.
+* **The nest shape, when the readings established it.** Re-deriving it on read is
+  what keeps the overlap checks doing their job.  ``n_fast`` / ``n_slow`` are stored
+  only when the writing session *asserted* the shape, which is a declaration the
+  readings cannot recover — the same reasoning as ``gates``.
 
 A declaration is a different thing from a correction, and the two are stored the
-same way but read back differently.  ``gates`` and ``fast_sweep`` / ``slow_sweep``
+same way but read back differently.  ``gates``, ``n_fast`` / ``n_slow``,
+``fast_group_by`` / ``slow_group_by`` and ``fast_sweep`` / ``slow_sweep``
 say what the measurement *was* — how it was wired, how it was nested — and are
 **replayed**, because losing them would turn a stated fact back into an unknown
 one.  So ``apply_jacobian``, ``bg_region_nm`` / ``bg_region_ns``, ``cosmic_rays``, and
@@ -126,7 +134,7 @@ from . import __version__
 # reference without erroring.  Hence the major gate on read — a silently missing
 # reference is worse than a refused file.
 FORMAT_NAME    = "tmdc_optics_tools.attocube_sweep"
-FORMAT_VERSION = "2.1"
+FORMAT_VERSION = "2.2"
 _FORMAT_MAJOR  = FORMAT_VERSION.split(".")[0]
 
 # Files written before the module served both axis kinds carry the old name.
@@ -314,6 +322,24 @@ def write_sweep(
         if scan.nesting is not None:
             meta.attrs["fast_sweep"] = scan.nesting.fast_type
             meta.attrs["slow_sweep"] = scan.nesting.slow_type
+            # The shape, written *only* when the writing session asserted it. A nest
+            # whose shape the readings established re-establishes it on read, which
+            # keeps the overlap checks doing their job; storing the counts either way
+            # would turn every round trip into an assertion and downgrade those
+            # checks to warnings.  Without this, a file that needed the assertion
+            # would write successfully and then refuse to read back.
+            if scan.nesting.asserted:
+                meta.attrs["n_fast"] = int(scan.nesting.n_fast)
+                meta.attrs["n_slow"] = int(scan.nesting.n_slow)
+            # The grouping rows, written only where they differ from the axis they
+            # group.  Which row drives an instrument is per-session configuration that
+            # nothing in the file states, so losing it would turn a stated fact back
+            # into an unknown one — and the shape would then be resolved from the
+            # labelled row, which is exactly what could not resolve it.
+            for side in ("fast", "slow"):
+                group = getattr(scan.nesting, f"{side}_group")
+                if group is not None and group != getattr(scan.nesting, f"{side}_type"):
+                    meta.attrs[f"{side}_group_by"] = group
 
         # Provenance of the writing session's loading choices — recorded, and
         # deliberately not replayed on read.  See the module docstring.
@@ -480,6 +506,10 @@ def read_sweep(path) -> dict:
             # Already named for the constructor arguments they replay.
             "fast_sweep"     : _as_str(m.get("fast_sweep")),
             "slow_sweep"     : _as_str(m.get("slow_sweep")),
+            "n_fast"         : int(m["n_fast"]) if "n_fast" in m else None,
+            "n_slow"         : int(m["n_slow"]) if "n_slow" in m else None,
+            "fast_group_by"  : _as_str(m.get("fast_group_by")),
+            "slow_group_by"  : _as_str(m.get("slow_group_by")),
             "roi"            : int(m["roi"]) if "roi" in m else None,
             "source_file"    : _as_str(m.get("source_file")),
             "apply_jacobian" : bool(m["apply_jacobian"]) if "apply_jacobian" in m

@@ -42,8 +42,9 @@ below tracks what is left.
 
 *(A1–A3 fixed; A4 deferred; A5 open; **A6 fixed 2026-07-30**; **A8 fixed 2026-08-06**
 with E14; **A10 and A7 fixed 2026-08-07**; **A9 and B1 both fixed 2026-08-10**, which
-closes the `AttoCubePLScanRealSpace` pass. **A5** and **A18** are the live bugs left in
-this section.)*
+closes the `AttoCubePLScanRealSpace` pass; **A19–A21 fixed 2026-08-17/18** on
+`fix/nest-level-separation`. **A5**, **A18** and **A22** are the live bugs left in this
+section.)*
 
 **A1. `processing.remove_cosmic_rays` cannot be called at all.** **[FIXED — 2026-07-28, e77fabf]**
 `remove_cosmic_rays`'s replacement loop referenced `cosmic_mask`, which was never defined — the
@@ -517,9 +518,9 @@ real-space directory is excluded by `_classify_csv` — both pinned by the exist
 no-warning tests.
 
 **A13. A declared nest was refused when a level was wider than the axis tolerance.**
-**[FIXED — 2026-08-07]** **[verified against real data]** Reported 2026-08-07 from
-`examples/data/voltage-power-sweep/PL_Vbot_power_sweep_test_3_…_iter_0.csv` — a
-5-point `V_A` sweep inside 3 power levels, which
+**[FIXED — 2026-08-07]** **[verified against real data]** Reported 2026-08-07 from the
+uncommitted export `PL_Vbot_power_sweep_test_3_…_iter_0.csv` — a 5-point `V_A` sweep
+inside 3 power levels, which
 `fast_sweep="bottom_voltage", slow_sweep="power"` refused with *"the counts multiply
 correctly, but the values do not repeat in a regular nest"*.
 
@@ -812,6 +813,238 @@ scope — refuse a length that is neither `n_frames` nor longer, naming both num
 array is a legitimate truncation (a windowed or `min()`-limited animation), so that case
 stays silent; only "too short to finish" is an error. Cheap to pin: `diffusion` has no
 tests at all today, so this wants the first one.
+
+**A19. A measured nest axis could not be resolved at all, in either orientation.**
+**[FIXED — 2026-08-17]** **[verified against real data]** Reported 2026-08-14 from the
+uncommitted export `PL_Vbot_power_sweep_test_26_08_07_16_25_51_iter_0.csv` — 11 `V_A`
+steps inside 6 power levels, 66 spectra, which
+`fast_sweep="bottom_voltage", slow_sweep="power"` refused.
+
+This is the case **A13 named and left open**: *"an axis whose scatter approaches its
+level spacing will chain levels together"*. A13 made the two definitions of "the same
+grid point" agree; it did not change the fact that one tolerance per axis has to fit
+between the scatter *within* a level and the step *between* levels, and on a measured
+axis no such value need exist. Two properties of a power sweep close the window: meter
+scatter grows with the reading, so it is set by the top of the axis, and a power series
+is log-spaced, so the smallest step to resolve is a tiny slice of the span.
+
+Measured on that file: worst within-level scatter 3.06 µW against an `_axis_atol` of
+0.42 µW — short by 7.3×. Synthetic clean sweeps fail as easily: 6 levels 100 µW apart
+need only 0.6 µW of meter noise to shatter. Raising the constant was tested and
+rejected — at `1e-2` a 101-step gate sweep collapses to **one** level, because the
+tolerance must also stay under the step between levels (about span ÷ levels).
+
+Worse in the swapped orientation, which the reporter also hit: with power as the *fast*
+axis the miscount becomes `n_fast`, so `n_sweeps % n_fast` fails and the structural
+checks never run at all. A clean 6-level log sweep gave `n_fast = 21` for 66 points.
+
+*Fixed* by deciding the nest on **level separation instead of a tolerance**
+(`_levels_separate`). Only the divisors of `n_sweeps` can be shapes, since the exporter
+runs the fast axis fastest; for each, both axes are reshaped and each level's
+lowest-to-highest range must clear its neighbour's. The comparison is always local — one
+level's own scatter against the step to the level beside it — so unequal spacing and
+value-proportional scatter both stop mattering, and the same test serves either
+orientation (rows for a slow axis, columns for a fast one). Exactly one shape may
+survive; several is refused by listing them rather than picked between.
+
+Measured against an independent criterion (spectra whose reading is closer to some other
+level than the one they were taken at), over 400 trials per condition: where nothing is
+misattributed it now resolves 100% of the time and previously resolved 0%; where
+readings genuinely interleave it still refuses. A single stray reading is tolerated up
+to 0.8 of a step and refused beyond, i.e. once that reading has reached the neighbouring
+setting. Trimming outliers before comparing was tested and rejected: it accepted 92% of
+trials in which spectra really were mixed up, and accepted a reading three full steps
+out of place. A false refusal is visible and recoverable; a false acceptance silently
+files spectra under the wrong setting.
+
+`_NEST_RTOL` is renamed `_AXIS_RTOL`, since it no longer governs nesting —
+`_axis_atol`, `_level_labels` and `_count_distinct` remain, serving
+`_warn_if_sweep_axis_repeats` and the accessor coordinate match.
+
+`_nesting_failure` was rewritten with it. The old message reported
+`n_fast × n_slow ≠ n_sweeps` using counts the algorithm never used to decide anything,
+which on the reported file printed *"11 × 9 = 99, not 66"* — an arithmetic story about a
+structural failure. It now anchors on whichever axis *does* separate, since that pins
+the shape the file actually has, and quotes the overlapping ranges of the axis that does
+not: *"At 11 × 6, fast_sweep='bottom_voltage' holds apart but slow_sweep='power' does
+not: one covers 834.345–836.925 µW and the next 835.474–837.247 µW"*. Anchoring on an
+arbitrary divisor instead was written first and caught in review — it blamed a healthy
+gate axis at a 6 × 2 shape nobody had declared.
+
+Covered by `test_a_scattered_level_nests_when_its_levels_stay_apart`,
+`test_a_scattered_axis_nests_as_the_fast_axis_too`,
+`test_overlapping_levels_are_refused_and_quoted` and
+`test_a_non_finite_reading_refuses_the_nest`, each with a fixture pinned to reach its
+case rather than pass for free. `test_aborted_raster_raises_naming_both_counts` is
+renamed `…_naming_the_sweep_total`, and it plus
+`test_swapped_declaration_raises_and_names_the_swap` had assertions on the removed
+`(N distinct)` wording replaced. The assertion and grouping paths add 21 more, including
+`test_transposed_counts_warn_about_the_clean_axis`,
+`test_a_level_coordinate_is_the_median_not_the_first_reading` and
+`test_a_grouped_nest_survives_a_round_trip`.
+
+Two bugs were caught in review while writing this and are worth recording, since both
+would have been quiet. `_nesting_failure` first anchored its diagnosis on the first
+divisor where exactly one axis separated, which blamed a healthy gate axis at a 6 × 2
+shape nobody had declared; it now anchors on whichever axis *does* separate, because that
+is what pins the shape the file actually has. And the HDF5 writer's new loop used `for
+kind in ("fast", "slow")`, shadowing the `kind` dict the axis dataset is named from a few
+lines later — caught by nine round-trip tests failing with `TypeError: string indices must
+be integers`.
+
+*Also fixed, in the same pass* (decision `0017`): the file can now be loaded with the
+axis labelled in µW while its **structure** comes from the commanded row —
+`slow_sweep="power", slow_group_by="Fianium_Select_A4"` resolves 11 × 6 and gives a slow
+axis of 416.9, 825.2, 835.6, 836.3, 836.1, 722.3 µW. Each level's coordinate is the
+**median** of its readings rather than the first one, which was biased low by up to
+1.3 µW on the two levels that drift while the laser settled (+0.31 and +0.23 µW per point,
+r = 0.89 and 0.83). `SweepNesting.slow_spread` carries the peak-to-peak range beside each
+coordinate — 0.4, 3.06, 2.58, 1.77, 1.29, 1.61 µW here — so a level that is not flat is
+visible instead of averaged away. A shape that no row can establish can be asserted with
+`n_fast=` / `n_slow=`. Both declarations round-trip through HDF5 (`FORMAT_VERSION` 2.2),
+conditionally, so a resolved nest still re-resolves on read.
+
+**Still not fixed, because it is not a code problem:** the measured power axis remains
+*physically* unusable on this file — not monotonic, three levels within 1 µW. The load now
+warns saying exactly that, and `0004` §5 still refuses an ambiguous lookup against it.
+Why the laser plateaued, and why `Fianium_Select_A4 = 160000` reads 417 µW here while
+`161000` reads 0.83 µW in `PL_Vbot_power_sweep_26_08_10_…` under identical logged
+settings, is a lab question.
+
+**Also found here, fixed separately as A20.** `_axis_atol` could not recognise an axis
+that never moved. The sketch left above — *"borrow `varying_parameters`' RMS scale as a
+floor"* — was **measured to be wrong** and was not taken; see A20 for what a floor does
+to a fine sweep on a large offset.
+
+**A20. A sweep axis that never moved was read as one setting per spectrum.**
+**[FIXED — 2026-08-18]** **[verified against real data]** Found 2026-08-17 while closing
+A19. `_axis_atol` answers *how far apart may two readings be and still be the same
+instrument setting*, and answered it with `1e-3 ×` the axis's own span. That is circular
+when the axis did not move: the span is then the instrument's own scatter, so the
+tolerance lands a thousandth of the scatter it exists to absorb, and a **quieter**
+instrument does not help — the tolerance shrinks in the same proportion. Measured across
+four scatter levels on a held 500 µW setting: 59, 62, 58 and 64 settings found, never 1.
+
+Not a cosmetic miscount. Two documented safeguards failed, neither loudly. On 12 spectra
+taken at one power setting:
+
+- `_warn_if_sweep_axis_repeats` **said nothing**. It compares settings against sweep
+  points, got 12 of 12, and concluded each spectrum had its own position — while its own
+  docstring names repeat measurements at one setting as part of what it catches.
+- `nearest_index(500.0)` returned index 5 of 12 equally good points **with no warning**,
+  and `get_spectrum_at` did not refuse, against decision `0004` §5.
+
+*Fixed* by `_axis_driven`, which asks whether a row was driven on **two independent
+signs, either sufficient**: its span exceeds `rtol ×` its RMS magnitude, or its readings
+step through that span a small part at a time *in acquisition order*. Each is blind where
+the other sees — the first misses a fine sweep on a large offset (300.0→300.2 K travels
+0.07% of its readings), the second misses a coarse sweep whose few points are as far
+apart as scatter would be. A row is called held only when both fail, so a false collapse
+needs both wrong at once. `varying_parameters` now shares the same helper, so the report
+and the grouping cannot contradict each other; its ranking by span/RMS is unchanged, and
+its membership is unchanged on every committed file.
+
+**The reach is narrower than it first appears, and is pinned by a test.** Because the
+first sign fires as soon as scatter exceeds `rtol` of the reading, a held setting is
+recognised only while the read-back is stable to better than that. Measured: 100% up to
+1e-4 relative scatter, 97%/94%/70% at 2e-4 for n = 12/20/66, and **0% from 1e-3**. So a
+source-meter holding a gate (20 µV on 5 V) is recognised; a power meter holding a power
+(3 µW on 800 µW) is not, and still reads as many settings exactly as before. Closing
+that would need a rule that survives both a log-spaced sweep and a flattened sawtooth —
+see the rejected alternatives in `0018`.
+
+Three call sites needed patching alongside, each an advice path that only became
+*reachable*: the repeat warning said *"1 different values"* and offered nest advice for a
+row that never moved; the accessor refusal did the same; and `_nearest`'s distance
+warning reported a value as absent from the only axis holding it, because on a held row
+the typical gap it compares against is scatter-sized. Its threshold is now floored at
+`_axis_atol`, which on a driven axis is far the smaller of the two and changes nothing.
+
+Verified not to disturb anything else, by measurement rather than reading: `_axis_atol`
+has exactly two callers; every tracked spectral export and the TRPL directory was
+reloaded and every parameter row reclassified, flipping exactly one — `V_A` in
+`PL_Vbot_power_sweep_26_08_10_…csv`, held at −5 V with 18 µV of scatter, which *should*
+be one setting and is not that file's sweep axis; and every module-level parameter dict
+in `tests/` was reclassified with zero flips, cross-checked by grep (tests add scatter
+only to counts, images and spectra, never to a parameter row). `sweep_grid()` counts with
+exact `np.unique` and was untouched. 676 tests pass.
+
+Covered by `tests/test_loaders_axis_tolerance.py`: ten axes parametrised against the
+settings they hold, a companion test pinning that each held row *would* defeat a
+span-only tolerance, the two restored safeguards, the absence of the spurious distance
+warning, the fine-sweep-on-an-offset regression, and
+`test_the_reach_of_the_detection_is_deliberate` fixing the boundary above. Fixtures draw
+from per-row seeded generators after an order-dependent draw made one assertion flaky.
+
+**A21. A sweep both coarse and narrow for its offset collapsed to a single setting.**
+**[FIXED — 2026-08-18]** **[verified against real data]** Found 2026-08-18 reviewing the
+A20 fix before merge, so it never shipped. `_axis_driven` called a row held only when both
+its signs failed, and A20 presents those two blind spots as complementary. They are two
+descriptions of one region: a sweep that is **both** narrow for its offset and coarse
+defeats them together. Sign 2 fires when `median|Δ| < 0.1 × travel`, which for an even
+sweep of *n* points needs `1/(n-1) < 0.1`, i.e. more than eleven readings — while the case
+sign 2 exists to catch is exactly the one sign 1 cannot see.
+
+Measured with the shipped helpers:
+
+```
+np.linspace(300.0, 300.2, n)  n = 3..10 -> held, _axis_atol 0.2 (the full travel), 1 level
+                              n = 11    -> driven, but only by float noise in the diffs
+np.linspace(5.000, 5.004, 5)            -> held, _axis_atol 0.004, 1 level
+```
+
+So a real five-point gate step of 1 mV at 5 V, or a six-point 300.00 to 300.20 K sweep,
+warned *"This row was held at one setting for the whole file"* and had every coordinate
+lookup on it refused — behaviour `main` did not have. A20's claim that "a false collapse
+needs both signs wrong at once" is true and insufficient: the conjunction is reachable.
+The slip is visible in `0018`'s own load-bearing note, which says `_AXIS_STEP_FRAC` has
+least margin at small point counts "where sign 1 is carrying the decision anyway" — at
+small point counts on a large offset, sign 1 is the sign that is blind.
+
+*Fixed* by a third sign, decision `0019`: a row whose non-zero steps in acquisition order
+all share a sign is being driven, however few readings it has. Exact repeats are dropped
+first, so a slow axis's plateaus do not read as reversals. It abstains below
+`_AXIS_MIN_MOVES = 4` moves, where direction is a coin toss — which leaves a four-point
+narrow sweep still collapsing, the known residue.
+
+The sign is **added**, not substituted, and that is the whole safety argument: OR-ing can
+only move rows held → driven, so none of the counterexamples that killed A20's rejected
+alternatives (the flattened sawtooth, the 201-step sweep at 5 V, the log-spaced power
+series) can be lost to it. Verified rather than assumed — sign 1 alone still recognises
+each of them, so sign 3 is never what rescues a nest.
+
+Verified to A20's own standard: every loadable spectral export and the TRPL directory
+reloaded with **zero** rows reclassified, and the false-driven rate on held 5 V rows
+unchanged except at five readings (0.5% → 2.2%) and six (1.1% → 1.2%). 679 tests pass.
+
+Covered by two new rows in `tests/test_loaders_axis_tolerance.py`'s `AXES` table at the
+point counts that failed, and
+`test_direction_is_only_evidence_once_a_row_has_moved_enough`, which pins the
+`_AXIS_MIN_MOVES` boundary, both travel directions, a row that turns round, and the slow
+axis's plateaus.
+
+**A22. A held gate whose read-back drifts is reported as varying, and flips `gate_mode`.**
+**[OPEN]** **[verified by running]** `_axis_driven`'s second and third signs read the
+*shape* of a row's motion and carry no magnitude, so a monotone drift is seen at any
+amplitude. `0018` §4 measured the rule's reach against i.i.d. scatter only, and concluded
+a source-meter holding a gate is recognised; drift was never in scope. Measured: a gate
+held at 5 V drifting monotonically by 1 mV over 21 points is driven at `rtol=1e-3`, `1e-2`
+**and** `1.0`, where the pre-`0018` `span > rtol × RMS` test excluded it at all three.
+Pure jitter of the same size is unaffected, which is why the existing test does not catch
+it.
+
+Not cosmetic, because `varying_parameters()` is not only a report. `gate_mode` and
+`_gate_candidates` both key off membership in it, so a grounded second gate with a slow
+thermal drift turns `"top-gate only"` into a dual-gate verdict — the Pearson branch then
+correlates a real sweep against a drift and answers confidently.
+
+*Not fixed here.* Giving `gate_mode` a private one-sign test re-splits the two definitions
+`0018` §3 deliberately joined, and would let the report and the loader's grouping
+contradict each other again. The honest fix is a declared instrument resolution — the
+`sweep_atol=` argument `0018` left unbuilt for want of a file that needs it, and which
+CLAUDE.md says not to add until a committed file does. This entry is the evidence for
+when one appears. Until then the exposure is documented in `_axis_driven`'s docstring: a
+held row is recognised only while its scatter is directionless.
 
 ## B. Dead parameters — accepted, documented, silently ignored
 
@@ -1586,13 +1819,16 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
    A7 fixed 2026-08-07; A9 and B1 fixed 2026-08-10; A4 deferred.) **A11** (warning
    locations) and **A12** (duplicate iteration indices) were both opened by the A7
    work; A12 is fixed, A11 is still owed and is its own deliberate pass over 15 sites.
-2. **C1–C3** — the doc corrections, since they actively mislead. **C8** and **C9** join
+2. **A22** — a held gate that drifts reads as varying, which `gate_mode` then answers
+   confidently on. Blocked on a file that needs a declared instrument resolution
+   (`sweep_atol=`); until one appears the entry is the evidence, not the work.
+3. **C1–C3** — the doc corrections, since they actively mislead. **C8** and **C9** join
    them, and both are cheapest taken by whatever next edits their function.
-3. **B2–B4, D1–D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
+4. **B2–B4, D1–D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
    2026-08-10, and was not mechanical: the sketched fix would have introduced a second
    instance of A5.)
-4. **E2, E3, E5** — the remaining design calls, one at a time.
-5. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
+5. **E2, E3, E5** — the remaining design calls, one at a time.
+6. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
    because it is the only breaking change on the list and touches `examples/`.
 
 **Opened 2026-08-12 by the review of PR #16** (`animate_panels` frame windowing):

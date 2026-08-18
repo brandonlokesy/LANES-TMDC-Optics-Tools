@@ -2055,6 +2055,7 @@ def animate_wl_pl_spectra(
     sweep_unit       : str = "V",
     laser_ref_kwargs : dict = None,
     laser_style      : dict = None,
+    spectrum_style   : dict = None,
     save             : str  = None,
     **engine_kwargs,
 ) -> tuple:
@@ -2099,6 +2100,11 @@ def animate_wl_pl_spectra(
         :class:`ImageSequencePanel` panels, e.g.
         ``{"laser_color": "red", "laser_linewidth": 1.5, "laser_linestyle": "-",
         "laser_halo": True, "laser_halo_color": "white", "laser_annotation": True}``.
+    spectrum_style : dict, optional
+        Extra keyword arguments for the spectrum :class:`SpectrumLinePanel`, e.g.
+        ``{"twin_axis": True, "cmap": "viridis", "ylabel": "Counts / s"}``.  This
+        is the only route to that panel's remaining options; an unknown key
+        raises from its constructor, which names it.
     save : str, optional
         Output path for the animation.  Format is chosen from the extension
         (``.gif`` by default; ``.mp4`` etc. via FFmpeg) — see
@@ -2120,22 +2126,32 @@ def animate_wl_pl_spectra(
 
     Returns
     -------
-    fig, anim
+    fig, anim, panels
+        *panels* is the list built here, in white-light / real-space-PL /
+        spectrum order with omitted ones absent — so its length follows which
+        arguments were given, and the spectrum panel is ``panels[-1]`` whenever
+        *spectra* was passed.  Returned because a panel's artists are how it is
+        restyled: ``panels[-1].ax_twin``, ``.line``, ``.mappable``, and
+        :attr:`ImageSequencePanel.laser_circle` are reachable no other way from
+        here.
 
     Examples
     --------
     >>> # All three panels
-    >>> fig, anim = animate_wl_pl_spectra(
+    >>> fig, anim, panels = animate_wl_pl_spectra(
     ...     wl=("./wl/", "wl_"), pl=("./PL/", "PL_"),
     ...     spectra="./PL/PL_..iter_0.csv",
     ...     laser_ref="laser_ref.csv", save="three_panel_scan.gif",
     ... )
 
-    >>> # PL map + spectra only
-    >>> fig, anim = animate_wl_pl_spectra(
+    >>> # PL map + spectra only, with a wavelength scale on top of the spectrum,
+    >>> # then that scale restyled through the panel it belongs to
+    >>> fig, anim, panels = animate_wl_pl_spectra(
     ...     pl=("./PL/", "PL_"), spectra="./PL/PL_..iter_0.csv",
     ...     laser_ref="laser_ref.csv",
+    ...     spectrum_style={"twin_axis": True},
     ... )
+    >>> panels[-1].ax_twin.tick_params(labelsize=6)     # doctest: +SKIP
     """
     from .loaders import (
         AttoCubePLScanRealSpace,
@@ -2168,7 +2184,8 @@ def animate_wl_pl_spectra(
         # letting the loader guess.  Pass a pre-built sweep for anything else.
         return AttoCubeSpectralSweep(path=str(spec), spectra_type="PL")
 
-    laser_style = laser_style or {}
+    laser_style    = laser_style or {}
+    spectrum_style = spectrum_style or {}
 
     panels = []
     wl_scan = _image_scan(wl)
@@ -2186,6 +2203,7 @@ def animate_wl_pl_spectra(
         panels.append(SpectrumLinePanel(
             spec_scan, x_axis=x_axis,
             sweep_attr=sweep_attr, sweep_unit=sweep_unit,
+            **spectrum_style,
         ))
 
     if not panels:
@@ -2212,7 +2230,8 @@ def animate_wl_pl_spectra(
             )
             engine_kwargs["frames"] = range(other_count)
 
-    return animate_panels(panels, save=save, **engine_kwargs)
+    fig, anim = animate_panels(panels, save=save, **engine_kwargs)
+    return fig, anim, panels
 
 # ---------------------------------------------------------------------------
 # Diffusion cloud — shared helpers

@@ -201,8 +201,11 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
 - Don't hand-build a `patches.Circle` for a laser spot; use `_draw_laser_circle`.
 - Don't add `ax=` to `show_image` — it is a viewer that owns its figure. Multi-panel
   image plotting goes through `plot_image`, which annotates and returns its circle.
+- Don't give `animate_wl_pl_spectra` a parameter per panel option; `laser_style` and
+  `spectrum_style` are the two doors, and it returns its panels so their artists are
+  reachable.
 - Don't hand-roll a `twiny` for the energy↔wavelength top axis; use `_conjugate_x_axis`,
-  and return the axis it gives you. `plot_power_series` is the last holdout, not the model.
+  and return the axis it gives you. There is one implementation and no exceptions left.
 - Don't give `spectra_type=` a default, or make it positional.
 - Don't auto-detect the sweep axis; an undeclared `sweep=` means the sweep **index**.
 - Don't fork `SPECTROSCOPY_TYPES` out of `constants.py`.
@@ -289,10 +292,6 @@ bwarea semantics are wanted at all.
   runs a 2-D median filter that smooths across the sweep axis, mixing physically
   independent sweeps. Keep 2-D available, just not by default. (`plot_pl_map_Vab_scan`
   is only a deprecation shim onto it, so fixing the shim fixes nothing.)
-- `plot_power_series` draws a twin axis and never returns it, and still builds it with
-  `twiny()` plus relabelled ticks rather than the shared `_conjugate_x_axis` helper.
-  One breaking change to that function, not two: land the return fix and the migration
-  together.
 - `DiffusionCloudPanel` accepts a `var_array` shorter than the animation and raises
   partway through rendering, and analyses every frame regardless of how many are being
   shown. Both want `diffusion`'s first tests, which do not exist yet.

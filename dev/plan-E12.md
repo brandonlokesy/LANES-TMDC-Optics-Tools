@@ -434,8 +434,8 @@ from `test_contrast`.
 
 Two gotchas found the hard way, recorded so they are not rediscovered:
 
-- `plot_power_series` returns `(fig, ax, cb, lines)`, not the module's usual
-  3-tuple.
+- `plot_spectral_series` (named `plot_power_series` when this was written) returns
+  `(fig, ax, cb, lines, ax_twin)`, not the module's usual 3-tuple.
 - `pcolormesh` with `shading="auto"` resolves to `"nearest"` for equal-shaped
   X/Y/C, so `mesh._coordinates` holds cell *edges* — outer edges extrapolated
   half a cell beyond the data. Averaging adjacent edges recovers the centres.

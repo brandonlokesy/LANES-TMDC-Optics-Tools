@@ -245,3 +245,88 @@ def test_the_conjugate_axis_emits_no_divide_warning(scan):
     with warnings.catch_warnings():
         warnings.simplefilter("error", RuntimeWarning)
         fig.canvas.draw()
+
+
+# ---------------------------------------------------------------------------
+# The same axis on plot_spectral_series
+# ---------------------------------------------------------------------------
+#
+# One helper, so one battery. These are the shorter version of the block above:
+# what is worth re-pinning per call site is that the helper is reached at all, that
+# the axis comes back, and that it is built late enough to survive the colorbar
+# taking its space out of the host axes.
+
+
+def _series_with_twin(scan, x_axis="energy", **kwargs):
+    fig, ax, cb, lines, ax_twin = plotting.plot_spectral_series(
+        scan, x_axis=x_axis, twin_axis=True, **kwargs)
+    fig.canvas.draw()
+    return fig, ax, ax_twin
+
+
+def test_the_series_has_no_conjugate_axis_by_default(scan):
+    fig, ax, cb, lines, ax_twin = plotting.plot_spectral_series(scan)
+
+    assert ax_twin is None
+    assert ax.child_axes == []
+
+
+@pytest.mark.parametrize("x_axis, conjugate", [
+    ("energy",     "wavelength"),
+    ("wavelength", "energy"),
+])
+def test_the_series_conjugate_axis_is_labelled_from_the_other_row(scan, x_axis,
+                                                                 conjugate):
+    _, _, ax_twin = _series_with_twin(scan, x_axis)
+    name, unit = _x_axis_name_unit(conjugate)
+
+    assert ax_twin is not None
+    assert ax_twin.get_xlabel() == f"{name} ({unit})"
+
+
+def test_the_series_conjugate_axis_follows_a_later_change_of_limits(scan):
+    """
+    The reason this matters here specifically: the committed example notebook for
+    this function zooms with set_xlim on the line after the call.
+    """
+    fig, ax, ax_twin = _series_with_twin(scan)
+    zoom = (1.535, 1.545)
+    ax.set_xlim(*zoom)
+    fig.canvas.draw()
+
+    expected = processing.energy_to_wavelength(np.asarray(zoom))
+    assert sorted(ax_twin.get_xlim()) == pytest.approx(sorted(expected))
+
+
+def test_the_series_conjugate_axis_spans_the_host_axes(scan):
+    """
+    This function is the one that draws a colorbar under the conjugate axis, and a
+    colorbar takes its space out of the host axes.  The top axis has to end up over
+    the shrunk host rather than over where the host used to be.
+
+    A secondary axis is a zero-height strip pinned to the parent's top edge, so the
+    comparison is on the horizontal extent and on sitting at that edge — not on the
+    whole box.
+    """
+    fig, ax, ax_twin = _series_with_twin(scan, colorbar=True)
+
+    host, top = ax.get_position(), ax_twin.get_position()
+    assert (top.x0, top.x1) == pytest.approx((host.x0, host.x1))
+    assert top.y0 == pytest.approx(host.y1)
+
+
+def test_the_series_conjugate_axis_ticks_are_round_in_its_own_unit(wide_scan):
+    _, _, ax_twin = _series_with_twin(wide_scan)
+
+    lo, hi = sorted(ax_twin.get_xlim())
+    shown = [t for t in ax_twin.get_xticks() if lo <= t <= hi]
+    assert shown, "the conjugate axis placed no ticks in range"
+    assert all(float(t).is_integer() for t in shown)
+
+
+def test_the_series_conjugate_axis_emits_no_divide_warning(scan):
+    fig, ax, cb, lines, ax_twin = plotting.plot_spectral_series(scan, twin_axis=True)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        fig.canvas.draw()

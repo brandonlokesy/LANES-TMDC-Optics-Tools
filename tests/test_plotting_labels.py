@@ -171,7 +171,7 @@ def test_single_spectrum_override_is_verbatim(single_spectrum, normalize):
 @pytest.mark.parametrize("spectrum_offset", [0.0, 5.0])
 def test_spectral_series_override_is_verbatim(csv_path, spectrum_offset):
     scan = _scan(csv_path, "PL")
-    _, ax, _, _ = plotting.plot_spectral_series(
+    _, ax, _, _, _ = plotting.plot_spectral_series(
         scan, ylabel=CUSTOM, spectrum_offset=spectrum_offset)
     assert ax.get_ylabel() == CUSTOM
 
@@ -198,29 +198,29 @@ def test_plot_image_default_still_marks_rescaling():
 @pytest.mark.parametrize("x_axis", ["energy", "wavelength"])
 def test_contrast_source_uses_contrast_label(contrast_scan, x_axis):
     # One source name, either axis: the label follows the quantity, not the axis.
-    _, ax, _, _ = plotting.plot_spectral_series(
+    _, ax, _, _, _ = plotting.plot_spectral_series(
         contrast_scan, spectra_source="contrast", x_axis=x_axis)
     assert ax.get_ylabel() == contrast_scan.contrast_label
     assert "counts" not in ax.get_ylabel()
 
 
 def test_raw_source_keeps_the_signal_label(contrast_scan):
-    _, ax, _, _ = plotting.plot_spectral_series(contrast_scan,
-                                                spectra_source="raw")
+    _, ax, _, _, _ = plotting.plot_spectral_series(contrast_scan,
+                                                   spectra_source="raw")
     assert ax.get_ylabel() == contrast_scan.signal_label
     assert ax.get_ylabel() == "Reflected intensity (counts)"
 
 
 def test_contrast_source_offset_drops_no_unit(contrast_scan):
     """A dimensionless signal has no unit to drop, so it is only marked shifted."""
-    _, ax, _, _ = plotting.plot_spectral_series(
+    _, ax, _, _, _ = plotting.plot_spectral_series(
         contrast_scan, spectra_source="contrast", spectrum_offset=0.01)
     assert ax.get_ylabel() == f"{contrast_scan.contrast_label} (offset)"
 
 
 def test_intensity_offset_marks_arbitrary_units(csv_path):
     scan = _scan(csv_path, "PL")
-    _, ax, _, _ = plotting.plot_spectral_series(scan, spectrum_offset=5.0)
+    _, ax, _, _, _ = plotting.plot_spectral_series(scan, spectrum_offset=5.0)
     assert ax.get_ylabel() == "PL intensity (a.u., offset)"
 
 

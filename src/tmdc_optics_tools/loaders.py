@@ -3142,20 +3142,28 @@ class _AttoCubeSweep:
         Report which parameter rows actually changed across the sweep.
 
         Evidence for choosing a *sweep*, and the check for "was only one gate
-        driven?".  A row counts as varying on either of two signs: its span exceeds
+        driven?".  A row counts as varying on any of three signs: its span exceeds
         *rtol* times its own RMS magnitude, or its readings step through that span a
-        small part at a time in acquisition order.  Read-back jitter on a nominally
-        static channel satisfies neither, so it does not register; a fine sweep
-        sitting on a large offset satisfies the second even though it fails the
-        first.  RMS rather than mean, so that a row straddling zero — an
-        anti-symmetric gate pair, say — is measured by how large it is rather than
-        by how nearly it cancels.
+        small part at a time in acquisition order, or those readings only ever move
+        one way.  Directionless jitter on a nominally static channel satisfies none
+        of the three, so it does not register; a fine sweep sitting on a large offset
+        satisfies the second or the third even though it fails the first.  RMS rather
+        than mean, so that a row straddling zero — an anti-symmetric gate pair, say —
+        is measured by how large it is rather than by how nearly it cancels.
+
+        Membership is decided by the same helper the loader groups readings with, so
+        this report and the tolerance behind :meth:`get_spectrum_at` cannot disagree
+        about which rows are only jittering.  A held row whose read-back *drifts*
+        rather than jitters therefore registers here, at any amplitude.
 
         Parameters
         ----------
         rtol : float
-            Relative span above which a row is reported, and the threshold the
-            same test applies inside the loader.  Default ``1e-3``.
+            Relative span above which the **first** sign fires.  Default ``1e-3``.
+            It does not reach the other two, which are fixed: a row satisfying either
+            of them is reported whatever *rtol* is set to.  Raising it therefore
+            narrows the report only among rows that are recognised by their span
+            alone.
 
         Returns
         -------
@@ -3195,9 +3203,10 @@ class _AttoCubeSweep:
                         np.finfo(float).tiny)
             # Membership comes from the same helper the loader groups readings with,
             # so this report and the tolerance behind get_spectrum_at() cannot
-            # disagree about which rows are only jittering.  It is the wider test of
-            # the two: a fine sweep on a large offset fails span-against-RMS and is
-            # still caught, which the ranking below then places low, correctly.
+            # disagree about which rows are only jittering.  It is wider than the
+            # ranking: a fine sweep on a large offset fails span-against-RMS and is
+            # still caught by the other two signs, which the ranking below then places
+            # low, correctly.
             if _axis_driven(arr, rtol):
                 found.append((span / scale, label,
                               (float(finite.min()), float(finite.max()), span)))

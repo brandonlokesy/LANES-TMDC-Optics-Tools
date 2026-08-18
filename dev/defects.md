@@ -147,7 +147,9 @@ time — `laser_annotation=True` returned an `anim` object fine and died on save
 
 Two incidental changes, both from adopting the helper's defaults: `zorder` 10 → 4
 (images are `zorder=0`, so the circle still sits above the map, and the helper's 4 is
-already proven in `ImageSequencePanel`'s animations), and the legend label becomes
+already proven in `ImageSequencePanel`'s animations — **wrong, corrected 2026-08-18:**
+that panel drew at 3, not 4, until it was migrated onto the helper under **D2**; the
+conclusion stands on the image being at 0), and the legend label becomes
 `"Laser 1/e² (r px)"`. Nothing in this function calls `ax.legend()`, so the label is
 only reachable if the caller asks for one. `ls="--"` is passed to keep the dashed
 appearance this call site had; the remaining default divergence between the drawers is
@@ -1272,6 +1274,19 @@ change, and it wants the whole line checked rather than one name pulled out of i
 `_draw_laser_circle`. The surviving inline copy is `ImageSequencePanel`'s, and it is the
 one an `AnimationPanel` author would copy from.
 
+*Half done — 2026-08-18.* `ImageSequencePanel.init_artists` now calls
+`_draw_laser_circle` and keeps the artist as a public `laser_circle`, so the last inline
+copy in `plotting` is gone and two drawers remain. Two defaults changed with it, both
+already accepted as incidentals under **A3**: `zorder` 3 → 4, invisible because nothing
+in the package sits between them and that axes holds only the image and the circle, and
+the circle gains the helper's `label`, inert because no legend is built anywhere in the
+animation-panel path.
+
+**Still open:** `loaders._AttoCubeImage._add_laser_circle`. Closing it has to settle a
+question this half did not raise — the two drawers spell the label differently
+(`"Laser 1/e² (5.0 px)"` against `"$1/e^2$ Radius (5.0 px)"`), and the `loaders` one is
+visible, because `show_image(legend=True)` puts it in a legend.
+
 **D3.** `DeviceGeometry` precomputes `self.slabs` in `__init__` "for efficiency",
 then `eps_stack` calls `self._slabs()` again while `d_stack` uses the cached one.
 Still open after the A2 pass — deliberately left, to keep that change to one thing.
@@ -1718,6 +1733,12 @@ method any test touches is `SpectrumLinePanel.init_artists`, at three call sites
 `ImageSequencePanel` is reached only indirectly, through
 `tests/test_plotting_laser_circle.py`'s end-to-end render, and `DiffusionCloudPanel` not at
 all.
+
+*Correction 2026-08-18:* the indirect reach claimed for `ImageSequencePanel` did not
+exist. That end-to-end render goes through `animate_real_space_PL_map`, which builds its
+own figure and never constructs a panel. The two tests that do construct one
+(`tests/test_plotting_frame_source.py`) use a scan with no `laser_ref`, so its laser
+branch had no coverage of any kind until **D2**'s first half added some.
 
 That makes it the least-defended surface in `plotting`, and it is the one an outside
 contributor is most likely to extend — the frame-window work in PR #16 landed two

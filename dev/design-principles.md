@@ -177,8 +177,8 @@ with different styling defaults, of which two remain to unify. That is how 6k li
 becomes 10k.
 
 **Prefer composing an existing entry point over adding a near-duplicate one.**
-`animate_wl_pl_spectra` builds its panels and returns `animate_panels(...)` — a new
-public function, no new engine. That is the shape to copy. For contrast, `plotting` has
+`animate_wl_pl_spectra` builds its panels and delegates to `animate_panels(...)` — a
+new public function, no new engine. That is the shape to copy. For contrast, `plotting` has
 16 public entry points and exactly one such delegation.
 
 **Anything nothing reaches gets deleted, not documented.** A dead parameter with a

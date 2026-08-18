@@ -1146,7 +1146,8 @@ rule. Don't copy it.
 The animation system is the shape to aim for: `animate_panels(panels, …)` takes a
 list of `AnimationPanel` objects, so any subset, order, or combination works with no
 special-casing. `animate_wl_pl_spectra` is a public function that builds its panels
-and *delegates* — a new entry point, no new engine.
+and *delegates* — a new entry point, no new engine. It returns those panels as a third
+element, so the artists a panel owns stay reachable from the convenience path.
 
 ---
 

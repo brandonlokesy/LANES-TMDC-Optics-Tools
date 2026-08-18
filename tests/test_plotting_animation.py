@@ -679,7 +679,7 @@ def test_one_extra_white_light_frame_is_dropped_with_a_warning(tmp_path):
     pl = _image_dir(tmp_path / "pl", "pl_", 4)     # N
 
     with pytest.warns(UserWarning, match=r"takes 4 images out of a possible 5"):
-        fig, anim = plotting.animate_wl_pl_spectra(
+        fig, anim, panels = plotting.animate_wl_pl_spectra(
             wl=(str(wl), "wl_"), pl=(str(pl), "pl_"),
         )
 
@@ -728,7 +728,7 @@ def test_matching_counts_animate_without_a_warning(tmp_path):
     # attributed to whichever test happens to trigger collection.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        fig, anim = plotting.animate_wl_pl_spectra(
+        fig, anim, panels = plotting.animate_wl_pl_spectra(
             wl=(str(wl), "wl_"), pl=(str(pl), "pl_"),
         )
 
@@ -741,10 +741,103 @@ def test_an_explicit_selection_overrides_the_trim(tmp_path):
     wl = _image_dir(tmp_path / "wl", "wl_", 5)
     pl = _image_dir(tmp_path / "pl", "pl_", 4)
 
-    fig, anim = plotting.animate_wl_pl_spectra(
+    fig, anim, panels = plotting.animate_wl_pl_spectra(
         wl=(str(wl), "wl_"), pl=(str(pl), "pl_"), frames=range(2),
     )
     assert list(anim.new_frame_seq()) == [0, 1]
+
+
+# The wrapper builds its panels and hands them back, because a panel's artists are
+# how it is restyled — reaching them through fig.axes means guessing which entry is
+# whose. spectrum_style is the one route to the spectrum panel's own options, and
+# mirrors laser_style, which does the same job for the two image panels.
+
+
+def _spectra_csv(tmp_path):
+    """A three-sweep spectral CSV, matching a three-frame image directory."""
+    path = tmp_path / "spectra.csv"
+    make_spectral_csv(path)
+    return str(path)
+
+
+def test_the_panels_come_back_in_construction_order(tmp_path):
+    pl = _image_dir(tmp_path / "pl", "pl_", 3)
+
+    fig, anim, panels = plotting.animate_wl_pl_spectra(
+        pl=(str(pl), "pl_"), spectra=_spectra_csv(tmp_path),
+    )
+
+    assert [type(p).__name__ for p in panels] == ["ImageSequencePanel",
+                                                  "SpectrumLinePanel"]
+
+
+def test_an_omitted_panel_is_absent_rather_than_none(tmp_path):
+    """The length follows the arguments, so panels[-1] is the spectrum whenever
+    spectra was passed."""
+    pl = _image_dir(tmp_path / "pl", "pl_", 3)
+
+    _, _, image_only = plotting.animate_wl_pl_spectra(pl=(str(pl), "pl_"))
+    _, _, with_spec  = plotting.animate_wl_pl_spectra(
+        pl=(str(pl), "pl_"), spectra=_spectra_csv(tmp_path))
+
+    assert len(image_only) == 1
+    assert len(with_spec) == 2
+    assert isinstance(with_spec[-1], plotting.SpectrumLinePanel)
+
+
+def test_spectrum_style_reaches_the_panel(tmp_path):
+    """twin_axis was unreachable through this wrapper before spectrum_style."""
+    pl = _image_dir(tmp_path / "pl", "pl_", 3)
+
+    fig, anim, panels = plotting.animate_wl_pl_spectra(
+        pl=(str(pl), "pl_"), spectra=_spectra_csv(tmp_path),
+        spectrum_style={"twin_axis": True},
+    )
+    fig.canvas.draw()
+
+    assert panels[-1].ax_twin is not None
+    assert panels[-1].ax_twin.get_xlabel() == "Wavelength (nm)"   # energy is default
+
+
+def test_no_spectrum_style_leaves_the_panel_at_its_defaults(tmp_path):
+    pl = _image_dir(tmp_path / "pl", "pl_", 3)
+
+    fig, anim, panels = plotting.animate_wl_pl_spectra(
+        pl=(str(pl), "pl_"), spectra=_spectra_csv(tmp_path),
+    )
+
+    assert panels[-1].ax_twin is None
+
+
+def test_an_unknown_spectrum_style_key_raises_from_the_panel(tmp_path):
+    """
+    The dict is forwarded, not validated here, so the error names the constructor
+    that owns the keyword rather than this wrapper.
+    """
+    pl = _image_dir(tmp_path / "pl", "pl_", 3)
+
+    with pytest.raises(TypeError, match="twin_axes"):
+        plotting.animate_wl_pl_spectra(
+            pl=(str(pl), "pl_"), spectra=_spectra_csv(tmp_path),
+            spectrum_style={"twin_axes": True},
+        )
+
+
+def test_laser_style_reaches_both_image_panels(tmp_path):
+    """
+    The pattern spectrum_style copies, previously unpinned anywhere. Both image
+    panels get the same dict, so a style set once applies to both.
+    """
+    wl = _image_dir(tmp_path / "wl", "wl_", 3)
+    pl = _image_dir(tmp_path / "pl", "pl_", 3)
+
+    fig, anim, panels = plotting.animate_wl_pl_spectra(
+        wl=(str(wl), "wl_"), pl=(str(pl), "pl_"),
+        laser_style={"laser_annotation": False, "laser_color": "cyan"},
+    )
+
+    assert [p.laser_annotation for p in panels] == [False, False]
+    assert [p.laser_color for p in panels] == ["cyan", "cyan"]
 
 
 # ---------------------------------------------------------------------------

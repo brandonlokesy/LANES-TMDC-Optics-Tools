@@ -34,8 +34,9 @@ below tracks what is left.
 
 *(A1–A3 fixed; A4 deferred; A5 open; **A6 fixed 2026-07-30**; **A8 fixed 2026-08-06**
 with E14; **A10 and A7 fixed 2026-08-07**; **A9 and B1 both fixed 2026-08-10**, which
-closes the `AttoCubePLScanRealSpace` pass. **A5** and **A18** are the live bugs left in
-this section.)*
+closes the `AttoCubePLScanRealSpace` pass; **A19–A21 fixed 2026-08-17/18** on
+`fix/nest-level-separation`. **A5**, **A18** and **A22** are the live bugs left in this
+section.)*
 
 **A1. `processing.remove_cosmic_rays` cannot be called at all.** **[FIXED — 2026-07-28, e77fabf]**
 `processing.py:349-361` referenced `cosmic_mask`, which was never defined — the
@@ -968,6 +969,76 @@ warning, the fine-sweep-on-an-offset regression, and
 `test_the_reach_of_the_detection_is_deliberate` fixing the boundary above. Fixtures draw
 from per-row seeded generators after an order-dependent draw made one assertion flaky.
 
+**A21. A sweep both coarse and narrow for its offset collapsed to a single setting.**
+**[FIXED — 2026-08-18]** **[verified against real data]** Found 2026-08-18 reviewing the
+A20 fix before merge, so it never shipped. `_axis_driven` called a row held only when both
+its signs failed, and A20 presents those two blind spots as complementary. They are two
+descriptions of one region: a sweep that is **both** narrow for its offset and coarse
+defeats them together. Sign 2 fires when `median|Δ| < 0.1 × travel`, which for an even
+sweep of *n* points needs `1/(n-1) < 0.1`, i.e. more than eleven readings — while the case
+sign 2 exists to catch is exactly the one sign 1 cannot see.
+
+Measured with the shipped helpers:
+
+```
+np.linspace(300.0, 300.2, n)  n = 3..10 -> held, _axis_atol 0.2 (the full travel), 1 level
+                              n = 11    -> driven, but only by float noise in the diffs
+np.linspace(5.000, 5.004, 5)            -> held, _axis_atol 0.004, 1 level
+```
+
+So a real five-point gate step of 1 mV at 5 V, or a six-point 300.00 to 300.20 K sweep,
+warned *"This row was held at one setting for the whole file"* and had every coordinate
+lookup on it refused — behaviour `main` did not have. A20's claim that "a false collapse
+needs both signs wrong at once" is true and insufficient: the conjunction is reachable.
+The slip is visible in `0018`'s own load-bearing note, which says `_AXIS_STEP_FRAC` has
+least margin at small point counts "where sign 1 is carrying the decision anyway" — at
+small point counts on a large offset, sign 1 is the sign that is blind.
+
+*Fixed* by a third sign, decision `0019`: a row whose non-zero steps in acquisition order
+all share a sign is being driven, however few readings it has. Exact repeats are dropped
+first, so a slow axis's plateaus do not read as reversals. It abstains below
+`_AXIS_MIN_MOVES = 4` moves, where direction is a coin toss — which leaves a four-point
+narrow sweep still collapsing, the known residue.
+
+The sign is **added**, not substituted, and that is the whole safety argument: OR-ing can
+only move rows held → driven, so none of the counterexamples that killed A20's rejected
+alternatives (the flattened sawtooth, the 201-step sweep at 5 V, the log-spaced power
+series) can be lost to it. Verified rather than assumed — sign 1 alone still recognises
+each of them, so sign 3 is never what rescues a nest.
+
+Verified to A20's own standard: every loadable spectral export and the TRPL directory
+reloaded with **zero** rows reclassified, and the false-driven rate on held 5 V rows
+unchanged except at five readings (0.5% → 2.2%) and six (1.1% → 1.2%). 679 tests pass.
+
+Covered by two new rows in `tests/test_loaders_axis_tolerance.py`'s `AXES` table at the
+point counts that failed, and
+`test_direction_is_only_evidence_once_a_row_has_moved_enough`, which pins the
+`_AXIS_MIN_MOVES` boundary, both travel directions, a row that turns round, and the slow
+axis's plateaus.
+
+**A22. A held gate whose read-back drifts is reported as varying, and flips `gate_mode`.**
+**[OPEN]** **[verified by running]** `_axis_driven`'s second and third signs read the
+*shape* of a row's motion and carry no magnitude, so a monotone drift is seen at any
+amplitude. `0018` §4 measured the rule's reach against i.i.d. scatter only, and concluded
+a source-meter holding a gate is recognised; drift was never in scope. Measured: a gate
+held at 5 V drifting monotonically by 1 mV over 21 points is driven at `rtol=1e-3`, `1e-2`
+**and** `1.0`, where the pre-`0018` `span > rtol × RMS` test excluded it at all three.
+Pure jitter of the same size is unaffected, which is why the existing test does not catch
+it.
+
+Not cosmetic, because `varying_parameters()` is not only a report. `gate_mode` and
+`_gate_candidates` both key off membership in it, so a grounded second gate with a slow
+thermal drift turns `"top-gate only"` into a dual-gate verdict — the Pearson branch then
+correlates a real sweep against a drift and answers confidently.
+
+*Not fixed here.* Giving `gate_mode` a private one-sign test re-splits the two definitions
+`0018` §3 deliberately joined, and would let the report and the loader's grouping
+contradict each other again. The honest fix is a declared instrument resolution — the
+`sweep_atol=` argument `0018` left unbuilt for want of a file that needs it, and which
+CLAUDE.md says not to add until a committed file does. This entry is the evidence for
+when one appears. Until then the exposure is documented in `_axis_driven`'s docstring: a
+held row is recognised only while its scatter is directionless.
+
 ## B. Dead parameters — accepted, documented, silently ignored
 
 **B1. `AttoCubePLScanRealSpace(bg_region=, bg_stat=)` are stored and never read.**
@@ -1736,13 +1807,16 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
    A7 fixed 2026-08-07; A9 and B1 fixed 2026-08-10; A4 deferred.) **A11** (warning
    locations) and **A12** (duplicate iteration indices) were both opened by the A7
    work; A12 is fixed, A11 is still owed and is its own deliberate pass over 15 sites.
-2. **C1–C3** — the doc corrections, since they actively mislead. **C8** and **C9** join
+2. **A22** — a held gate that drifts reads as varying, which `gate_mode` then answers
+   confidently on. Blocked on a file that needs a declared instrument resolution
+   (`sweep_atol=`); until one appears the entry is the evidence, not the work.
+3. **C1–C3** — the doc corrections, since they actively mislead. **C8** and **C9** join
    them, and both are cheapest taken by whatever next edits their function.
-3. **B2–B4, D1–D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
+4. **B2–B4, D1–D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
    2026-08-10, and was not mechanical: the sketched fix would have introduced a second
    instance of A5.)
-4. **E2, E3, E5** — the remaining design calls, one at a time.
-5. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
+5. **E2, E3, E5** — the remaining design calls, one at a time.
+6. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
    because it is the only breaking change on the list and touches `examples/`.
 
 **Opened 2026-08-12 by the review of PR #16** (`animate_panels` frame windowing):

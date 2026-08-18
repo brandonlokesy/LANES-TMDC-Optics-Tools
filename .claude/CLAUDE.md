@@ -224,12 +224,15 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
 - Don't name an instrument in a parameter (`force_power_by_fianium=`); which row drives
   what is declared per session, through `*_group_by=`. Don't make a level's coordinate the
   mean or the first reading instead of the median.
-- Don't decide whether an axis was driven from one sign. Both are needed and either is
-  sufficient — dropping sign 1 collapses a flattened nest, dropping sign 2 collapses a
-  narrow sweep on a large offset (300.0–300.2 K). Don't floor `_axis_atol` at the row's
-  magnitude, respell sign 2 as a gap *ratio*, or scale its threshold by the point count:
-  all three are measured to collapse a real axis. Don't add `sweep_atol=` until a
-  committed file needs it.
+- Don't drop a sign from `_axis_driven`. All three are needed and any one is sufficient —
+  without sign 1 a flattened nest collapses, without sign 2 a narrow sweep on a large
+  offset does (300.0–300.2 K), and without sign 3 the same sweep collapses whenever it is
+  also coarse (fewer than ~11 points). A further sign may only be **added**, never
+  substituted for an existing one: OR-ing can lose no real axis, whereas every rejected
+  replacement did. Don't floor `_axis_atol` at the row's magnitude, respell sign 2 as a
+  gap *ratio*, or scale its threshold by the point count: all three are measured to
+  collapse a real axis. Don't gate sign 3 behind a minimum travel, and don't add
+  `sweep_atol=` until a committed file needs it.
 - Don't reshape `spectra` when a nest is declared; don't extend `axis=` to nests.
 - Don't make the accessors return one match for an ambiguous coordinate.
 - Don't give `plot_spectrum` a positional `value`, or truncate a fractional index.

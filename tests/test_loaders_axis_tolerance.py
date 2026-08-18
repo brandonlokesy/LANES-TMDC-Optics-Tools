@@ -23,6 +23,8 @@ import pytest
 
 from tmdc_optics_tools.loaders import (
     AttoCubeSpectralSweep,
+    _AXIS_MIN_MOVES,
+    _AXIS_RTOL,
     _axis_atol,
     _axis_driven,
     _count_distinct,
@@ -58,6 +60,12 @@ AXES = [
      2.0 ** np.arange(6), 6),
     ("the fewest points a sweep can have",
      np.array([1.0, 2.0, 3.0]), 3),
+    # Both of these are narrow for their offset *and* coarse, so the first two signs
+    # fail together and only the direction of travel is left to see them by.
+    ("a narrow sweep coarse enough that only its direction shows: 6 points over 0.2 K",
+     np.linspace(300.0, 300.2, 6) + 2e-3 * _scatter(15, 6), 6),
+    ("a five-point gate step of 1 mV at 5 V",
+     np.linspace(5.000, 5.004, 5) + 2e-6 * _scatter(16, 5), 5),
 ]
 
 
@@ -88,11 +96,11 @@ def test_the_reach_of_the_detection_is_deliberate():
     """
     A held setting is only recognised while its read-back is stable for its own size.
 
-    Both signs of a driven axis have to fail before one is called held, and the first
-    of them — span against RMS magnitude — fires once the scatter exceeds *rtol* of the
-    reading. So a source-meter holding a gate is recognised and a power meter holding a
-    power is not. Pinned rather than left implicit, because it is the boundary a reader
-    would otherwise have to rediscover.
+    All three signs of a driven axis have to fail before one is called held, and the
+    first of them — span against RMS magnitude — fires once the scatter exceeds *rtol*
+    of the reading. So a source-meter holding a gate is recognised and a power meter
+    holding a power is not. Pinned rather than left implicit, because it is the boundary
+    a reader would otherwise have to rediscover.
     """
     held = lambda rel, n, seed: not _axis_driven(500 * (1 + rel * _scatter(seed, n)))
 
@@ -103,6 +111,36 @@ def test_the_reach_of_the_detection_is_deliberate():
     # setting. That is the pre-existing behaviour, not a regression, and it is why a
     # noisy power meter holding one setting is still not collapsed.
     assert not held(4e-3, 20, 14)  # power meter: 3 uW on 800 uW
+
+
+def test_direction_is_only_evidence_once_a_row_has_moved_enough():
+    """
+    Where the third sign starts and stops.
+
+    It reads the direction of travel and nothing else, so it sees a sweep the other two
+    miss — too coarse for the step test, too narrow for the span test — at the price of
+    being a coin toss on a row with barely any moves. ``_AXIS_MIN_MOVES`` is where that
+    price is paid: below it the sign abstains, and the row falls back to the other two.
+    """
+    # A sweep neither of the first two signs can see, at the shortest length the third
+    # one will speak for and one reading shorter.
+    narrow = lambda n: np.linspace(300.0, 300.2, n)
+    assert np.ptp(narrow(6)) < _AXIS_RTOL * np.sqrt(np.mean(narrow(6) ** 2))
+    assert _axis_driven(narrow(_AXIS_MIN_MOVES + 1))
+    assert not _axis_driven(narrow(_AXIS_MIN_MOVES))
+
+    # Direction is read in acquisition order, so a sweep run downwards is as visible as
+    # one run up, and a row that turns round is not a sweep at all.
+    assert _axis_driven(narrow(6)[::-1])
+    assert not _axis_driven(np.array([300.0, 300.1, 300.2, 300.1, 300.0, 300.1]))
+
+    # Standing still is not turning round: a slow axis stepping between plateaus keeps
+    # one direction across the repeats, which is what dropping the zero steps preserves.
+    assert _axis_driven(np.repeat(np.linspace(300.0, 300.2, 5), 4))
+
+    # Directionless scatter at the same size stays held, which is the case the sign must
+    # not cost us.
+    assert not _axis_driven(300 + 0.02 * _scatter(17, 20))
 
 
 def _repeats_csv(path, n=12, seed=101):

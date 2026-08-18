@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted |
+| **Status** | Amended by 0019 |
 | **Date** | 2026-08-18 |
 | **Audit** | A20 · completes what `0016` left at the flat-sweep call sites |
 

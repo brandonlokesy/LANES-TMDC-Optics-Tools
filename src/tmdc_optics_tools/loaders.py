@@ -1201,25 +1201,49 @@ _AXIS_RTOL = 1e-3
 # points, 0.5% at 201 — whereas scatter sits near 40% however many readings there are.
 _AXIS_STEP_FRAC = 0.1
 
+# Non-zero steps a row must take before the *direction* of those steps is evidence of
+# anything.  Below this, scatter runs one way often enough by chance to be worth
+# nothing: on a held 5 V gate, 9% of four-point rows never reverse, against 2% at five
+# readings and 0.2% at six.
+_AXIS_MIN_MOVES = 4
+
 
 def _axis_driven(values: np.ndarray, rtol: float = _AXIS_RTOL) -> bool:
     """
     Whether *values* record a driven axis rather than one setting plus scatter.
 
-    Two independent signs, either of which is enough, because each is blind where the
-    other sees.  **How far it travels for its own size** misses a fine sweep sitting on
-    a large offset — 300.0 K to 300.2 K travels 0.07% of its readings — while **how far
-    consecutive readings step** misses a coarse sweep, whose few points are as far apart
-    as scatter would be.  Requiring both to agree before calling an axis undriven is
-    what keeps a real sweep from being collapsed: the safe error here is leaving scatter
-    uncollapsed, which is what happens without either test.
+    Three independent signs, any one of which is enough, because each is blind where
+    another sees:
+
+    ==========================  ==============================  ======================
+    sign                        draws on                        blind to
+    ==========================  ==============================  ======================
+    travel against size         how far it went for how large   a fine sweep on a
+                                it is                           large offset — 300.0
+                                                                to 300.2 K travels
+                                                                0.07% of its readings
+    how far it steps            a sweep progresses where        a coarse sweep, whose
+                                scatter jumps about             few points step as far
+                                                                as scatter would
+    which way it steps          a sweep does not turn round;    a sweep that revisits
+                                scatter does                    values, which restarts
+                                                                every row of a nest
+    ==========================  ==============================  ======================
+
+    Requiring all three to fail before calling an axis undriven is what keeps a real
+    sweep from being collapsed: the safe error here is leaving scatter uncollapsed,
+    which is what happens without any of them.  The third sign is what covers the two
+    blind spots that *overlap* — a sweep both coarse and narrow for its offset, such as
+    six points from 300.0 K to 300.2 K, defeats the first two together.
 
     That safety sets the reach.  Because the first sign fires as soon as a row's span
     exceeds *rtol* of its magnitude, a held setting is recognised only while its
     read-back is stable to better than that — reliably so for a commanded row (a
     source-meter reports a 5 V gate to ~20 µV) and not at all for a power meter, whose
     scatter runs to a few parts per thousand of the reading.  A noisy instrument holding
-    one setting therefore still reads as many, exactly as it did before.
+    one setting therefore still reads as many, exactly as it did before.  Read-back that
+    *drifts* rather than jitters is seen by the last two signs at any amplitude, so a
+    held row is recognised only while its scatter is directionless.
     """
     finite = values[np.isfinite(values)]
     if finite.size < 2:
@@ -1239,7 +1263,19 @@ def _axis_driven(values: np.ndarray, rtol: float = _AXIS_RTOL) -> bool:
     # scatter destroys and a sweep preserves.  Median rather than mean, so the jump
     # back at the end of each row of a flattened nest is outvoted rather than read as
     # scatter.
-    return float(np.median(np.abs(np.diff(finite)))) < _AXIS_STEP_FRAC * travel
+    if float(np.median(np.abs(np.diff(finite)))) < _AXIS_STEP_FRAC * travel:
+        return True
+
+    # The same differences with the exact repeats dropped, leaving (n_moves,) actual
+    # moves: a slow axis sits still between its steps, and standing still is not
+    # turning round.  Judged on direction alone, so this sign carries no magnitude and
+    # no point count — which is why it still sees a sweep too coarse for the second
+    # sign and too narrow for the first.
+    steps = np.diff(finite)
+    steps = steps[steps != 0.0]
+    if steps.size < _AXIS_MIN_MOVES:
+        return False
+    return bool(np.all(steps > 0) or np.all(steps < 0))
 
 
 def _axis_atol(values: np.ndarray, rtol: float = _AXIS_RTOL) -> float:

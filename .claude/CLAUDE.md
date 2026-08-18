@@ -216,7 +216,14 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
 - Don't return zeros for `i_*` on a role declared `None`.
 - Don't make `gate_mode` or `__repr__` raise for an undeclared mapping.
 - Don't respell a nest as `grid=(inner, outer)`, alias `fast_sweep=` to `sweep=`, or add
-  a `"piezo_xy"` sweep type.
+  a `"piezo_xy"` sweep type. A nest's shape is asserted as **named** `n_fast=` / `n_slow=`,
+  never as a `sweep_shape=(fast, slow)` tuple — a reversed tuple cannot be detected.
+- Don't resolve a nest by loosening `_AXIS_RTOL`, or by any single per-axis tolerance;
+  don't trim outliers before comparing levels. Don't make an asserted shape skip the
+  overlap checks, or store `n_fast`/`n_slow` in HDF5 for a nest the readings resolved.
+- Don't name an instrument in a parameter (`force_power_by_fianium=`); which row drives
+  what is declared per session, through `*_group_by=`. Don't make a level's coordinate the
+  mean or the first reading instead of the median.
 - Don't reshape `spectra` when a nest is declared; don't extend `axis=` to nests.
 - Don't make the accessors return one match for an ambiguous coordinate.
 - Don't give `plot_spectrum` a positional `value`, or truncate a fractional index.
@@ -250,6 +257,11 @@ bwarea semantics are wanted at all.
 - `_is_image_csv` accepts a two-row spectrum as an image, so a directory of single
   spectra loads as 2×N "images". `_read_block_layout` already draws this distinction
   correctly; copy that rule.
+- `_axis_atol` miscounts a **constant** axis: 0.1% of a noise-only span falls below the
+  typical gap between readings, so a 500 µW row wobbling by 1 µW counts as 62 distinct
+  values, not 1. Reaches `_warn_if_sweep_axis_repeats` and the accessor match, not the
+  nest. `varying_parameters` already has the scale reference to borrow (span against the
+  row's own RMS). Its own change.
 - **Every `stacklevel` in `loaders.py` is unverified** — 15 `warnings.warn` calls, no
   test pinning where any of them points, and two chains confirmed wrong. A wrong value
   also *suppresses repeats*, so it is a diagnostics failure rather than a cosmetic one.

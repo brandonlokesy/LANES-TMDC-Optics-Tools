@@ -806,6 +806,111 @@ array is a legitimate truncation (a windowed or `min()`-limited animation), so t
 stays silent; only "too short to finish" is an error. Cheap to pin: `diffusion` has no
 tests at all today, so this wants the first one.
 
+**A19. A measured nest axis could not be resolved at all, in either orientation.**
+**[FIXED — 2026-08-17]** **[verified against real data]** Reported 2026-08-14 from
+`examples/data/voltage-power-sweep/PL_Vbot_power_sweep_test_26_08_07_16_25_51_iter_0.csv`
+— 11 `V_A` steps inside 6 power levels, 66 spectra, which
+`fast_sweep="bottom_voltage", slow_sweep="power"` refused.
+
+This is the case **A13 named and left open**: *"an axis whose scatter approaches its
+level spacing will chain levels together"*. A13 made the two definitions of "the same
+grid point" agree; it did not change the fact that one tolerance per axis has to fit
+between the scatter *within* a level and the step *between* levels, and on a measured
+axis no such value need exist. Two properties of a power sweep close the window: meter
+scatter grows with the reading, so it is set by the top of the axis, and a power series
+is log-spaced, so the smallest step to resolve is a tiny slice of the span.
+
+Measured on that file: worst within-level scatter 3.06 µW against an `_axis_atol` of
+0.42 µW — short by 7.3×. Synthetic clean sweeps fail as easily: 6 levels 100 µW apart
+need only 0.6 µW of meter noise to shatter. Raising the constant was tested and
+rejected — at `1e-2` a 101-step gate sweep collapses to **one** level, because the
+tolerance must also stay under the step between levels (about span ÷ levels).
+
+Worse in the swapped orientation, which the reporter also hit: with power as the *fast*
+axis the miscount becomes `n_fast`, so `n_sweeps % n_fast` fails and the structural
+checks never run at all. A clean 6-level log sweep gave `n_fast = 21` for 66 points.
+
+*Fixed* by deciding the nest on **level separation instead of a tolerance**
+(`_levels_separate`). Only the divisors of `n_sweeps` can be shapes, since the exporter
+runs the fast axis fastest; for each, both axes are reshaped and each level's
+lowest-to-highest range must clear its neighbour's. The comparison is always local — one
+level's own scatter against the step to the level beside it — so unequal spacing and
+value-proportional scatter both stop mattering, and the same test serves either
+orientation (rows for a slow axis, columns for a fast one). Exactly one shape may
+survive; several is refused by listing them rather than picked between.
+
+Measured against an independent criterion (spectra whose reading is closer to some other
+level than the one they were taken at), over 400 trials per condition: where nothing is
+misattributed it now resolves 100% of the time and previously resolved 0%; where
+readings genuinely interleave it still refuses. A single stray reading is tolerated up
+to 0.8 of a step and refused beyond, i.e. once that reading has reached the neighbouring
+setting. Trimming outliers before comparing was tested and rejected: it accepted 92% of
+trials in which spectra really were mixed up, and accepted a reading three full steps
+out of place. A false refusal is visible and recoverable; a false acceptance silently
+files spectra under the wrong setting.
+
+`_NEST_RTOL` is renamed `_AXIS_RTOL`, since it no longer governs nesting —
+`_axis_atol`, `_level_labels` and `_count_distinct` remain, serving
+`_warn_if_sweep_axis_repeats` and the accessor coordinate match.
+
+`_nesting_failure` was rewritten with it. The old message reported
+`n_fast × n_slow ≠ n_sweeps` using counts the algorithm never used to decide anything,
+which on the reported file printed *"11 × 9 = 99, not 66"* — an arithmetic story about a
+structural failure. It now anchors on whichever axis *does* separate, since that pins
+the shape the file actually has, and quotes the overlapping ranges of the axis that does
+not: *"At 11 × 6, fast_sweep='bottom_voltage' holds apart but slow_sweep='power' does
+not: one covers 834.345–836.925 µW and the next 835.474–837.247 µW"*. Anchoring on an
+arbitrary divisor instead was written first and caught in review — it blamed a healthy
+gate axis at a 6 × 2 shape nobody had declared.
+
+Covered by `test_a_scattered_level_nests_when_its_levels_stay_apart`,
+`test_a_scattered_axis_nests_as_the_fast_axis_too`,
+`test_overlapping_levels_are_refused_and_quoted` and
+`test_a_non_finite_reading_refuses_the_nest`, each with a fixture pinned to reach its
+case rather than pass for free. `test_aborted_raster_raises_naming_both_counts` is
+renamed `…_naming_the_sweep_total`, and it plus
+`test_swapped_declaration_raises_and_names_the_swap` had assertions on the removed
+`(N distinct)` wording replaced. The assertion and grouping paths add 21 more, including
+`test_transposed_counts_warn_about_the_clean_axis`,
+`test_a_level_coordinate_is_the_median_not_the_first_reading` and
+`test_a_grouped_nest_survives_a_round_trip`.
+
+Two bugs were caught in review while writing this and are worth recording, since both
+would have been quiet. `_nesting_failure` first anchored its diagnosis on the first
+divisor where exactly one axis separated, which blamed a healthy gate axis at a 6 × 2
+shape nobody had declared; it now anchors on whichever axis *does* separate, because that
+is what pins the shape the file actually has. And the HDF5 writer's new loop used `for
+kind in ("fast", "slow")`, shadowing the `kind` dict the axis dataset is named from a few
+lines later — caught by nine round-trip tests failing with `TypeError: string indices must
+be integers`.
+
+*Also fixed, in the same pass* (decision `0017`): the file can now be loaded with the
+axis labelled in µW while its **structure** comes from the commanded row —
+`slow_sweep="power", slow_group_by="Fianium_Select_A4"` resolves 11 × 6 and gives a slow
+axis of 416.9, 825.2, 835.6, 836.3, 836.1, 722.3 µW. Each level's coordinate is the
+**median** of its readings rather than the first one, which was biased low by up to
+1.3 µW on the two levels that drift while the laser settled (+0.31 and +0.23 µW per point,
+r = 0.89 and 0.83). `SweepNesting.slow_spread` carries the peak-to-peak range beside each
+coordinate — 0.4, 3.06, 2.58, 1.77, 1.29, 1.61 µW here — so a level that is not flat is
+visible instead of averaged away. A shape that no row can establish can be asserted with
+`n_fast=` / `n_slow=`. Both declarations round-trip through HDF5 (`FORMAT_VERSION` 2.2),
+conditionally, so a resolved nest still re-resolves on read.
+
+**Still not fixed, because it is not a code problem:** the measured power axis remains
+*physically* unusable on this file — not monotonic, three levels within 1 µW. The load now
+warns saying exactly that, and `0004` §5 still refuses an ambiguous lookup against it.
+Why the laser plateaued, and why `Fianium_Select_A4 = 160000` reads 417 µW here while
+`161000` reads 0.83 µW in `PL_Vbot_power_sweep_26_08_10_…` under identical logged
+settings, is a lab question.
+
+**Also found, open:** `_axis_atol` miscounts a *constant* axis. For a row that only
+wobbles, `1e-3 ×` its noise-only span falls below the typical gap between readings, so a
+constant 500 µW row with 1 µW of noise counts as **62** distinct values instead of 1.
+This reaches `_warn_if_sweep_axis_repeats` and the accessor match, not the nest.
+`varying_parameters` already holds the sounder scale reference — span against the row's
+own RMS rather than against itself — for `_axis_atol` to borrow as a floor. Its own
+change; nothing was touched here.
+
 ## B. Dead parameters — accepted, documented, silently ignored
 
 **B1. `AttoCubePLScanRealSpace(bg_region=, bg_stat=)` are stored and never read.**

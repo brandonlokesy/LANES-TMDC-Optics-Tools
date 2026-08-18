@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted · verification mechanism amended by A13 |
+| **Status** | Accepted · verification mechanism amended by A13 · §3 superseded by 0016 |
 | **Date** | 2026-08-06 |
 | **Audit** | E14 · closes A8 |
 

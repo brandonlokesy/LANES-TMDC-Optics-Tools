@@ -1184,14 +1184,20 @@ class SweepGrid(NamedTuple):
 
 
 # Fraction of an axis's own span by which two neighbouring readings may differ
-# and still fall on the same grid point.  Scaled to the span rather than to the
-# value so that an axis crossing zero — an anti-symmetric field sweep, say — is
-# handled like any other, and loose enough for a derived axis that is recomputed
-# per sweep point rather than read back as a repeated literal.
-_NEST_RTOL = 1e-3
+# and still count as the same value.  Scaled to the span rather than to the value
+# so that an axis crossing zero — an anti-symmetric field sweep, say — is handled
+# like any other, and loose enough for a derived axis that is recomputed per sweep
+# point rather than read back as a repeated literal.
+#
+# This describes and matches the *sweep axis*; it does not resolve a nest.  One
+# tolerance for a whole axis has to sit above the scatter within a level and below
+# the step between levels, and on a measured axis no such value need exist: a power
+# meter's scatter grows with the reading while the smallest step it must resolve
+# does not.  ``_levels_separate`` compares each level against its neighbour instead.
+_AXIS_RTOL = 1e-3
 
 
-def _axis_atol(values: np.ndarray, rtol: float = _NEST_RTOL) -> float:
+def _axis_atol(values: np.ndarray, rtol: float = _AXIS_RTOL) -> float:
     """Absolute tolerance for *values*, scaled to their span."""
     finite = values[np.isfinite(values)]
     span   = float(np.ptp(finite)) if finite.size else 0.0
@@ -1240,46 +1246,134 @@ def _render_indices(indices: np.ndarray, limit: int = 6) -> str:
     return f"{indices.size} sweep points (indices {shown})"
 
 
+# Which way a grid is collapsed to recover one axis's levels.  A slow axis holds
+# still while the fast axis runs to completion, so its levels are the grid's *rows*;
+# a fast axis repeats the same run of settings in every row, so its levels are the
+# grid's *columns*.
+_SLOW_LEVELS_AXIS = 1
+_FAST_LEVELS_AXIS = 0
+
+
+def _level_bounds(grid: np.ndarray, axis: int) -> tuple:
+    """
+    Lowest and highest reading of each grid level, ordered by value.
+
+    *grid* is one axis's readings reshaped to ``(n_slow, n_fast)``, and *axis* is
+    :data:`_SLOW_LEVELS_AXIS` or :data:`_FAST_LEVELS_AXIS`.
+
+    Returns ``(lo, hi)``, both ``(n_levels,)``, sorted by *lo*.  A level holding a
+    non-finite reading gets a non-finite bound, which no comparison below accepts,
+    so such an axis is refused rather than grouped on the finite readings alone.
+    """
+    lo, hi = grid.min(axis), grid.max(axis)          # (n_levels,) each
+    order  = np.argsort(lo, kind="stable")           # levels in value order
+    return lo[order], hi[order]
+
+
+def _levels_separate(grid: np.ndarray, axis: int) -> bool:
+    """
+    True when the readings of different grid levels never interleave.
+
+    Every level must begin above where the level below it ended.  This is what makes
+    a reshape trustworthy without a tolerance: the only comparison made is between
+    one level's own scatter and the step to its immediate neighbour, at the same
+    place on the axis.  A single tolerance for the whole axis cannot do that, which
+    is why a log-spaced power series read back by a meter defeats one — the scatter
+    at the top of the axis exceeds the step at the bottom.
+
+    Separable is all this checks, not tight.  A level whose readings are spread far
+    wider than expected still passes when that spread happens to fall in a gap.
+    Testing tightness needs a width to compare against, and the only scale-free
+    candidate — demanding the neighbour gap exceed the level's own spread — refuses
+    genuine log-spaced power sweeps.
+    """
+    lo, hi = _level_bounds(grid, axis)
+    # (n_levels - 1,): clearance from each level's top to the next level's floor.
+    return bool(np.all(lo[1:] - hi[:-1] > 0))
+
+
+def _nest_candidates(fast: np.ndarray, slow: np.ndarray, n_sweeps: int) -> list:
+    """
+    Every ``(n_fast, n_slow)`` under which *fast* nests inside *slow*.
+
+    Both arrays are the flattened ``(n_sweeps,)`` readings of the two declared axes.
+    The exporter writes the fast axis running fastest, so each slow step gets one
+    complete run of the fast axis and ``n_fast * n_slow == n_sweeps`` exactly: only
+    the divisors of *n_sweeps* can be shapes, and both counts must reach 2 for there
+    to be a nest at all.  A shape survives when both axes' levels are separable
+    under it.
+
+    Normally exactly one does.  Returning all of them lets the caller refuse an
+    ambiguous file by naming the shapes rather than choosing one of them.
+    """
+    # Trial division to the square root, pairing each divisor with its cofactor, so
+    # a long sweep does not walk every integer below n_sweeps.
+    divisors = set()
+    for d in range(1, int(np.sqrt(n_sweeps)) + 1):
+        if n_sweeps % d == 0:
+            divisors.update((d, n_sweeps // d))
+
+    hits = []
+    for n_fast in sorted(divisors):
+        n_slow = n_sweeps // n_fast
+        if n_fast < 2 or n_slow < 2:
+            continue
+        if (_levels_separate(fast.reshape(n_slow, n_fast), _FAST_LEVELS_AXIS)
+                and _levels_separate(slow.reshape(n_slow, n_fast), _SLOW_LEVELS_AXIS)):
+            hits.append((n_fast, n_slow))
+    return hits
+
+
 def _nest_shape(fast: np.ndarray, slow: np.ndarray, n_sweeps: int) -> tuple:
     """
-    Return ``(n_fast, n_slow)`` if *fast* runs to completion inside *slow*.
+    Return the one ``(n_fast, n_slow)`` describing *fast* nested inside *slow*.
 
-    Both arrays are the flattened ``(n_sweeps,)`` readings of the two declared
-    axes.  ``None`` when they do not form a nest in that order — the caller
-    retries with the arguments swapped to tell a genuine mismatch from a
-    reversed declaration.
+    ``None`` when no shape fits, and also when more than one does — a file that
+    reshapes two ways is not one to pick between.  Callers that need to tell those
+    apart, or to report them, use :func:`_nest_candidates` directly.
     """
-    # Reduce both axes to level indices up front, so the structural test below is
-    # an exact comparison of integers and the tolerance is applied in one place.
-    # Testing the readings themselves instead would hold a level's own scatter to
-    # a tolerance set by the axis's *full span* — which a measured-back quantity
-    # such as excitation power exceeds on its topmost level long before its
-    # levels stop being separable, since the scatter grows with the reading while
-    # the tolerance is fixed by the largest one.
-    fast_labels, n_fast = _level_labels(fast, _axis_atol(fast))
-    slow_labels, _      = _level_labels(slow, _axis_atol(slow))
+    candidates = _nest_candidates(fast, slow, n_sweeps)
+    return candidates[0] if len(candidates) == 1 else None
 
-    if n_fast < 2 or n_sweeps % n_fast:
-        return None
-    n_slow = n_sweeps // n_fast
 
-    fast_grid = fast_labels.reshape(n_slow, n_fast)
-    slow_grid = slow_labels.reshape(n_slow, n_fast)
+def _level_coordinates(grid: np.ndarray, axis: int) -> tuple:
+    """
+    One coordinate per grid level, with the spread of the readings behind it.
 
-    # (n_fast,) broadcast down the rows: the fast axis must repeat the same run
-    # of levels in every row.  (n_slow, 1) broadcast across the columns: the slow
-    # axis must hold still for the whole of each row.
-    if not (fast_grid == fast_grid[0]).all():
-        return None
-    if not (slow_grid == slow_grid[:, :1]).all():
-        return None
-    # A slow axis that revisits a level would make a lookup by value ambiguous,
-    # and one with no level at all (non-finite, labelled -1) has no coordinate to
-    # look up — so count the levels actually reached, ignoring those.
-    slow_levels = slow_grid[:, 0]
-    if np.unique(slow_levels[slow_levels >= 0]).size != n_slow:
-        return None
-    return n_fast, n_slow
+    The **median** represents a level.  Every reading in a level was taken at the same
+    setting, so the scatter between them is the instrument's, not the experiment's, and
+    a level's coordinate should not move because one reading was bad — a stray reading
+    small enough to pass :func:`_levels_separate` still drags a mean.  The median is
+    also unbiased when a level *drifts* through its readings, which a read-back power
+    does while the laser settles after a setpoint change; the first reading of the level
+    is the one taken before it settled.
+
+    Levels stay in acquisition order — index *i* is the *i*-th level as measured, not the
+    *i*-th smallest — so a descending sweep stays descending.
+
+    Returns ``(coordinate, spread)``, both ``(n_levels,)``.  *spread* is each level's
+    peak-to-peak range, which is what makes a level that is not really one visible.
+    """
+    return np.median(grid, axis=axis), np.ptp(grid, axis=axis)
+
+
+def _overlap_report(values: np.ndarray, axis: int, shape: tuple, unit: str = "") -> str:
+    """
+    Describe the first pair of grid levels whose readings interleave.
+
+    *values* is the flat ``(n_sweeps,)`` axis and *shape* the ``(n_fast, n_slow)``
+    candidate being explained.  Returns ``""`` when the levels are in fact separate.
+    """
+    n_fast, n_slow = shape
+    lo, hi = _level_bounds(values.reshape(n_slow, n_fast), axis)
+    # ~(gap > 0) rather than (gap <= 0), so a non-finite bound counts as a clash.
+    clash = np.flatnonzero(~(lo[1:] - hi[:-1] > 0))
+    if clash.size == 0:
+        return ""
+    i = int(clash[0])
+    suffix = f" {unit}" if unit else ""
+    return (f"one covers {lo[i]:.6g}–{hi[i]:.6g}{suffix} and the next "
+            f"{lo[i + 1]:.6g}–{hi[i + 1]:.6g}{suffix}")
 
 
 @_dataclass(frozen=True, eq=False)
@@ -1287,18 +1381,36 @@ class SweepNesting:
     """
     A declared 2-D sweep: a fast (inner) axis run to completion inside a slow one.
 
-    Held by :attr:`_AttoCubeSweep.nesting`.  The two coordinate arrays are the
-    distinct values of each axis in acquisition order, so a descending sweep stays
-    descending; they are *not* sorted.
+    Held by :attr:`_AttoCubeSweep.nesting`.  Each coordinate array holds one value per
+    level of that axis, in acquisition order, so a descending sweep stays descending;
+    they are *not* sorted.  A coordinate is the **median** of the readings taken at
+    that level, and ``fast_spread`` / ``slow_spread`` carry the peak-to-peak range
+    those medians came from — zero for a commanded axis read back exactly, and the
+    thing to look at when a level is not as flat as it should be.
+
+    ``asserted`` records that the shape was named with ``n_fast=`` / ``n_slow=``
+    rather than established from the readings, so at least one axis may not be able
+    to tell its own settings apart.  A caller reading coordinates off such a nest is
+    reading what the instrument happened to report at each level.
+
+    ``fast_group`` / ``slow_group`` name the row that established each axis's levels.
+    Normally that is the axis itself; it differs when ``fast_group_by=`` /
+    ``slow_group_by=`` pointed the grouping at a commanded setpoint while the
+    coordinates stayed on a measured quantity.
     """
-    fast_type  : str
-    fast_label : str
-    fast_unit  : str
-    fast_axis  : np.ndarray
-    slow_type  : str
-    slow_label : str
-    slow_unit  : str
-    slow_axis  : np.ndarray
+    fast_type   : str
+    fast_label  : str
+    fast_unit   : str
+    fast_axis   : np.ndarray
+    slow_type   : str
+    slow_label  : str
+    slow_unit   : str
+    slow_axis   : np.ndarray
+    asserted    : bool = False
+    fast_spread : np.ndarray = None
+    slow_spread : np.ndarray = None
+    fast_group  : str = None
+    slow_group  : str = None
 
     @property
     def n_fast(self) -> int:
@@ -1328,9 +1440,16 @@ class SweepNesting:
             else self.slow_label
 
     def __str__(self) -> str:
-        return (f"{self.fast_type} ({self.n_fast}, fast) × "
-                f"{self.slow_type} ({self.n_slow}, slow) = "
-                f"{self.n_fast * self.n_slow}")
+        # A grouping row is named where it differs, since it is what decided which
+        # spectra share a setting and a reader cannot infer it from the coordinates.
+        def side(kind, n, group):
+            axis = getattr(self, f"{kind}_type")
+            via  = f" via {group}" if group is not None and group != axis else ""
+            return f"{axis} ({n}, {kind}{via})"
+        shape = "" if not self.asserted else ", shape asserted"
+        return (f"{side('fast', self.n_fast, self.fast_group)} × "
+                f"{side('slow', self.n_slow, self.slow_group)} = "
+                f"{self.n_fast * self.n_slow}{shape}")
 
 
 class _AttoCubeSweep:
@@ -1568,7 +1687,9 @@ class _AttoCubeSweep:
             sweep_unit  if sweep_unit  is not None else meta.get("sweep_unit"),
         )
 
-    def _bind_nesting(self, fast_sweep, slow_sweep) -> None:
+    def _bind_nesting(self, fast_sweep, slow_sweep, *,
+                      n_fast=None, n_slow=None,
+                      fast_group_by=None, slow_group_by=None) -> None:
         """
         Resolve the declared nest, then check the sweep axis against it.
 
@@ -1576,7 +1697,9 @@ class _AttoCubeSweep:
         ``n_sweeps`` and are verified against it, and a curated axis may read a
         property that the sweep resolution has already checked the rows for.
         """
-        self._nesting = self._resolve_nesting(fast_sweep, slow_sweep)
+        self._nesting = self._resolve_nesting(
+            fast_sweep, slow_sweep, n_fast=n_fast, n_slow=n_slow,
+            fast_group_by=fast_group_by, slow_group_by=slow_group_by)
         self._warn_if_sweep_axis_repeats()
 
     def _warn_if_sweep_axis_repeats(self) -> None:
@@ -1627,13 +1750,35 @@ class _AttoCubeSweep:
             UserWarning, stacklevel=4,
         )
 
-    def _resolve_nesting(self, fast_sweep, slow_sweep) -> SweepNesting:
+    def _resolve_nesting(self, fast_sweep, slow_sweep, *,
+                         n_fast=None, n_slow=None,
+                         fast_group_by=None, slow_group_by=None) -> SweepNesting:
         """Build the declared nest, or return ``None`` when none was declared."""
         meta = self.source_metadata
         fast = fast_sweep if fast_sweep is not None else meta.get("fast_sweep")
         slow = slow_sweep if slow_sweep is not None else meta.get("slow_sweep")
+        n_fast = n_fast if n_fast is not None else meta.get("n_fast")
+        n_slow = n_slow if n_slow is not None else meta.get("n_slow")
+        fast_group_by = (fast_group_by if fast_group_by is not None
+                         else meta.get("fast_group_by"))
+        slow_group_by = (slow_group_by if slow_group_by is not None
+                         else meta.get("slow_group_by"))
 
         if fast is None and slow is None:
+            # An asserted shape says how many points each axis has, and a grouping row
+            # says which points share a setting.  Neither says what was scanned, so
+            # neither can stand in for the declaration.
+            for name, value in (("n_fast/n_slow", n_fast if n_fast is not None
+                                 else n_slow),
+                                ("fast_group_by/slow_group_by",
+                                 fast_group_by if fast_group_by is not None
+                                 else slow_group_by)):
+                if value is not None:
+                    raise ValueError(
+                        f"{name} was given without fast_sweep= and slow_sweep=. It "
+                        f"says how the {self.n_sweeps} sweep points divide up, not "
+                        f"what was scanned along each axis. Name both axes as well."
+                    )
             return None
 
         # One without the other cannot be told from a forgotten second axis, and
@@ -1669,34 +1814,204 @@ class _AttoCubeSweep:
         (fast_key, fast_flat, fast_label, fast_unit) = resolved["fast_sweep"]
         (slow_key, slow_flat, slow_label, slow_unit) = resolved["slow_sweep"]
 
-        shape = _nest_shape(fast_flat, slow_flat, self.n_sweeps)
-        if shape is None:
-            raise ValueError(self._nesting_failure(
-                fast_key, fast_flat, slow_key, slow_flat))
-        n_fast, n_slow = shape
+        # Which row establishes each axis's levels.  Normally the axis itself; a
+        # separate row when the labelled quantity is measured and cannot resolve its
+        # own settings while a commanded one can.
+        fast_group_key, fast_group = self._resolve_grouping(
+            "fast_group_by", fast_group_by, fast_key, fast_flat)
+        slow_group_key, slow_group = self._resolve_grouping(
+            "slow_group_by", slow_group_by, slow_key, slow_flat)
 
-        # Read the coordinates straight out of the verified reshape, in
-        # acquisition order: row 0 holds one full run of the fast axis, and column
-        # 0 holds the slow value each row was taken at.
+        fast_side = ("fast_sweep" if fast_group_key == fast_key else "fast_group_by",
+                     fast_group_key, fast_group, fast_unit if
+                     fast_group_key == fast_key else "", _FAST_LEVELS_AXIS)
+        slow_side = ("slow_sweep" if slow_group_key == slow_key else "slow_group_by",
+                     slow_group_key, slow_group, slow_unit if
+                     slow_group_key == slow_key else "", _SLOW_LEVELS_AXIS)
+
+        asserted = n_fast is not None or n_slow is not None
+        if asserted:
+            # Asserted, so the checks report rather than decide: the whole point of
+            # naming a shape is to load a file whose readings cannot establish one.
+            n_fast, n_slow = self._asserted_shape(n_fast, n_slow)
+            self._warn_if_asserted_levels_overlap(
+                fast_side, slow_side, (n_fast, n_slow))
+        else:
+            candidates = _nest_candidates(fast_group, slow_group, self.n_sweeps)
+            if len(candidates) != 1:
+                raise ValueError(
+                    self._nesting_failure(fast_side, slow_side, candidates))
+            n_fast, n_slow = candidates[0]
+
+        # One coordinate per level, taken from the *labelled* row rather than the row
+        # that grouped the points — the grouping settles which spectra share a
+        # setting, the label settles what that setting is called.
+        fast_axis, fast_spread = _level_coordinates(
+            fast_flat.reshape(n_slow, n_fast), _FAST_LEVELS_AXIS)
+        slow_axis, slow_spread = _level_coordinates(
+            slow_flat.reshape(n_slow, n_fast), _SLOW_LEVELS_AXIS)
+
+        # A grouped axis is expected to be messy — that is why it was grouped by
+        # something else — but a coordinate whose levels overlap cannot be plotted or
+        # looked up meaningfully, and only the caller can decide whether that matters.
+        for param, key, label, unit, values, axis, shape in (
+            ("fast_sweep", fast_key, fast_label, fast_unit, fast_flat,
+             _FAST_LEVELS_AXIS, (n_fast, n_slow)),
+            ("slow_sweep", slow_key, slow_label, slow_unit, slow_flat,
+             _SLOW_LEVELS_AXIS, (n_fast, n_slow)),
+        ):
+            grouped_by = fast_group_key if axis == _FAST_LEVELS_AXIS else slow_group_key
+            if grouped_by == key:
+                continue                    # not grouped separately; already checked
+            if _levels_separate(values.reshape(n_slow, n_fast), axis):
+                continue
+            warnings.warn(
+                f"{param}={key!r} is the coordinate of a nest grouped by "
+                f"{grouped_by!r}, and its levels overlap: "
+                f"{_overlap_report(values, axis, shape, unit)}. The grouping is sound, "
+                f"so the grid is right and every spectrum is on the setting it was "
+                f"measured at. What is not sound is this axis as a coordinate — "
+                f"plotting against it misleads and get_spectrum_at() on it is "
+                f"ambiguous. Use {grouped_by!r} as the axis if you need to address the "
+                f"nest by value.",
+                UserWarning, stacklevel=5,
+            )
+
         return SweepNesting(
-            fast_type = fast_key,
-            fast_label= fast_label,
-            fast_unit = fast_unit,
-            fast_axis = fast_flat.reshape(n_slow, n_fast)[0].copy(),
-            slow_type = slow_key,
-            slow_label= slow_label,
-            slow_unit = slow_unit,
-            slow_axis = slow_flat.reshape(n_slow, n_fast)[:, 0].copy(),
+            fast_type   = fast_key,
+            fast_label  = fast_label,
+            fast_unit   = fast_unit,
+            fast_axis   = fast_axis,
+            slow_type   = slow_key,
+            slow_label  = slow_label,
+            slow_unit   = slow_unit,
+            slow_axis   = slow_axis,
+            asserted    = asserted,
+            fast_spread = fast_spread,
+            slow_spread = slow_spread,
+            fast_group  = fast_group_key,
+            slow_group  = slow_group_key,
         )
 
-    def _nesting_failure(self, fast_key, fast_flat, slow_key, slow_flat) -> str:
-        """Explain why a declared nest did not verify, checking for a swap first."""
-        n        = self.n_sweeps
-        n_fast   = _count_distinct(fast_flat, _axis_atol(fast_flat))
-        n_slow   = _count_distinct(slow_flat, _axis_atol(slow_flat))
-        head     = (f"fast_sweep={fast_key!r} ({n_fast} distinct) inside "
-                    f"slow_sweep={slow_key!r} ({n_slow} distinct) does not "
-                    f"describe the {n} sweep points in '{self.path}'.")
+    def _resolve_grouping(self, param, declared, axis_key, axis_flat) -> tuple:
+        """
+        Resolve a ``*_group_by=`` row, defaulting to the axis it groups.
+
+        Returns ``(key, values)``.  The key equals *axis_key* when nothing separate was
+        declared, which is what every caller tests to tell the two cases apart.
+        """
+        if declared is None:
+            return axis_key, axis_flat
+        key, source, _, _ = self._resolve_sweep(declared, None, None, param=param)
+        if key == "index":
+            raise ValueError(
+                f"{param}='index' cannot group a nest — the sweep index is a "
+                f"different value at every point, so it puts each spectrum on a level "
+                f"of its own. Name the row that was commanded."
+            )
+        return key, self._axis_for_source(source)
+
+    def _asserted_shape(self, n_fast, n_slow) -> tuple:
+        """
+        Validate an asserted nest shape against ``n_sweeps``, filling in the other half.
+
+        Either count alone is enough, since the total is known exactly; giving both is
+        allowed and cross-checked, which is what catches a half-remembered scan.  Each
+        count is a number of grid points, so neither may be below 2 — a nest with one
+        row is not a nest.
+        """
+        n = self.n_sweeps
+        for name, value in (("n_fast", n_fast), ("n_slow", n_slow)):
+            if value is None:
+                continue
+            if int(value) != value or value < 2:
+                raise ValueError(
+                    f"{name}={value!r} is not a usable axis length. It counts grid "
+                    f"points along one axis of the nest, so it must be a whole "
+                    f"number of at least 2."
+                )
+
+        if n_fast is not None and n_slow is not None:
+            if int(n_fast) * int(n_slow) != n:
+                raise ValueError(
+                    f"n_fast={int(n_fast)} × n_slow={int(n_slow)} = "
+                    f"{int(n_fast) * int(n_slow)}, but '{self.path}' holds {n} sweep "
+                    f"points. Every point of the slow axis carries one complete run "
+                    f"of the fast axis, so the two counts multiply to the total. If "
+                    f"the scan was aborted part-way through a row, the completed rows "
+                    f"have to be sliced out first."
+                )
+            return int(n_fast), int(n_slow)
+
+        # One given: the other follows from the total, which also rejects a count that
+        # leaves a partial row rather than silently truncating one.
+        given_name, given = (("n_fast", n_fast) if n_fast is not None
+                             else ("n_slow", n_slow))
+        given = int(given)
+        if n % given:
+            raise ValueError(
+                f"{given_name}={given} does not divide the {n} sweep points in "
+                f"'{self.path}' — it leaves {n % given} over. Every point of the slow "
+                f"axis carries one complete run of the fast axis, so each count "
+                f"divides the total. If the scan was aborted part-way through a row, "
+                f"the completed rows have to be sliced out first."
+            )
+        other = n // given
+        if other < 2:
+            raise ValueError(
+                f"{given_name}={given} leaves {other} point(s) on the other axis of "
+                f"the {n}-point sweep, which is not a nest. Leave fast_sweep= and "
+                f"slow_sweep= off to keep the sweep flat."
+            )
+        return (given, other) if given_name == "n_fast" else (other, given)
+
+    def _warn_if_asserted_levels_overlap(self, fast_side, slow_side, shape) -> None:
+        """
+        Warn for each axis whose levels interleave under an asserted *shape*.
+
+        An asserted shape exists to load a file whose readings cannot establish one, so
+        this cannot refuse.  What it can do is say which axis does not hold apart, and
+        that is worth doing in both directions: on the file this was built for the
+        warning names the axis already known to be bad, while a shape asserted the
+        wrong way round names an axis known to be good — which is the loud signal that
+        the two counts were transposed.
+        """
+        n_fast, n_slow = shape
+        for param, key, values, unit, axis in (fast_side, slow_side):
+            if _levels_separate(values.reshape(n_slow, n_fast), axis):
+                continue
+            warnings.warn(
+                f"{param}={key!r} does not hold apart at the asserted "
+                f"{n_fast} × {n_slow}: "
+                f"{_overlap_report(values, axis, shape, unit)}. The reshape was done "
+                f"as asserted, so the grid is the shape you named, but this axis "
+                f"cannot tell its own settings apart. If it is one you expect to step "
+                f"cleanly, check that n_fast and n_slow are not the wrong way round.",
+                UserWarning, stacklevel=5,
+            )
+
+    def _nesting_failure(self, fast_side, slow_side, candidates) -> str:
+        """
+        Explain why a declared nest did not resolve to one shape.
+
+        Each side is ``(param, key, values, unit, levels_axis)`` for the row that was
+        actually tested, which is the declared axis unless a ``*_group_by=`` replaced
+        it.  *candidates* is what :func:`_nest_candidates` returned — empty when nothing
+        fitted, longer than one when the file reshapes more than one way.
+        """
+        n = self.n_sweeps
+        (fast_param, fast_key, fast_flat, fast_unit, _) = fast_side
+        (slow_param, slow_key, slow_flat, slow_unit, _) = slow_side
+        head = (f"{fast_param}={fast_key!r} inside {slow_param}={slow_key!r} does not "
+                f"describe the {n} sweep points in '{self.path}'.")
+
+        # More than one shape fits, so the file does not say which was measured.
+        if candidates:
+            shapes = ", ".join(f"{f} × {s}" for f, s in candidates)
+            return (f"{head}\n  {len(candidates)} shapes fit it equally well "
+                    f"({shapes} as fast × slow), and nothing in the file says which "
+                    f"was measured. Name it with n_fast= or n_slow=, declare an axis "
+                    f"whose readings distinguish the shapes, or leave the sweep flat.")
 
         # The declaration exists to settle which axis is inner, so the reversed
         # reading is the one mistake worth naming outright.
@@ -1706,18 +2021,42 @@ class _AttoCubeSweep:
                     f"axis is the one that runs to completion at each point of "
                     f"the slow one.")
 
-        if n_fast * n_slow != n:
-            return (f"{head}\n  {n_fast} × {n_slow} = {n_fast * n_slow}, not {n}. "
-                    f"Either one of these is not a nest axis, or the scan was "
-                    f"aborted part-way through a row — a partial final row cannot "
-                    f"be reshaped. Compare against sweep_grid() and "
-                    f"varying_parameters(); slice the completed rows, or leave the "
-                    f"sweep flat.")
+        # Nothing fitted.  What is worth reporting is the shape the file *does* look
+        # to have, and which axis broke it.  Whichever axis separates pins that
+        # shape — a fast axis that separates fixes the period of the inner loop, a
+        # slow axis that separates fixes the outer one — and the axis that does not
+        # is then the one at fault, so its overlapping readings can be quoted.
+        # Anchoring on an arbitrary divisor instead would blame a healthy axis at a
+        # shape the caller never declared.
+        shapes = [(d, n // d) for d in range(2, n // 2 + 1)
+                  if n % d == 0 and n // d >= 2]
 
-        return (f"{head}\n  The counts multiply correctly, but the values do not "
-                f"repeat in a regular nest — the fast axis does not run the same "
-                f"values in every row, or the slow axis does not hold still "
-                f"across a row. Compare against sweep_grid().")
+        # The fast axis is tried as the anchor first: it is the declared inner loop,
+        # and it is the axis a commanded parameter is usually on.
+        for anchor, culprit in ((fast_side, slow_side), (slow_side, fast_side)):
+            a_param, a_key, a_values, _, a_axis = anchor
+            c_param, c_key, c_values, c_unit, c_axis = culprit
+            for n_fast, n_slow in shapes:
+                if not _levels_separate(a_values.reshape(n_slow, n_fast), a_axis):
+                    continue
+                detail = _overlap_report(c_values, c_axis, (n_fast, n_slow), c_unit)
+                return (
+                    f"{head}\n  At {n_fast} × {n_slow}, {a_param}={a_key!r} holds "
+                    f"apart but {c_param}={c_key!r} does not: {detail}. Readings "
+                    f"that overlap cannot be told apart, so those spectra cannot be "
+                    f"assigned to a setting by value. Declare a row that steps "
+                    f"exactly — a commanded setpoint rather than a measured "
+                    f"read-back — and compare against varying_parameters() to find "
+                    f"one. To reshape anyway and accept the axis as it is, assert the "
+                    f"shape with n_fast={n_fast} (or n_slow={n_slow})."
+                )
+
+        return (f"{head}\n  No shape fits: {n} sweep points do not divide into two "
+                f"axes whose readings hold apart. Either one of these is not a nest "
+                f"axis, or the scan was aborted part-way through a row — a partial "
+                f"final row cannot be reshaped. Compare against sweep_grid() and "
+                f"varying_parameters(); slice the completed rows, or leave the "
+                f"sweep flat.")
 
     def _validate_axis_and_signals(self, axis, signals: dict) -> None:
         """
@@ -3059,6 +3398,59 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     sweep_label, sweep_unit : str, optional
         Override the axis label / unit for the resolved sweep.  Needed mainly
         for raw-row sweeps, whose units the file does not state.
+    fast_sweep, slow_sweep : str, optional
+        Declare that the sweep points are a 2-D nest: *fast_sweep* is the inner
+        axis, which runs to completion at every point of *slow_sweep*.  Both take
+        the same vocabulary as *sweep*, a derived quantity included, and both are
+        needed — one alone raises, since which axis is inner is the fact the
+        declaration exists to carry.  Omit both to leave the sweep flat, which is
+        the default: :attr:`spectra` keeps shape ``(n_points, n_sweeps)`` either
+        way, and :meth:`as_grid` is how the grid is reached.
+
+        The shape is worked out from the readings.  Only the divisors of
+        :attr:`n_sweeps` can be shapes, since every point of the slow axis carries
+        one complete run of the fast axis, and the shape that fits is the one under
+        which neither axis's settings overlap each other.  A file whose readings
+        fit no shape, or fit more than one, is refused rather than guessed at.
+    n_fast, n_slow : int, optional
+        Assert the nest's shape instead of resolving it from the readings, for a
+        file that cannot establish one — a laser that plateaued, so two commanded
+        settings read back the same power.  Either count alone is enough, since
+        :attr:`n_sweeps` is known exactly; giving both cross-checks them.  A count
+        that does not divide :attr:`n_sweeps` raises, so a scan aborted part-way
+        through a row is still refused rather than truncated.
+
+        Requires *fast_sweep* and *slow_sweep*: a shape says how the points divide
+        up, not what was scanned along each axis.  The overlap checks still run and
+        **warn** for every axis that cannot tell its own settings apart, which is
+        also what surfaces the two counts being given the wrong way round — that
+        shows up as a warning about the axis you expect to be clean.
+
+        Asserting the shape settles the reshape only.  An overlapping axis's
+        coordinates are still whatever was read at each level, so plotting against
+        them misleads and :meth:`get_spectrum_at` on them stays ambiguous; prefer
+        declaring a row that steps exactly where the file has one.
+    fast_group_by, slow_group_by : str, optional
+        Establish that axis's levels from a **different row** than the one being
+        plotted.  Takes the same vocabulary as *fast_sweep*.
+
+        The case this exists for is a power series: the commanded setpoint steps
+        exactly and so says which spectra share a power, while the meter reading
+        carries the physical µW the axis should be labelled in.  One row cannot do
+        both, so::
+
+            slow_sweep    = "power",                 # coordinate, in µW
+            slow_group_by = "Fianium_Select_A4",     # the exact setpoint
+
+        The grouping row is what the shape is resolved from and what must hold
+        apart.  The labelled row supplies the coordinates and is **not** required to:
+        each level's coordinate is the median of the readings taken at it, with the
+        peak-to-peak range in :attr:`SweepNesting.slow_spread`.  If the labelled
+        row's own levels overlap the load warns, because the grid is then right while
+        the axis is not usable for plotting or for :meth:`get_spectrum_at`.
+
+        Which row drives an instrument is per-session configuration, so it is named
+        here and nowhere else — there is no default and no per-instrument shortcut.
     geometry : DeviceGeometry, optional
         Device geometry used to convert gate voltages to a displacement field.
         Without it :attr:`ef` is ``None``, and ``sweep="electric_field"``
@@ -3440,6 +3832,10 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         sweep_unit     : str   = None,
         fast_sweep     : str   = None,
         slow_sweep     : str   = None,
+        n_fast          : int   = None,
+        n_slow          : int   = None,
+        fast_group_by   : str   = None,
+        slow_group_by   : str   = None,
         geometry        : DeviceGeometry = None,
         cosmic_rays     : dict  = None,
         bg_region_nm    : tuple = None,
@@ -3522,7 +3918,9 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         # What *is* checked is the row the declared sweep needs — which is why
         # this comes after the signal array, since it validates against n_sweeps.
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
-        self._bind_nesting(fast_sweep, slow_sweep)
+        self._bind_nesting(fast_sweep, slow_sweep, n_fast=n_fast, n_slow=n_slow,
+                           fast_group_by=fast_group_by,
+                           slow_group_by=slow_group_by)
 
         # --- Resolve background window to nm (always work in wavelength space) ---
         if bg_region_eV is not None:
@@ -4255,6 +4653,11 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
     sweep, sweep_label, sweep_unit : str, optional
         As :class:`AttoCubeSpectralSweep`.  A gate sweep needs a *geometry* for
         ``"electric_field"``, and *gates* for any of the three.
+    fast_sweep, slow_sweep, n_fast, n_slow, fast_group_by, slow_group_by : optional
+        As :class:`AttoCubeSpectralSweep`: declare a 2-D nest, optionally assert its
+        shape, and optionally group its levels from a different row than the one
+        labelled.  :meth:`as_grid` reshapes :attr:`decays` onto it.  No nested TRPL
+        sweep has been seen, so this is untested against a real file.
     geometry : DeviceGeometry, optional
     bg_region_ns : tuple of (t_min, t_max), optional
         **Pre-pulse** time window whose mean is subtracted from every decay —
@@ -4345,6 +4748,10 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         sweep_unit     : str   = None,
         fast_sweep     : str   = None,
         slow_sweep     : str   = None,
+        n_fast         : int   = None,
+        n_slow         : int   = None,
+        fast_group_by  : str   = None,
+        slow_group_by  : str   = None,
         geometry       : DeviceGeometry = None,
         bg_region_ns   : tuple = None,
         gates          : dict  = None,
@@ -4368,7 +4775,9 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         self._validate_axis_and_signals(self.time, {"Exp": self.decays})
 
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
-        self._bind_nesting(fast_sweep, slow_sweep)
+        self._bind_nesting(fast_sweep, slow_sweep, n_fast=n_fast, n_slow=n_slow,
+                           fast_group_by=fast_group_by,
+                           slow_group_by=slow_group_by)
 
         # Pre-pulse baseline.  processing.subtract_background is generic in x, so
         # a time window needs no separate implementation from a spectral one.

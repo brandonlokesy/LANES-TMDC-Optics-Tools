@@ -102,7 +102,7 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0001](0001-cosmic-ray-repair-at-load-time.md) | Cosmic-ray repair runs at load time, declared by one dict | 2026-08-05 | Accepted · amended (A17) |
 | [0002](0002-gate-wiring-must-be-declared.md) | Gate wiring is declared with `gates=`, and the loader refuses without it | 2026-08-05 | Accepted · extended by 0003 |
 | [0003](0003-gates-declares-device-topology.md) | `gates` declares device topology, and carries the carrier-density path | 2026-08-05 | Accepted |
-| [0004](0004-nested-sweeps-fast-and-slow.md) | Nested sweeps use `fast_sweep=`/`slow_sweep=`; flat stays canonical | 2026-08-06 | Accepted · amended (A13) |
+| [0004](0004-nested-sweeps-fast-and-slow.md) | Nested sweeps use `fast_sweep=`/`slow_sweep=`; flat stays canonical | 2026-08-06 | Accepted · amended (A13) · §3 superseded by 0016 |
 | [0005](0005-electrode-currents-are-role-named.md) | Electrode currents are role-named and resolved from `gates=` | 2026-08-07 | Accepted |
 | [0006](0006-loader-rewrite-and-sweep-vocabulary.md) | The spectral loader declares what it is, and never auto-detects the sweep axis | 2026-07-30 | Accepted |
 | [0007](0007-hdf5-stores-no-derived-arrays.md) | One loader class reads both formats, and HDF5 stores no derived arrays | 2026-07-30 | Accepted |
@@ -114,5 +114,7 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0013](0013-power-series-thinning-and-stacking.md) | `plot_power_series` thins by slice step and stacks by an absolute offset | 2026-08-05 | Accepted |
 | [0014](0014-animate-by-frame-index.md) | An animation is driven by a sequence of frame indices | 2026-08-12 | Accepted |
 | [0015](0015-reversed-frame-window-endpoints-are-refused.md) | A reversed coordinate window is refused, not reversed for you | 2026-08-13 | Accepted |
+| [0016](0016-nest-levels-must-hold-apart.md) | A nest is verified by levels holding apart, not by a tolerance | 2026-08-17 | Accepted |
+| [0017](0017-asserted-shape-and-grouping-row.md) | A nest's shape and its grouping row are declared with named keywords | 2026-08-17 | Accepted |
 
 This table is the one mutable part of the folder.

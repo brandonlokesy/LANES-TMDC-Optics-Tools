@@ -1405,6 +1405,13 @@ class ImageSequencePanel(AnimationPanel):
     frame_source : {``"best"``, ``"raw"``, ``"bg"``}
         Which version of each frame to draw.  ``"best"`` is background-corrected
         when the scan was loaded with a *bg_region* and raw otherwise.
+
+    Attributes
+    ----------
+    laser_circle : matplotlib.patches.Circle
+        The 1/e² boundary drawn on the first frame; ``None`` until
+        :meth:`init_artists` has run, and when no circle was drawn.  Restyle it
+        through this rather than through more constructor arguments.
     """
 
     def __init__(
@@ -1435,6 +1442,7 @@ class ImageSequencePanel(AnimationPanel):
         self.xlabel           = xlabel
         self.ylabel           = ylabel
         self._im              = None
+        self.laser_circle     = None
 
     @property
     def n_frames(self) -> int:
@@ -1450,23 +1458,14 @@ class ImageSequencePanel(AnimationPanel):
         self._im = ax.images[0]
 
         if self.laser_annotation and getattr(self.scan, "laser_ref", None) is not None:
-            lr = self.scan.laser_ref
-            circle = patches.Circle(
-                (lr.center_x, lr.center_y), radius=lr.radius,
-                edgecolor=self.laser_color, facecolor="none",
-                linewidth=self.laser_linewidth, linestyle=self.laser_linestyle,
-                zorder=3,
+            self.laser_circle = _draw_laser_circle(
+                ax, self.scan.laser_ref,
+                color      = self.laser_color,
+                lw         = self.laser_linewidth,
+                ls         = self.laser_linestyle,
+                halo       = self.laser_halo,
+                halo_color = self.laser_halo_color,
             )
-            if self.laser_halo:
-                # Draw a thicker contrasting stroke behind the coloured line so
-                # it stays legible over bright hot spots after GIF quantization.
-                circle.set_path_effects([
-                    path_effects.withStroke(
-                        linewidth=self.laser_linewidth + 2.0,
-                        foreground=self.laser_halo_color,
-                    ),
-                ])
-            ax.add_patch(circle)
 
     def update(self, frame: int) -> tuple:
         self._im.set_data(_resolve_frame(self.scan, frame, self.frame_source))
@@ -2231,8 +2230,8 @@ def _draw_laser_circle(
     """
     Draw the 1/e² laser-spot boundary on *ax* and return the Circle artist.
 
-    Mirrors the implementation used in :class:`ImageSequencePanel` so both
-    static single-frame plots and animations get identical laser annotations.
+    The one implementation, so a static single-frame plot and an animation of the
+    same scan carry identical laser annotations.
 
     Parameters
     ----------

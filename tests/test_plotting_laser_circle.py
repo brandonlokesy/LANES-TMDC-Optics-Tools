@@ -275,3 +275,84 @@ def test_plot_image_draws_into_a_supplied_grid_axes():
     # Each circle landed on its own panel, not all on the first.
     for ax, circle in zip(axes.ravel(), circles):
         assert _circles(ax) == [circle]
+
+
+# ---------------------------------------------------------------------------
+# ImageSequencePanel — the animation-panel call site
+# ---------------------------------------------------------------------------
+#
+# This panel used to hand-build its own Circle, so it was the copy an author of a
+# new AnimationPanel would have copied from. It now calls the shared helper, and
+# these are the first tests to reach the branch at all: the two tests that
+# construct an ImageSequencePanel elsewhere (test_plotting_frame_source.py) use a
+# scan with no laser_ref, so the annotation never ran.
+
+
+def _panel_on_axes(scan, **kwargs):
+    """Build a panel and run init_artists on a real axes, then draw."""
+    panel = plotting.ImageSequencePanel(scan, **kwargs)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+    fig.canvas.draw()
+    return fig, ax, panel
+
+
+def test_panel_draws_one_circle_and_keeps_it():
+    """
+    The artist is reachable, which is what makes refusing further style
+    parameters honest rather than merely restrictive.
+    """
+    fig, ax, panel = _panel_on_axes(_FakeScan(laser_ref=_FakeLaserRef()))
+
+    (circle,) = _circles(ax)
+    assert panel.laser_circle is circle
+    assert circle.get_center() == (_FakeLaserRef.center_x, _FakeLaserRef.center_y)
+    assert circle.get_radius() == _FakeLaserRef.radius
+
+
+def test_panel_circle_is_none_before_init():
+    panel = plotting.ImageSequencePanel(_FakeScan(laser_ref=_FakeLaserRef()))
+
+    assert panel.laser_circle is None
+
+
+def test_panel_draws_no_circle_when_annotation_disabled():
+    fig, ax, panel = _panel_on_axes(_FakeScan(laser_ref=_FakeLaserRef()),
+                                    laser_annotation=False)
+
+    assert _circles(ax) == []
+    assert panel.laser_circle is None
+
+
+def test_panel_draws_no_circle_when_scan_has_no_laser_ref():
+    fig, ax, panel = _panel_on_axes(_FakeScan(laser_ref=None),
+                                    laser_annotation=True)
+
+    assert _circles(ax) == []
+    assert panel.laser_circle is None
+
+
+def test_panel_halo_is_a_path_effect_instance():
+    """The A3 defect, at this call site: the halo must be an instance, not a module."""
+    fig, ax, panel = _panel_on_axes(_FakeScan(laser_ref=_FakeLaserRef()))
+
+    effects = panel.laser_circle.get_path_effects()
+    assert effects
+    assert all(isinstance(e, AbstractPathEffect) for e in effects)
+
+
+def test_panel_without_halo_sets_no_effects():
+    fig, ax, panel = _panel_on_axes(_FakeScan(laser_ref=_FakeLaserRef()),
+                                    laser_halo=False)
+
+    assert panel.laser_circle.get_path_effects() == []
+
+
+def test_panel_keeps_its_solid_default_line():
+    """
+    Solid survives GIF palette quantization where a thin dashed line does not, so
+    this panel's default must not drift to the dashes the static plots use.
+    """
+    fig, ax, panel = _panel_on_axes(_FakeScan(laser_ref=_FakeLaserRef()))
+
+    assert panel.laser_circle.get_linestyle() in ("-", "solid")

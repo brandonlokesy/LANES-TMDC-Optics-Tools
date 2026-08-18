@@ -118,5 +118,6 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0017](0017-asserted-shape-and-grouping-row.md) | A nest's shape and its grouping row are declared with named keywords | 2026-08-17 | Accepted |
 | [0018](0018-a-held-axis-is-recognised-by-two-signs.md) | An axis that never moved is recognised by two signs, either sufficient | 2026-08-18 | Accepted · §1 amended by 0019 |
 | [0019](0019-a-driven-axis-is-also-recognised-by-direction.md) | A driven axis is also recognised by which way it steps | 2026-08-18 | Accepted |
+| [0020](0020-plot-image-annotates-and-returns-the-circle.md) | `plot_image` carries the laser annotation, and returns the circle it drew | 2026-08-18 | Accepted |
 
 This table is the one mutable part of the folder.

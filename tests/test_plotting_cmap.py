@@ -252,6 +252,6 @@ def test_sequence_of_non_colours_raises_type_error():
 ])
 def test_plot_image_accepts_every_form(cmap):
     img          = np.random.default_rng(0).random((8, 10))
-    fig, ax, im  = plotting.plot_image(img, cmap=cmap)
+    fig, ax, im, _ = plotting.plot_image(img, cmap=cmap)
     assert isinstance(im.get_cmap(), Colormap)
     plt.close(fig)

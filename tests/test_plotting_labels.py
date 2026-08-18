@@ -179,15 +179,15 @@ def test_spectral_series_override_is_verbatim(csv_path, spectrum_offset):
 @pytest.mark.parametrize("rescale_img", [False, True])
 def test_plot_image_honours_label_when_rescaled(rescale_img):
     """plot_image used to discard the argument whenever rescale_img was set."""
-    _, _, im = plotting.plot_image(
+    _, _, im, _ = plotting.plot_image(
         np.arange(16.0).reshape(4, 4), colorbar_label=CUSTOM,
         rescale_img=rescale_img)
     assert im.colorbar.ax.get_ylabel() == CUSTOM
 
 
 def test_plot_image_default_still_marks_rescaling():
-    _, _, im = plotting.plot_image(np.arange(16.0).reshape(4, 4),
-                                   rescale_img=True)
+    _, _, im, _ = plotting.plot_image(np.arange(16.0).reshape(4, 4),
+                                      rescale_img=True)
     assert im.colorbar.ax.get_ylabel() == "Intensity (norm.)"
 
 

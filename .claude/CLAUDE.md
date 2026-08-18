@@ -199,6 +199,8 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
 - Don't reinstate `DeviceGeometry.optical_thickness`, or make `_slabs()` return
   `StackLayer` objects.
 - Don't hand-build a `patches.Circle` for a laser spot; use `_draw_laser_circle`.
+- Don't add `ax=` to `show_image` — it is a viewer that owns its figure. Multi-panel
+  image plotting goes through `plot_image`, which annotates and returns its circle.
 - Don't give `spectra_type=` a default, or make it positional.
 - Don't auto-detect the sweep axis; an undeclared `sweep=` means the sweep **index**.
 - Don't fork `SPECTROSCOPY_TYPES` out of `constants.py`.

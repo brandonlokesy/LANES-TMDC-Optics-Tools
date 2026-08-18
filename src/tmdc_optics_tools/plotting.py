@@ -976,6 +976,8 @@ def plot_image(
     xlabel         : str   = "x (px)",
     ylabel         : str   = "y (px)",
     show_axes      : bool  = True,
+    laser_annotation : bool = False,
+    laser_ref             = None,
 ) -> tuple:
     """
     Plot a single 2-D image with a colormap and an optional colorbar.
@@ -1005,10 +1007,24 @@ def plot_image(
         Axis labels (ignored when *show_axes* is ``False``).
     show_axes : bool
         Show axis ticks/labels. Set ``False`` to hide them entirely.
+    laser_annotation : bool
+        Overlay the 1/e² laser-spot boundary.  This is the only switch: with
+        ``False`` no circle is drawn even when *laser_ref* is supplied.
+    laser_ref : object, optional
+        Which laser reference to draw, as anything exposing ``center_x``,
+        ``center_y`` and ``radius``.  ``None`` (default) falls back to
+        *image*'s own ``laser_ref`` attribute.  Selects the reference but does
+        not enable the overlay — *laser_annotation* must also be ``True``.  A
+        plain 2-D array has no such attribute, so ``laser_annotation=True``
+        alone draws nothing for a bare array.
 
     Returns
     -------
-    fig, ax, im
+    fig, ax, im, circle
+        *circle* is the laser-boundary
+        :class:`~matplotlib.patches.Circle`, or ``None`` when no overlay was
+        drawn.  Returned so it can be restyled without a parameter per
+        property.
     """
     img = image.img if hasattr(image, "img") else np.asarray(image)
 
@@ -1029,13 +1045,19 @@ def plot_image(
     else:
         ax.axis("off")
 
+    # Explicit arg wins, then the image's own reference.  A bare ndarray has
+    # neither, so getattr keeps that documented input working.
+    _lr = laser_ref if laser_ref is not None else getattr(image, "laser_ref", None)
+    circle = (_draw_laser_circle(ax, _lr, ls="--")
+              if laser_annotation and _lr is not None else None)
+
     if colorbar:
         cb = fig.colorbar(im, ax=ax, pad=0.02)
         cb.set_label(colorbar_label if colorbar_label is not None
                      else ("Intensity (norm.)" if rescale_img
                            else "Intensity (counts)"))
 
-    return fig, ax, im
+    return fig, ax, im, circle
 
 
 def _format_frame_title(

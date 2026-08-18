@@ -173,3 +173,105 @@ def test_no_circle_when_scan_has_no_laser_ref():
     fig.canvas.draw()
 
     assert _circles(fig.axes[0]) == []
+
+
+# ---------------------------------------------------------------------------
+# plot_image — the axes-accepting call site
+# ---------------------------------------------------------------------------
+
+
+class _FakeImage:
+    """
+    Duck-typed single-image loader. ``plot_image`` reads only ``img`` and
+    ``laser_ref``, so no CSV is needed.
+    """
+
+    def __init__(self, laser_ref=None):
+        yy, xx = np.mgrid[0:SHAPE[0], 0:SHAPE[1]]
+        self.img       = (xx + yy).astype(float)
+        self.laser_ref = laser_ref
+
+
+def test_plot_image_annotates_from_the_image_reference():
+    fig, ax, im, circle = plotting.plot_image(
+        _FakeImage(laser_ref=_FakeLaserRef()), laser_annotation=True,
+    )
+    fig.canvas.draw()
+
+    assert _circles(ax) == [circle]
+    assert circle.get_center() == (_FakeLaserRef.center_x, _FakeLaserRef.center_y)
+    assert circle.get_radius() == _FakeLaserRef.radius
+    # Dashes match the animation call site, so static and animated agree.
+    assert circle.get_linestyle() in ("--", "dashed")
+
+
+def test_plot_image_explicit_ref_overrides_the_image_reference():
+    class _Other:
+        center_x, center_y, radius = 3.0, 4.0, 1.5
+
+    fig, ax, im, circle = plotting.plot_image(
+        _FakeImage(laser_ref=_FakeLaserRef()),
+        laser_annotation = True,
+        laser_ref        = _Other(),
+    )
+    fig.canvas.draw()
+
+    assert circle.get_center() == (_Other.center_x, _Other.center_y)
+    assert circle.get_radius() == _Other.radius
+
+
+def test_plot_image_no_circle_when_annotation_disabled():
+    fig, ax, im, circle = plotting.plot_image(_FakeImage(laser_ref=_FakeLaserRef()))
+    fig.canvas.draw()
+
+    assert circle is None
+    assert _circles(ax) == []
+
+
+def test_plot_image_laser_ref_alone_draws_nothing():
+    """
+    ``laser_annotation`` is the only switch — ``laser_ref`` selects which
+    reference, it does not enable the overlay. Pinned so the documented gating
+    rule is not quietly "fixed" into an implicit enable.
+    """
+    fig, ax, im, circle = plotting.plot_image(
+        _FakeImage(), laser_ref=_FakeLaserRef(),
+    )
+    fig.canvas.draw()
+
+    assert circle is None
+    assert _circles(ax) == []
+
+
+def test_plot_image_bare_array_with_annotation_does_not_raise():
+    """A plain ndarray has no ``laser_ref``; the getattr fallback must hold."""
+    fig, ax, im, circle = plotting.plot_image(
+        np.zeros(SHAPE), laser_annotation=True,
+    )
+    fig.canvas.draw()
+
+    assert circle is None
+    assert _circles(ax) == []
+
+
+def test_plot_image_draws_into_a_supplied_grid_axes():
+    """
+    The case the parameter exists for: six panels in one figure, each carrying
+    its own circle, with no stray figure created along the way.
+    """
+    fig, axes = plt.subplots(2, 3)
+    n_figs_before = len(plt.get_fignums())
+
+    circles = [
+        plotting.plot_image(
+            _FakeImage(laser_ref=_FakeLaserRef()), ax=ax,
+            colorbar=False, show_axes=False, laser_annotation=True,
+        )[3]
+        for ax in axes.ravel()
+    ]
+    fig.canvas.draw()
+
+    assert len(plt.get_fignums()) == n_figs_before      # no extra figure
+    # Each circle landed on its own panel, not all on the first.
+    for ax, circle in zip(axes.ravel(), circles):
+        assert _circles(ax) == [circle]

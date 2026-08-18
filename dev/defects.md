@@ -1648,10 +1648,10 @@ scale override.
 ---
 
 **E16. `plot_power_series` draws a twin axis and does not return it.** With
-`twin_axis=True` the function creates `ax_twin = ax.twiny()`, labels it, and
-returns `fig, ax, cb, lines`. The axes object is unreachable, so
-restyling its ticks or label — the thing the return contract exists to make possible — is
-impossible without walking `fig.axes`.
+`twin_axis=True` the function creates `ax_twin = ax.twiny()`, labels it, and returns
+`fig, ax, cb, lines`. The axes object is unreachable, so restyling its ticks or label —
+the thing the return contract exists to make possible — is impossible without walking
+`fig.axes`.
 
 This is the same failure as **E11**, at a smaller scale: CLAUDE.md's rule is that a
 function drawing several artists returns all of them, and the return *is* the styling API.
@@ -1662,11 +1662,16 @@ is already handled. It is a breaking change to a 4-tuple, so it should land with
 else that touches this function; the natural partner is migrating it onto a shared
 energy↔wavelength helper (see **E17**) rather than on its own.
 
+*`plot_spectrum` — fixed, 2026-08-18.* It had acquired the same unreturned `ax_twin`; it
+now returns `fig, ax, line, ax_twin`, `None` when `twin_axis=False`. That return was a
+3-tuple and the parameter was unreleased, so the widening cost nothing. The entry above
+stays scoped to `plot_power_series`, whose 4-tuple is the one with callers.
+
 **E17. Two implementations of an energy↔wavelength second axis, and the newer mechanism is
 the better one.** `plot_power_series(twin_axis=)` builds it with `ax.twiny()` and manually
-relabelled ticks: tick *positions* stay in the primary unit and
-only their text is rewritten, so the nm labels fall wherever the eV ticks happened to land
-(2.048, 1.937 …) and the axis freezes if anyone later changes `set_xlim`.
+relabelled ticks: tick *positions* stay in the primary unit and only their text is
+rewritten, so the nm labels fall wherever the eV ticks happened to land (2.048, 1.937 …)
+and the axis freezes if anyone later changes `set_xlim`.
 
 `ax.secondary_xaxis("top", functions=(f, f))` does the same job properly — matplotlib
 chooses ticks in the *target* unit, so the labels come out round, and the axis tracks later
@@ -1676,6 +1681,16 @@ limit changes. `HC_EV_NM / x` is self-inverse, so the function pair is one funct
 both directions, and `SpectrumLinePanel(twin_axis=True)` uses it. Measured on an energy
 axis, it places ticks at 500, 550 … 800 nm; the `twiny` version relabels the eV ticks, so
 the same axis would read 495.9, 550.4, …
+
+*A third site nearly appeared — 2026-08-18.* `plot_spectrum` gained a `twin_axis`
+carrying a byte-for-byte copy of the `plot_power_series` block, comments included, while an
+unrelated change was being written. That copy was removed from the change before it merged,
+so it is not in the history, and `plot_spectrum`'s `twin_axis` is on `_conjugate_x_axis`
+from its first commit.  Measured the same way: 500, 550 … 800 nm on a 500-800 nm sweep, and a later
+`ax.set_xlim(1.60, 1.80)` re-ticks the top axis to 690 … 770 nm instead of freezing.
+Pinned by `tests/test_x_axis_vocabulary.py`. The lesson is that a duplicated block invites
+a third copy faster than it invites a fix — see
+[0021](decisions/0021-the-conjugate-axis-has-one-implementation.md).
 
 **Still open:** `plot_power_series` remains on its own `twiny` implementation. Migrating it
 changes that function's tick appearance and should land with **E16**'s return change as a

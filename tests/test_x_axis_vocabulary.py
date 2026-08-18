@@ -10,9 +10,12 @@ the wrong array in silence.
 
 The five parametrised entry points are the whole public surface of that
 vocabulary: two accessors, the spectral-window helper, the peak fitter and a
-plotting function. The last test pins what the refusal deliberately does *not*
+plotting function. One test pins what the refusal deliberately does *not*
 cover — asking for a wavelength-space source on the energy axis still only
 warns, because an explicitly named source is served on its own axis.
+
+The final section covers the one place both rows are shown at once: a plot's
+conjugate top axis, which reads the *other* row of the same table.
 """
 
 import warnings
@@ -24,7 +27,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-from tmdc_optics_tools import fitting, plotting
+from tmdc_optics_tools import fitting, plotting, processing
 from tmdc_optics_tools.constants import X_AXES, _x_axis_name_unit
 from tmdc_optics_tools.loaders import AttoCubeSpectralSweep
 
@@ -134,3 +137,111 @@ def test_a_named_source_is_served_on_the_axis_asked_for(scan):
                                              x_axis="energy")
     assert np.array_equal(on_wavelength, scan.spectra[:, 0])
     assert np.array_equal(on_energy, scan.energy_spectra[:, 0])
+
+
+# ---------------------------------------------------------------------------
+# The conjugate top axis reads the other row of the same table
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def wide_scan(tmp_path):
+    """
+    A sweep spanning 500-800 nm, which is what a real PL spectrum covers.
+
+    The shared fixture spans 9 nm, too narrow for matplotlib to place a whole
+    number of nanometres between ticks — and round ticks are the property that
+    tells the two possible mechanisms apart.
+    """
+    path = tmp_path / "wide.csv"
+    make_spectral_csv(path, wavelength=np.linspace(500.0, 800.0, 31))
+    return AttoCubeSpectralSweep(str(path), spectra_type="PL")
+
+
+def _drawn_with_twin(scan, x_axis):
+    """Draw once, since ticks and limits are only decided at draw time."""
+    fig, ax, _, ax_twin = plotting.plot_spectrum(scan, index=0, x_axis=x_axis,
+                                                 twin_axis=True)
+    fig.canvas.draw()
+    return fig, ax, ax_twin
+
+
+def test_no_conjugate_axis_by_default(scan):
+    fig, ax, _, ax_twin = plotting.plot_spectrum(scan, index=0)
+
+    assert ax_twin is None
+    assert ax.child_axes == []
+
+
+@pytest.mark.parametrize("x_axis, conjugate", [
+    ("energy",     "wavelength"),
+    ("wavelength", "energy"),
+])
+def test_the_conjugate_axis_is_labelled_from_the_other_row(scan, x_axis,
+                                                           conjugate):
+    """
+    Both directions, because a wavelength plot wants eV on top just as much.
+
+    Composed from the table rather than compared against a literal: the label is
+    the same string the primary axis would carry if the two were swapped.
+    """
+    _, _, ax_twin = _drawn_with_twin(scan, x_axis)
+    name, unit = _x_axis_name_unit(conjugate)
+
+    assert ax_twin is not None
+    assert ax_twin.get_xlabel() == f"{name} ({unit})"
+
+
+def test_the_conversion_is_the_packages_own_constant(scan):
+    """
+    Guards against a hardcoded 1239.84 drifting from constants.HC_EV_NM, which is
+    what every other energy/wavelength conversion in the package goes through.
+
+    Read off the limits rather than the transform callables, which are a
+    matplotlib private. Sorted because the reciprocal reverses the ordering: the
+    low-energy edge is the long-wavelength one.
+    """
+    _, ax, ax_twin = _drawn_with_twin(scan, "energy")
+
+    expected = processing.energy_to_wavelength(np.asarray(ax.get_xlim()))
+    assert sorted(ax_twin.get_xlim()) == pytest.approx(sorted(expected))
+
+
+def test_the_conjugate_axis_follows_a_later_change_of_limits(scan):
+    """
+    A caller zooms after plotting, so the top axis has to be a live transform of
+    the bottom one rather than a set of tick labels fixed when it was built.
+    """
+    fig, ax, ax_twin = _drawn_with_twin(scan, "energy")
+    zoom = (1.535, 1.545)
+    ax.set_xlim(*zoom)
+    fig.canvas.draw()
+
+    expected = processing.energy_to_wavelength(np.asarray(zoom))
+    assert sorted(ax_twin.get_xlim()) == pytest.approx(sorted(expected))
+
+
+def test_the_conjugate_axis_ticks_are_round_in_its_own_unit(wide_scan):
+    """
+    Matplotlib picks the ticks in the unit being displayed, so the nm labels land
+    on round wavelengths.  Relabelling the eV ticks instead would put them at
+    495.9, 550.4, … — the same axis, unreadable.
+    """
+    _, _, ax_twin = _drawn_with_twin(wide_scan, "energy")
+
+    lo, hi = sorted(ax_twin.get_xlim())
+    shown = [t for t in ax_twin.get_xticks() if lo <= t <= hi]
+    assert shown, "the conjugate axis placed no ticks in range"
+    assert all(float(t).is_integer() for t in shown)
+
+
+def test_the_conjugate_axis_emits_no_divide_warning(scan):
+    """
+    Matplotlib evaluates the transform across the axis, including 0, where the
+    reciprocal is undefined.  Without the errstate guard every draw warns.
+    """
+    fig, ax, _, _ = plotting.plot_spectrum(scan, index=0, twin_axis=True)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        fig.canvas.draw()

@@ -43,8 +43,8 @@ below tracks what is left.
 *(A1–A3 fixed; A4 deferred; A5 open; **A6 fixed 2026-07-30**; **A8 fixed 2026-08-06**
 with E14; **A10 and A7 fixed 2026-08-07**; **A9 and B1 both fixed 2026-08-10**, which
 closes the `AttoCubePLScanRealSpace` pass; **A19–A21 fixed 2026-08-17/18** on
-`fix/nest-level-separation`. **A5**, **A18** and **A22** are the live bugs left in this
-section.)*
+`fix/nest-level-separation`; **A23 fixed 2026-08-18**. **A5**, **A18** and **A22** are the
+live bugs left in this section.)*
 
 **A1. `processing.remove_cosmic_rays` cannot be called at all.** **[FIXED — 2026-07-28, e77fabf]**
 `remove_cosmic_rays`'s replacement loop referenced `cosmic_mask`, which was never defined — the
@@ -1047,6 +1047,69 @@ contradict each other again. The honest fix is a declared instrument resolution 
 CLAUDE.md says not to add until a committed file does. This entry is the evidence for
 when one appears. Until then the exposure is documented in `_axis_driven`'s docstring: a
 held row is recognised only while its scatter is directionless.
+
+**A23. A cosmic ray wider than half the median window survived its own repair.**
+**[FIXED — 2026-08-18]** **[verified against real data]** Found 2026-08-18 from
+`examples/example_1L_WSe2.ipynb`, where a spike at 748 nm stayed visible on the spectral
+map with `cosmic_rays=` declared. The loader, the ladder and the plotting call were all
+correct; `remove_cosmic_rays` was not.
+
+Both the per-iteration fill in `_detect_cosmic_rays_1d` and the final replacement took
+their local median with `median_filter` over the whole spectrum, so a flagged pixel sat
+inside its own median window. Once a flagged run reached half the window the median was
+drawn from the spike itself, and the value written was self-consistent: every later pass
+returned it again. The boundary was a run of `(median_window - 1) / 2` pixels — 3 at the
+default window of 7, which is exactly the "1–3 pixels wide" the docstring gave as the
+definition of a cosmic ray, so nothing wider had ever worked. `test_processing_cosmic_rays`
+planted spikes 1 and 3 pixels wide and nothing else, which is why it went unseen.
+
+Measured on `PL_power_sweep_26_08_05_15_59_21_iter_0.csv`, sweep index 2 — a spike four
+pixels wide on a 590-count baseline:
+
+```
+ px    raw   repaired   flagged        px    raw   repaired   flagged
+643    606      606        0          643    606      590        1      <- after the fix
+644    920      920        1          644    920      590        1
+645   1980      920        1          645   1980      590        1
+646   3412      920        1          646   3412      589        1
+647   2503      920        1          647   2503      588        1
+648    614      614        0          648    614      588        1
+```
+
+All four were detected and three were replaced with 920 — a value taken from the fourth.
+The surviving 330-count plateau was still 149 714 in the plotted array after the Jacobian
+and the `bg_region_eV` subtraction, against a whole-map maximum of 551 135.
+
+*Fixed* by decision `0023`: a flagged pixel takes the median of the pixels in its window
+that are **not** flagged. `_fill_flagged` is the single implementation and both final
+replacement paths now call it, so the detection fill and the two replacements are one
+piece of code instead of three. A window with nothing unflagged in it has no median; those
+pixels keep their raw values and a `UserWarning` names them and points at `median_window`.
+
+*Residue, stated in the function's `Notes`.* A **flat-topped** spike is bounded more
+tightly than `median_window` implies, and silently: its interior is reached only by
+replacing the edges and recomputing, one pixel in per pass, and the medians stop coming
+from the baseline once the still-unflagged interior outnumbers the baseline in the window.
+Measured on a flat top, repair is complete to `median_window // 2 + 3` pixels (6 at the
+default, against 3 before) and beyond that the interior keeps its full height with no
+warning, because every pixel that *was* flagged had a clean neighbour. Catching it needs a
+local noise estimate — the same missing piece as the over-flagging finding below — and a
+diagnostic built without one was measured firing 459 times on `PL_20uW_Vbot_sweep_*.csv`.
+
+*Also found, not fixed.* `sigma_lap` is one number per spectrum, taken over the whole
+dispersion axis, which is mostly baseline. At high excitation the shot noise on the X0 line
+stands well above it, so peak pixels are flagged: 3704 flags on `PL_20uW_Vbot_sweep_*.csv`,
+and on the power sweep 48 in the brightest sweep against 0 in the dimmest, clustered at
+717–726 nm — on X0. The value changes are small (1683 → 1679 counts), so nothing visible is
+destroyed, but the top of the power range is being lightly median-smoothed. A local noise
+estimate is the fix.
+
+*Test:* `tests/test_processing_cosmic_rays.py`, 8 new cases (18 → 26 in that file) — a
+parametrised width sweep 1–6 at the default window, each planted pixel flagged and returned
+to the baseline; a nine-pixel curved spike at `median_window=7` warning and keeping its
+three centre pixels raw; and the same spike fully repaired at `median_window=15`, with the
+warning asserted absent. 729 tests pass.
+
 
 ## B. Dead parameters — accepted, documented, silently ignored
 

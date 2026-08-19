@@ -543,17 +543,42 @@ def _apply_bg_region(img: np.ndarray, region, stat: str = "median") -> np.ndarra
 
 def _fill_flagged(working: np.ndarray, cr_mask: np.ndarray, median_window: int) -> np.ndarray:
     """
-    One replacement pass: overwrite flagged pixels with the local median.
+    One replacement pass: overwrite flagged pixels with the local median of the
+    pixels around them that are **not** flagged.
 
-    Operates **in place** on ``working`` (which must already be a copy) and
-    returns it.  The median is taken from ``working`` rather than the raw
-    spectrum so that a multi-pixel spike is not still sitting inside its own
-    median window on later passes.
+    Operates in place on ``working`` (which must already be a copy).  Excluding
+    the flagged neighbours is what makes a wide spike repairable: a median over
+    the whole window draws the replacement from the spike itself as soon as half
+    the window is flagged, and the resulting plateau then reproduces itself on
+    every later pass.
+
+    Returns
+    -------
+    np.ndarray[int]
+        Indices of flagged pixels whose entire window was flagged, so no median
+        existed and the raw value was kept.  Empty in the ordinary case.
     """
-    if cr_mask.any():
-        local_med          = median_filter(working, size=median_window)
-        working[cr_mask]   = local_med[cr_mask]
-    return working
+    idx = np.flatnonzero(cr_mask)
+    if idx.size == 0:
+        return idx
+
+    half = median_window // 2
+    # (n_flagged, median_window) window indices, one row per pixel needing a
+    # value, clamped at the spectrum ends.  Clamped rather than reflected: the two
+    # differ only within `half` pixels of either end, where the 3-point Laplacian
+    # flags nothing anyway.
+    win  = np.clip(idx[:, None] + np.arange(-half, half + 1), 0, working.size - 1)
+    # Flagged neighbours become NaN, so the median can never be drawn from the
+    # spike -- including from the fills of an earlier pass, which sit at flagged
+    # positions and are therefore excluded too.
+    vals = np.where(cr_mask[win], np.nan, working[win])
+
+    # A window with nothing unflagged in it has no median, and asking numpy for one
+    # would warn about the all-NaN row rather than about the pixel.  Those rows are
+    # skipped here and reported by the caller.
+    fillable = np.any(~cr_mask[win], axis=1)
+    working[idx[fillable]] = np.nanmedian(vals[fillable], axis=1)
+    return idx[~fillable]
 
 
 def _detect_cosmic_rays_1d(
@@ -561,7 +586,7 @@ def _detect_cosmic_rays_1d(
         sigma_threshold : float,
         median_window   : int,
         max_iter        : int,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> np.ndarray:
     """
     Iterative Laplacian sigma-clip on a single spectrum.
 
@@ -569,10 +594,6 @@ def _detect_cosmic_rays_1d(
     -------
     cr_mask : ndarray[bool]
         True at pixels flagged as cosmic rays.
-    working : ndarray
-        Partially-cleaned spectrum carried across iterations.  Flags raised on
-        the final iteration are not yet filled in it; it exists so the caller
-        can take replacement medians from uncontaminated data.
     """
     n       = spectrum.size
     cr_mask = np.zeros(n, dtype=bool)
@@ -614,7 +635,7 @@ def _detect_cosmic_rays_1d(
         if not newly_found.any():
             break
 
-    return cr_mask, working
+    return cr_mask
 
 
 def _cross_sweep_veto(
@@ -711,6 +732,41 @@ def _warn_persistent_flags(cr_mask: np.ndarray, fraction: float = PERSISTENT_FLA
     )
 
 
+def _warn_unfillable(unfilled: list, median_window: int) -> None:
+    """
+    Warn about flagged pixels that had no unflagged neighbour to take a median from.
+
+    A run of flagged pixels at least as wide as ``median_window`` leaves its centre
+    with nothing clean inside its own window, so that pixel keeps its raw value and
+    part of the spike survives the repair.  Only a wider window reaches it, and how
+    wide a window is still local is the caller's judgement, so this reports rather
+    than widening.
+
+    Parameters
+    ----------
+    unfilled : list of (int, int or None)
+        ``(pixel, sweep)`` pairs, ``sweep`` being ``None`` for 1-D input.
+    median_window : int
+        The window that was too narrow, named so the message can be acted on.
+    """
+    def _where(pixel, sweep):
+        return f"pixel {pixel}" if sweep is None else f"pixel {pixel} (sweep {sweep})"
+
+    shown = ", ".join(_where(pix, swp) for pix, swp in unfilled[:3])
+    if len(unfilled) > 3:
+        shown += ", ..."
+
+    # ASCII only: this is runtime output, and group terminals are cp1252.
+    warnings.warn(
+        f"{len(unfilled)} flagged pixel(s) kept their raw values because every "
+        f"pixel in their median_window={median_window} window was flagged too: "
+        f"{shown}. A run of flagged pixels that wide has no unflagged neighbour "
+        f"left to take a median from, so part of the spike survives the repair. "
+        f"Pass a larger median_window to reach it.",
+        stacklevel=3,
+    )
+
+
 def remove_cosmic_rays(
         spectra : np.ndarray,
         sigma_threshold : float = 5.0,
@@ -732,7 +788,8 @@ def remove_cosmic_rays(
     a gate sweep.
 
     Scientific basis:
-    - Cosmic rays produce sharp, narrow spikes (1–3 pixels wide).
+    - Cosmic rays produce sharp, narrow spikes, typically 1–3 pixels wide and
+        occasionally a few pixels more (see *median_window* for the limit).
     - The discrete Laplacian  L[i] = flux[i-1] - 2·flux[i] + flux[i+1]  is near
         zero for a smooth spectrum but strongly NEGATIVE at a CR spike centre, because
         the centre pixel is far above its neighbours.
@@ -740,10 +797,15 @@ def remove_cosmic_rays(
         via the median absolute deviation, MAD).
     - Iteration is essential for multi-pixel CRs:
         • Pass 1 detects the *edges* (their neighbours are normal → large |L|).
-        • Detected pixels are replaced with local medians, then the Laplacian is
-            recomputed. Now interior "flat-top" pixels show a large negative L because
-            their neighbours have been restored.
+        • Detected pixels are replaced with the median of the pixels around them
+            that are *not* flagged, then the Laplacian is recomputed. Now interior
+            "flat-top" pixels show a large negative L because their neighbours have
+            been restored.
         • Repeat until no new pixels are found.
+        • Excluding the flagged pixels from that median is what lets the interior
+            be reached at all: a median over the whole window is drawn from the spike
+            itself once half the window is flagged, and the plateau it produces then
+            reproduces itself on every later pass.
     - This approach is the 1-D analogue of LA Cosmic (van Dokkum 2001, PASP 113, 1420).
 
     Parameters
@@ -755,9 +817,16 @@ def remove_cosmic_rays(
         Detection threshold in MAD-based sigma units.
         Typical values: 4–7 (lower = more aggressive).
     median_window : int
-        Width (pixels, forced odd) of the median filter used for both noise
-        estimation and pixel replacement. If median_window is even, the value is incremented by 1
-        to ensure an odd window.
+        Width in pixels, forced odd, of the window a flagged pixel takes its
+        replacement median from; an even value is incremented by 1.  Only the
+        replacement uses it — the noise estimate is the MAD of the Laplacian.
+
+        It sets how wide a cosmic ray can be and still be repaired.  The median
+        ignores flagged pixels, so a run of up to ``median_window - 1`` flagged
+        pixels still has an unflagged neighbour inside every window; a wider run
+        leaves its centre with none, and those pixels keep their raw values and
+        raise a ``UserWarning`` naming them.  A flat-topped spike is bounded more
+        tightly than this and without a warning — see Notes.
     max_iter : int
         Maximum number of sigma-clipping iterations.  Convergence is usually
         reached in 2–4 passes.
@@ -787,6 +856,18 @@ def remove_cosmic_rays(
 
     Notes
     -----
+    A **flat-topped** spike is bounded more tightly than *median_window* implies,
+    and silently.  Its interior has a near-zero Laplacian, so it is reached only by
+    replacing the edges and recomputing, one pixel in from each side per pass; the
+    replacement medians stop coming from the baseline as soon as the still-unflagged
+    interior outnumbers the baseline pixels inside the window.  Measured on a
+    flat-topped spike, repair is complete up to ``median_window // 2 + 3`` pixels --
+    6 at the default window -- and beyond that the interior is never flagged, keeps
+    its full height, and raises no warning, because the pixels that *were* flagged
+    each had a clean neighbour to draw a median from.  A spike whose profile is
+    curved at every pixel does not have this limit; it is detected in full and
+    bounded by *median_window* alone.
+
     The default is deliberately the conservative one: no assumption is made
     about the sweep axis, and results do not depend on whether spectra are
     passed one at a time or as a block.  Its risk is that a real narrow feature
@@ -823,13 +904,13 @@ def remove_cosmic_rays(
                 "cross_sweep_veto needs 2-D input (n_pixels, n_sweeps): a single "
                 "spectrum has no neighbouring sweeps to compare against."
             )
-        cr_mask, working = _detect_cosmic_rays_1d(
+        cr_mask = _detect_cosmic_rays_1d(
             work, sigma_threshold, median_window, max_iter
         )
-        cleaned = work.copy()
-        if cr_mask.any():
-            local_median      = median_filter(working, size=median_window)
-            cleaned[cr_mask]  = local_median[cr_mask]
+        cleaned  = work.copy()
+        unfilled = _fill_flagged(cleaned, cr_mask, median_window)
+        if unfilled.size:
+            _warn_unfillable([(int(pix), None) for pix in unfilled], median_window)
         return cleaned, cr_mask
 
     n_sweeps = work.shape[1]
@@ -838,30 +919,27 @@ def remove_cosmic_rays(
             f"cross_sweep_veto needs at least 3 sweeps to form a median, got {n_sweeps}."
         )
 
-    cr_mask  = np.zeros(work.shape, dtype=bool)
-    workings = np.empty_like(work)
+    cr_mask = np.zeros(work.shape, dtype=bool)
     for j in range(n_sweeps):
-        cr_mask[:, j], workings[:, j] = _detect_cosmic_rays_1d(
+        cr_mask[:, j] = _detect_cosmic_rays_1d(
             work[:, j], sigma_threshold, median_window, max_iter
         )
 
     if cross_sweep_veto:
         cr_mask = _cross_sweep_veto(work, cr_mask, sigma_threshold, cross_sweep_window)
-        # Vetoed pixels must go back to their raw values before replacement, so
-        # rebuild the fills against the surviving mask.
-        workings = work.copy()
-        for j in range(n_sweeps):
-            _fill_flagged(workings[:, j], cr_mask[:, j], median_window)
     elif n_sweeps >= 3:
         # Nothing here vetoes a repeating detection, so at least say it happened.
         _warn_persistent_flags(cr_mask)
 
-    # Replace flagged pixels with the local median.
-    cleaned = work.copy()
+    # Replace flagged pixels with the local median of their unflagged neighbours,
+    # filling a copy of the raw counts.  A pixel the veto dropped is no longer in
+    # the mask, so it keeps its own value with no separate rebuild step.
+    cleaned  = work.copy()
+    unfilled = []
     for j in range(n_sweeps):
-        col_mask = cr_mask[:, j]
-        if col_mask.any():
-            local_median              = median_filter(workings[:, j], size=median_window)
-            cleaned[col_mask, j]      = local_median[col_mask]
+        for pix in _fill_flagged(cleaned[:, j], cr_mask[:, j], median_window):
+            unfilled.append((int(pix), j))
+    if unfilled:
+        _warn_unfillable(unfilled, median_window)
 
     return (cleaned.T, cr_mask.T) if flip else (cleaned, cr_mask)

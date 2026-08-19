@@ -191,7 +191,7 @@ Ask before documenting or changing any of these.
 ## 9. Citations owed
 
 Under the project's citation rule, a reference must let a reader find the source.
-Three references in this package currently do not, and none can be completed without
+Four references in this package currently do not, and none can be completed without
 information only the group has:
 
 | Reference as it stands | What is missing |
@@ -199,6 +199,52 @@ information only the group has:
 | "the senior's thesis" — source of the thin-TMDC form and of the sign inconsistency in §2 | author, year, title, institution. Equation numbers were removed from this file because without the thesis itself they point nowhere. |
 | "Laturia et al. 2018" — source for `EPS_HBN` and the four TMDC permittivities | full reference and DOI, plus which table the values were read from |
 | "calibrated by CdG" — source of `power_scale` | who, when, and against what setup |
+| `PL_PEAKS["WSe2"]` seed positions — X0, XT and IX for WSe₂ | a source for each seed, or a statement of which spectra they were tuned against and by whom. Note that `EXCITON_ENERGY["WSe2"]["XA0"]` gives 1.75 eV for the same neutral intralayer exciton that `PL_PEAKS` seeds at 1.70 eV; the two have not been reconciled. |
 
 Until these are filled in, the claims that rest on them are recorded here as
 *inherited group practice*, not as literature values.
+
+## 10. Raman modes — WSe₂, by layer count
+
+`examples/data/Raman/*.txt` is WSe₂, bilayer or monolayer per the filename
+(`*bilayer*` / `*monolayer*`) and per session identification. The LabRAM header carries
+no material or layer-count field, so neither is independently checkable from the data —
+see `dev/instruments/labram.md`.
+
+Fitting the six example spectra with `fitting.fit_raman_modes(..., material="WSe2",
+n_layers=2)` and `n_layers=1` finds modes consistent with Pan et al., *"Signature of
+lattice dynamics in twisted 2D homo/hetero-bilayers"*, 2D Materials **9**, 045018
+(2022), doi:10.1088/2053-1583/ac83d4.
+
+| Fitted, bilayer | Fitted, monolayer | Literature | Assignment |
+|---|---|---|---|
+| ≈250.5–250.6 cm⁻¹ | ≈250.1 cm⁻¹ | ≈250 cm⁻¹ | E₂g/A₁g, nearly degenerate |
+| ≈258.6–258.8 cm⁻¹ | ≈260.3–260.5 cm⁻¹ | ≈260 cm⁻¹ | 2LA(M), second-order double resonance |
+| ≈309–309.3 cm⁻¹ | **absent** | ≈309 cm⁻¹ | B₂g |
+
+### Why ≈250 cm⁻¹ is one peak and not a doublet
+
+E₂g and A₁g are *nearly* degenerate, which is why they do not split into two resolvable
+peaks at this resolution. Treating ≈250 cm⁻¹ as a splittable doublet is the wrong model:
+it is not what the cited paper reports, and a two-peak fit there does not converge on
+these spectra.
+
+### Why 2LA(M) is not doublet-adjacent
+
+2LA(M) is second-order (double resonance), a different scattering mechanism from the
+first-order E₂g/A₁g and B₂g modes. That is why it is roughly 10× weaker, and why seeding
+it near ≈250–253 cm⁻¹ — as though it were the other half of a doublet — either pins at a
+fit bound or fails to converge. Only a seed near its actual position converges cleanly.
+
+Its position is found from the data rather than assumed: the residual of a
+main-peak-only fit locates it, and the result matches the paper's ≈260 cm⁻¹ after the
+fact. It is **not** taken as equal between bilayer and monolayer merely because the mode
+carries the same name in both — ≈258.7 vs ≈260.4 cm⁻¹ is a real difference, not fit
+noise.
+
+### Why B₂g is absent in the monolayer
+
+Every monolayer spectrum checked has a flat baseline at ≈309 cm⁻¹ — not a small or
+unresolved peak. This is consistent with B₂g requiring interlayer coupling, which a
+single layer does not have. `constants.RAMAN_MODES["WSe2"][1]["modes"]` therefore lists
+two modes and not three; adding B₂g there does not cause the fit to drop it.

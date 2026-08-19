@@ -12,10 +12,13 @@ one.
 
 **Measurements the group makes:** photoluminescence, micro-PL, reflectance /
 differential reflectance, absorption, real-space PL imaging (exciton diffusion
-clouds), back-focal-plane measurements (k-space dispersion) as real images on CCDs.
+clouds), back-focal-plane measurements (k-space dispersion) as real images on CCDs,
+Raman spectroscopy.
 
 **Measurements this package supports:** PL, reflectance / reflectance contrast,
-time-resolved PL, and real-space imaging. Absorption, cavity, and BFP/k-space data are
+time-resolved PL, real-space imaging, and Raman — single spectra (`RamanSpectrum`) and
+2-D spatial maps (`RamanMap`), which are two different LabRAM export shapes, not one
+loader with a flag. Absorption, cavity, and BFP/k-space data are
 measured in the lab but have no loader. Don't propose speculative multi-modality
 abstractions unasked — but do flag where a PL assumption will resist a future loader.
 
@@ -203,6 +206,11 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
 - Don't hand-build a `patches.Circle` for a laser spot; use `_draw_laser_circle`.
 - Don't add `ax=` to `show_image` — it is a viewer that owns its figure. Multi-panel
   image plotting goes through `plot_image`, which annotates and returns its circle.
+- Don't replace `plot_image`'s `extent=`/`origin=` with a `**imshow_kwargs` passthrough,
+  and don't drop `extent=` on the grounds that `im.set_extent` exists. They carry the
+  coordinate mapping, not style. Don't unify `plot_image`'s `origin`
+  (`"upper"`/`"lower"`, matplotlib's) with `plot_diffusion_cloud`'s
+  (`"corner"`/`"center"`/`"image_center"`) — two meanings, one spelling, accepted.
 - Don't give `animate_wl_pl_spectra` a parameter per panel option; `laser_style` and
   `spectrum_style` are the two doors, and it returns its panels so their artists are
   reachable.
@@ -278,6 +286,14 @@ bwarea semantics are wanted at all.
 
 **Open:**
 
+- **TRPL lifetimes are fitted against a misaligned model.** `build_irf_kernel` puts
+  the IRF peak at `ceil(window_before/dt)`; `convolve1d` reads zero delay at
+  `len(weights)//2`. At the default 0.3/2.0 ns windows every model curve is 0.852 ns
+  early. Nothing tests this path. **A24** — fix before trusting any `tau_rise` or
+  `tau_decay`, and correct `_build_lifetime_dictionary`'s docstring, which claims the
+  opposite, in the same change.
+- `RamanMap` fills `counts` with `np.empty`, so a duplicated `(X, Y)` leaves a cell
+  holding uninitialised memory that then plots as data (**A25**).
 - `plot_diffusion_cloud` double-subtracts the background when handed an image object
   that already had `bg_region` applied at load. It also has ~30 parameters and returns
   `result` instead of its artists — the standing counter-example to *parameters earn

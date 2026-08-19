@@ -93,6 +93,23 @@ the count is correct regardless of how wide the row is.
 - **A 2-D spatial raster is one flattened file** — 41 X inside 51 Y in the reflectance
   example. Nothing in the rows states the nest; it has to be declared.
 
+### An image sequence can hold one more frame than its paired sweep
+
+A real-space image sequence and the spectral sweep taken alongside it do not always
+carry the same number of points. In the committed position scan:
+
+| Directory | Image frames | Paired spectral export |
+|---|---|---|
+| `examples/data/position-xy-scan/wl/` | **58** (`wl_iter_000000`–`wl_iter_000057`) | declares **57** blocks |
+| `examples/data/position-xy-scan/pl/` | **57** (`pl_iter_0000`–`pl_iter_0056`) | declares **114** blocks, i.e. 57 after the zero-filled half is dropped |
+
+So the white light carries one frame more than its sweep has points, and the PL matches
+exactly. The extra frame sits at the **end** of the sequence. This is what the exporter
+does, not a truncated or corrupted acquisition.
+
+Note also that the two directories pad `_iter_` to different widths — six digits for the
+white light, four for the PL — so the integer, not the string, is what orders them.
+
 ### The committed fixtures
 
 `examples/data/reflectance-contrast/sample_truncated_…csv` holds the first **50**

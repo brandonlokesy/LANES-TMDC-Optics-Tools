@@ -44,7 +44,7 @@ below tracks what is left.
 with E14; **A10 and A7 fixed 2026-08-07**; **A9 and B1 both fixed 2026-08-10**, which
 closes the `AttoCubePLScanRealSpace` pass; **A19–A21 fixed 2026-08-17/18** on
 `fix/nest-level-separation`; **A23 fixed 2026-08-18**. **A5**, **A18** and **A22** are the
-live bugs left in this section.)*
+live bugs left in this section, joined by **A24–A29** from the PR #19 review.)*
 
 **A1. `processing.remove_cosmic_rays` cannot be called at all.** **[FIXED — 2026-07-28, e77fabf]**
 `remove_cosmic_rays`'s replacement loop referenced `cosmic_mask`, which was never defined — the
@@ -1111,6 +1111,84 @@ three centre pixels raw; and the same spike fully repaired at `median_window=15`
 warning asserted absent. 729 tests pass.
 
 
+**A24. `build_irf_kernel` and `_build_lifetime_dictionary` disagree about where zero
+delay is.** **[verified by running]**
+`build_irf_kernel` places the instrument-response peak at index
+`ceil(window_before/dt)` of the kernel it returns. `scipy.ndimage.convolve1d` always
+treats index `len(weights)//2` as zero delay. The two coincide only when *window_before*
+and *window_after* are equal, and the defaults are 0.3 ns and 2.0 ns.
+
+Measured with a spike kernel at the notebook's `dt` = 4 ps: kernel length 576, IRF peak
+at index 75, scipy's zero-delay index 288. Every dictionary column is therefore shifted
+`(288 - 75) x 4 ps` = **0.852 ns early**, inside a `fit_scan_lifetime` window only 1.5 ns
+wide (`t_range=(-0.2, 1.3)`). The model's rise happens before the fit window opens, so
+every `tau_rise` and `tau_decay` from this path is fitted against a curve not lined up
+with the data, and `examples/example-trpl.ipynb`'s committed outputs carry those numbers.
+
+Two fixes were measured to give correct alignment: zero-pad the short side inside
+`build_irf_kernel` so the peak lands on `len//2`, or pass
+`origin = argmax(kernel) - len(kernel)//2` to `convolve1d` (always inside scipy's
+permitted range of `-(L//2)` to `(L-1)//2`).
+
+`_build_lifetime_dictionary`'s docstring asserts the opposite — that this "introduces no
+spurious time shift, which matters because that shift would otherwise be degenerate with
+(and bias) the fitted lifetimes themselves" — so it has to be corrected with the code. No
+test reaches `build_irf_kernel`, `fit_sparse_lifetime` or `fit_scan_lifetime`, which is
+why this survived.
+
+**A25. `RamanMap` can plot uninitialised memory as data.**
+`RamanMap.__init__` allocates `self.counts` with `np.empty` and scatters rows into it by
+`searchsorted` index. Its guard compares `n_x * n_y` against the row count, which a file
+with a duplicated `(X, Y)` position can still satisfy — the duplicate overwrites one cell
+and leaves another never written, holding whatever was in memory. That cell then reaches
+`plot_image` and a mode fit as though it were a measurement. `np.full(..., np.nan)` plus a
+check that every cell was written would fail loudly instead.
+
+**A26. `locate_residual_peak` can seed an amplitude below its own bound, and the crash is
+not caught.**
+When the discovery fit over-predicts across the whole `shoulder_range`,
+`locate_residual_peak` returns a negative height. `fit_multi_voigt` uses it as the
+shoulder's amplitude seed while `_bounds` sets that amplitude's lower limit to `0.0`, so
+`curve_fit` raises `ValueError: Initial guess is outside of provided bounds`.
+`fit_multi_voigt` catches only `RuntimeError`, so this propagates rather than warning and
+skipping — and it happens in a pixel-by-pixel map loop, where one weak pixel ends the
+whole run.
+
+**A27. `NormalizedSpectrumPanel` smooths by default, and `animate_wl_pl_spectra_grid`
+cannot turn it off.**
+The panel defaults `smooth_window=11`, so Savitzky-Golay smoothing runs unless a caller
+sets it to `None`. `animate_wl_pl_spectra_grid` constructs the panel itself and exposes no
+`spectrum_style` door, so through that entry point every spectrum in the animation is
+smoothed with no way to opt out. Same shape as the `plot_spectral_map` `median_kernel=3`
+default, and against *corrections are opt-in*: the least-assuming default is no smoothing.
+The missing door also departs from
+`dev/decisions/0022-the-animation-wrapper-returns-its-panels.md`, which forwards one dict
+to the spectrum panel.
+
+**A28. `normalize=True` became a background subtraction.**
+`plot_spectrum` and `plot_single_spectrum` changed from `y / y.max()` to
+`processing.normalise_minmax(y)`. The two differ: `normalise_minmax` also subtracts each
+spectrum's own floor. Whether that is wanted is a real choice — right when a dark pedestal
+should not survive normalisation, wrong when the floor is signal — but it is a different
+quantity under an unchanged argument name, so a figure made with `normalize=True` before
+and after does not show the same numbers.
+
+**A29. `RamanSpectrum` dies before it can refuse a map export.** **[verified by running]**
+`RamanSpectrum` carries a message telling a caller to use `RamanMap` for a map-shaped
+file, and cannot reach it: `np.loadtxt` raises first. On the committed
+`examples/data/Raman/map2.txt`:
+
+```
+ValueError: the number of columns changed from 1024 to 1026 at row 2
+```
+
+The cause is recorded in `dev/instruments/labram.md`: every row of a map export holds 1026
+tab-separated fields, but row 0's first two are *empty*, and `loadtxt`'s default
+whitespace delimiter collapses them away, so row 0 reads as 1024 columns against row 1's
+1026. Classifying the file before parsing it, or reading with an explicit tab delimiter,
+would let the written message do its job.
+
+
 ## B. Dead parameters — accepted, documented, silently ignored
 
 **B1. `AttoCubePLScanRealSpace(bg_region=, bg_stat=)` are stored and never read.**
@@ -1303,6 +1381,21 @@ redundant, and both it and the comment went. Landed with the conjugate-axis help
 than as a drive-by — that helper needs `HC_EV_NM` at module scope, so leaving the local
 import would have meant a function-level import shadowing a module-level name for no
 reason.
+
+**C10. `normalise_minmax`'s docstring is wrong about flat sweeps.** **[verified by running]**
+The Returns block says "Sweeps with zero range (max == min) are left as-is". They are not.
+The body computes `lo = min`, `span = max - lo`, replaces a zero span with `1.0`, and
+returns `(spectra - lo) / span`, so a flat spectrum of constant 200 counts comes back as
+all zeros. The `span[span == 0] = 1.0` guard prevents the division by zero; it does not
+preserve the input. Either the sentence goes, or the function returns those columns
+unchanged — and which is right depends on whether a flat sweep should plot at 0 or at its
+own value, so it is a choice, not a typo.
+
+**C11. `as_image_grid`'s docstring misdescribes `as_grid`.**
+It says `as_grid` "only accepts a 1-D or 2-D array", and justifies a
+flatten-then-reshape-back step by it. `as_grid` reshapes any array whose trailing
+dimension is `n_sweeps`, so the claim is false and the step it justifies is unnecessary.
+
 
 ## D. Duplication
 
@@ -1907,6 +2000,46 @@ frame-selection argument of its own to accept them, so this is a `diffusion` cha
 the window work.
 
 
+**E21. Three new plotting functions return no artists.**
+`plot_spectra_overlay` returns `(fig, (ax_raw, ax_norm))`; `plot_multi_voigt_overlay` and
+`plot_fit_param_comparison` return `(fig, axes)`. None hands back the lines, the point
+markers or the `ErrorbarContainer`s it created, so restyling means reaching into
+`ax.lines` and re-deriving which artist is which — the pressure that grows style
+parameters back. `dev/decisions/0024-long-plotting-returns-are-named.md` sets the shape:
+`(fig, ax, artist)`, or a `NamedTuple` named `<Thing>Plot` once there is more to return.
+
+Not breaking today — nothing outside `examples/example_position_xy_scan.ipynb` calls them.
+That is the reason to do it soon rather than later: a return-shape change is silent for a
+caller unpacking positionally, so the cost rises with every caller added. Fixing
+`plot_spectra_overlay` also means editing that notebook, which unpacks
+`fig, (ax_raw, ax_norm) = plotting.plot_spectra_overlay(...)`.
+
+**E22. Importing the package imports scikit-learn.**
+`plotting` imports `fitting` at module level, and `fitting` imports
+`sklearn.linear_model.Lasso` at module level, so `import tmdc_optics_tools` pulls in
+scikit-learn for anyone who only wants to plot. It is declared in `pyproject.toml`, so
+this is not a missing dependency — but it arrived with `fit_sparse_lifetime`, and every
+existing environment failed to import the package until scikit-learn was installed. A
+function-local import inside `fit_sparse_lifetime` would confine the cost to the one
+function that needs it.
+
+**E23. `fit_scan_lifetime`'s two defaults contradict each other.**
+`t_range=(-0.2, 1.3)` gives a 1.5 ns fit window while `tau_range=(1e-3, 5.0)` puts
+candidate lifetimes up to 5 ns in the dictionary. The function's own docstring warns
+against exactly this: keep the largest candidate within a few times the window width,
+because a candidate much longer than the window is nearly flat across it and therefore
+degenerate with an offset, and one tiny coefficient at a very long lifetime can then
+dominate the amplitude-weighted average. One of the two defaults should move; which one
+depends on the decay being measured, so it is a physics call.
+
+**E24. `as_image_grid` loads every frame at once.**
+It stacks the whole sequence: for `examples/data/position-xy-scan` that is 58 frames of
+512x512, roughly 120 MB, duplicated again by `np.stack` and again by
+`processing.reorder_grid`. `ImageSequencePanel` pulls one frame at a time through
+`load_frame` precisely so an animation does not hold the sequence in memory, and routing a
+grid animation through `as_image_grid` defeats that.
+
+
 ## Settled design decisions
 
 Every decision that closed a finding in this file now has its own append-only record in
@@ -1950,6 +2083,32 @@ axis. The frame-window work is now unblocked. **A18** and **E19** are both
 `DiffusionCloudPanel` and both want `diffusion`'s first tests, so they go together, alongside
 **A5**/**E11**. **E16** and **E17** landed as one change, as planned. **C8** and
 **C9** ride along with whatever touches their function.
+
+**Opened 2026-08-19 by the review of PR #19** (Raman loaders, PL peak fitting, TRPL
+lifetime fitting, merged onto `main` on 2026-08-19): **A24–A29**, **C10**, **C11**,
+**E21–E24**. Every one is in code that has never been released, so none carries a
+deprecation cost — which is the argument for taking them now rather than later. Order:
+
+1. **A24** first, and ahead of everything else on this list. It is the only entry here
+   that makes numbers wrong rather than raising, `examples/example-trpl.ipynb`'s committed
+   outputs already carry them, and it needs the first test to reach `fit_sparse_lifetime`
+   at all. The docstring's contrary claim is corrected in the same change.
+2. **A25** — same class as A24 (wrong data, no error raised) and much cheaper:
+   `np.full(..., np.nan)` plus a check that every grid cell was written.
+3. **A26** and **A29** — two crashes, each with an obvious fix, neither needing a
+   judgment call. A26 matters most in a map loop, where one weak pixel currently ends the
+   run.
+4. **A27** with **E21** — a default that forces smoothing on, and three returns that hand
+   back no artists. Different faults, but the same new public surface, and both are
+   cheapest to change before anything depends on the current shapes. E21 also touches
+   `examples/example_position_xy_scan.ipynb`.
+5. **A28** — needs a decision on what `normalize=` should mean before it can be a change.
+6. **C10**, **C11**, **E23**, **E24** — ride along with whatever next touches their
+   function. **C10** and **A28** are the same question seen from two sides and should be
+   settled together.
+
+**E22 is worked around, not fixed.** scikit-learn was installed into `viz-sci-plot` on
+2026-08-19 so the suite could run; the module-level import is still there.
 
 Outside this order: **E9 is largely closed** — sample files arrived, and R/RC and
 TRPL support landed on 2026-07-30 along with the rename and arbitrary-sweep rewrite

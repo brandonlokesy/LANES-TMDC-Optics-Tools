@@ -9,7 +9,7 @@ Submodules
 constants   Physical constants, material parameters.
 loaders     Data loaders (DeviceGeometry, AttoCubeSpectralSweep).
 plotting    Publication-ready figure style and common plot types.
-fitting     Spectral fitting (Lorentzian, Gaussian, multi-peak).
+fitting     Spectral fitting (Lorentzian, Gaussian, multi-peak) and sparse TRPL lifetime fitting.
 processing  Smoothing, normalisation, spectral conversions.
 hdf5        Self-describing HDF5 storage for spectral sweeps.
 
@@ -43,6 +43,8 @@ from .loaders import (
     StackLayer,
     SingleSpectrum,
     SingleImage,
+    RamanSpectrum,
+    RamanMap,
 )
 from . import hdf5, processing
 
@@ -55,6 +57,8 @@ __all__ = [
     "AttoCubePLScanRealSpace",
     "SingleSpectrum",
     "SingleImage",
+    "RamanSpectrum",
+    "RamanMap",
     "constants",
     "hdf5",
     "plotting",

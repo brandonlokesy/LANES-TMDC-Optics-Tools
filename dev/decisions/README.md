@@ -124,5 +124,6 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0023](0023-the-cosmic-ray-fill-ignores-flagged-pixels.md) | The cosmic-ray replacement median ignores the pixels it is repairing | 2026-08-18 | Accepted |
 | [0024](0024-long-plotting-returns-are-named.md) | A plotting return longer than `(fig, ax, artist)` is a named tuple | 2026-08-19 | Accepted · extended by 0025 |
 | [0025](0025-plot-image-carries-its-colorbar.md) | `plot_image` carries its colorbar, and a new member is appended | 2026-08-19 | Accepted |
+| [0026](0026-plot-image-carries-the-coordinate-mapping.md) | `plot_image` carries the coordinate mapping, as two named parameters | 2026-08-19 | Accepted |
 
 This table is the one mutable part of the folder.

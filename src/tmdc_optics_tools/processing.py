@@ -43,6 +43,33 @@ def normalise_peak(spectra: np.ndarray, axis: int = 0) -> np.ndarray:
     return spectra / peak
 
 
+def normalise_minmax(spectra: np.ndarray, axis: int = 0) -> np.ndarray:
+    """
+    Normalise each spectrum to its own [0, 1] range.
+
+    Unlike :func:`normalise_peak`, this also shifts the floor to zero —
+    the right choice when a flat offset (e.g. a dark-count pedestal within
+    the plotted or fitted window) should not carry through as a nonzero
+    baseline after normalisation.
+
+    Parameters
+    ----------
+    spectra : np.ndarray, shape (n_pixels, n_sweeps) or (n_pixels,)
+    axis : int
+        Axis along which the spectra run. Default 0 (pixels along rows).
+
+    Returns
+    -------
+    np.ndarray
+        Normalised spectra. Sweeps with zero range (max == min) are left as-is.
+    """
+    spectra = np.asarray(spectra, float)
+    lo = spectra.min(axis=axis, keepdims=True)
+    span = spectra.max(axis=axis, keepdims=True) - lo
+    span[span == 0] = 1.0
+    return (spectra - lo) / span
+
+
 def normalise_area(
     spectra : np.ndarray,
     x       : np.ndarray = None,
@@ -339,6 +366,38 @@ def smooth_savgol(
     return savgol_filter(spectra, window_length=window, polyorder=poly_order, axis=axis)
 
 
+def maybe_smooth(
+    spectra    : np.ndarray,
+    window     : int = None,
+    poly_order : int = 3,
+    axis       : int = 0,
+) -> np.ndarray:
+    """
+    Apply :func:`smooth_savgol` when *window* is given, else return *spectra* unchanged.
+
+    For a caller whose own smoothing is an opt-in, user-facing parameter
+    (``smooth_window=None`` meaning "off") — the ``if window is None: return
+    as-is`` guard around :func:`smooth_savgol` that every such caller would
+    otherwise repeat.
+
+    Parameters
+    ----------
+    spectra : np.ndarray
+    window : int, optional
+        Forwarded to :func:`smooth_savgol`. ``None`` (default) skips
+        smoothing entirely.
+    poly_order, axis : int
+        Forwarded to :func:`smooth_savgol`.
+
+    Returns
+    -------
+    np.ndarray
+    """
+    if window is None:
+        return spectra
+    return smooth_savgol(spectra, window=window, poly_order=poly_order, axis=axis)
+
+
 # ---------------------------------------------------------------------------
 # Spectral operations
 # ---------------------------------------------------------------------------
@@ -444,6 +503,57 @@ def crop(
     mask = (x >= x_range[0]) & (x <= x_range[1])
     idx  = np.where(mask)[0]
     return x[idx], np.take(spectra, idx, axis=axis)
+
+
+def reorder_grid(
+    grid         : np.ndarray,
+    inner_axis   : str  = "fast",
+    reverse_fast : bool = False,
+    reverse_slow : bool = False,
+) -> np.ndarray:
+    """
+    Flatten a ``(..., n_slow, n_fast)`` grid into a sequence in a chosen order.
+
+    For a grid built by an AttoCube sweep's own
+    :meth:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.as_grid` —
+    ``(n_slow, n_fast)`` trailing, fast last because that is the axis the
+    sweep itself ran to completion first — this controls which axis the
+    returned flat sequence visits fastest, and which direction each axis
+    counts in. The default (``inner_axis="fast"``, neither reversed)
+    reproduces exactly the order the data was written in.
+
+    Parameters
+    ----------
+    grid : np.ndarray, shape (..., n_slow, n_fast)
+    inner_axis : {"fast", "slow"}
+        Which axis varies fastest (innermost) in the result.
+    reverse_fast, reverse_slow : bool
+        Traverse that axis in decreasing order instead of increasing.
+        Independent of *inner_axis* and of each other — any of the four
+        combinations of the two flags applies on top of either axis order.
+
+    Returns
+    -------
+    np.ndarray, shape (..., n_slow * n_fast)
+
+    See Also
+    --------
+    tmdc_optics_tools.loaders.AttoCubeSpectralSweep.as_grid : builds the
+        grid this reshapes.
+    """
+    if inner_axis not in ("fast", "slow"):
+        raise ValueError(f"inner_axis must be 'fast' or 'slow', got {inner_axis!r}.")
+
+    grid = np.asarray(grid)
+    if reverse_fast:
+        grid = np.flip(grid, axis=-1)
+    if reverse_slow:
+        grid = np.flip(grid, axis=-2)
+    if inner_axis == "slow":
+        grid = np.moveaxis(grid, -1, -2)
+
+    n_a, n_b = grid.shape[-2:]
+    return grid.reshape(grid.shape[:-2] + (n_a * n_b,))
 
 
 def wavelength_to_energy(wavelength_nm: np.ndarray) -> np.ndarray:

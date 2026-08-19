@@ -21,9 +21,11 @@ import matplotlib.animation as animation
 import matplotlib.colors as mcolors
 import matplotlib.patches as patches
 import matplotlib.patheffects as path_effects
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize, LogNorm, BoundaryNorm
 from skimage.exposure import rescale_intensity
 
-from . import processing
+from . import fitting, processing
 from . import diffusion as _diffusion
 from .constants import HC_EV_NM, _x_axis_name_unit
 # The spectra- and frame-source registries name attributes on the loader classes,
@@ -733,7 +735,7 @@ def plot_spectrum(
     ax : matplotlib.axes.Axes, optional
     x_axis : {"energy", "wavelength"}
     normalize : bool
-        Normalise spectrum to its peak value.
+        Normalise spectrum to its own [0, 1] range.
     label : str, optional
         Legend label.  Defaults to the coordinate the point was addressed on,
         with its unit; both coordinates for a nest.
@@ -803,7 +805,7 @@ def plot_spectrum(
     x, xlabel = _resolve_x_axis(scan, x_axis)
     y         = _resolve_spectra(scan, "best", x_axis)[:, sweep_index]
     if normalize:
-        y = y / y.max()
+        y = processing.normalise_minmax(y)
 
     if label is None:
         label = _sweep_point_label(scan, sweep_index, axis)
@@ -844,7 +846,7 @@ def plot_single_spectrum(
     x_axis : {"wavelength", "energy"}
         Axis to plot against. Default ``"wavelength"`` (the native axis).
     normalize : bool
-        Normalise the spectrum to its peak value.
+        Normalise the spectrum to its own [0, 1] range.
     label : str, optional
         Legend label. A legend is shown only when a label is given.
     ylabel : str, optional
@@ -867,7 +869,7 @@ def plot_single_spectrum(
     x, xlabel = _resolve_x_axis(spectrum, x_axis)
     y = _resolve_spectra(spectrum, "best", x_axis)
     if normalize:
-        y = y / y.max()
+        y = processing.normalise_minmax(y)
 
     line, = ax.plot(x, y, label=label, **line_kwargs)
     ax.set_xlabel(xlabel)
@@ -877,6 +879,107 @@ def plot_single_spectrum(
         ax.legend(frameon=False)
 
     return fig, ax, line
+
+
+def plot_spectra_overlay(
+    entries           : dict,
+    x                 = None,
+    xlabel            : str  = None,
+    ylabel            : str  = None,
+    ylabel_normalized : str  = None,
+    smooth_window           = None,
+    smooth_poly       : int  = 3,
+    figsize           : tuple = (10.5, 4.2),
+) -> tuple:
+    """
+    Raw and min-max-normalized overlay of several spectra and/or fits.
+
+    Each entry in *entries* is either a plain array of y-values (sharing
+    *x*) or a :class:`~tmdc_optics_tools.fitting.FitResult` — decided per
+    entry, not by a caller-chosen mode, so a set of points where only some
+    were fit still draws in one call and one figure.
+
+    A plain-array entry draws one line, normalized independently via
+    :func:`~tmdc_optics_tools.processing.normalise_minmax` (there is no fit
+    for it to visually agree or disagree with). A ``FitResult`` entry draws
+    its data (recovered as ``result.residuals + result.y_fit`` — exact, that
+    is the definition of the residual — on its own ``result.x_fit``; the
+    shared *x* is unused for it) as points plus its fit-sum curve as a line,
+    both normalized *together* using the data's own min/max rather than
+    independently, so the fit's visual agreement with its data survives
+    normalizing instead of being hidden by two curves put on disagreeing
+    scales.
+
+    Parameters
+    ----------
+    entries : dict of {label: array-like or FitResult}
+        Resolving a coordinate to an entry is the caller's job, since it
+        differs by loader — e.g. ``scan.get_spectrum_at(fast=, slow=)`` for a
+        nested AttoCube sweep, or ``raman_map.spectrum_at(*raman_map.nearest_index(x, y))``
+        for a :class:`~tmdc_optics_tools.loaders.RamanMap`. Pass a
+        :func:`~tmdc_optics_tools.fitting.fit_multi_voigt` result (or a
+        wrapper's, e.g. :func:`~tmdc_optics_tools.fitting.fit_raman_modes`)
+        for any point that was fit.
+    x : array-like, optional
+        Shared x-axis for any plain-array entries. Unused by, and not
+        required if *entries* holds only, ``FitResult`` entries.
+    xlabel, ylabel, ylabel_normalized : str, optional
+        Axis labels, left blank by default: this function has no way to know
+        what domain the spectra are in, and *ylabel_normalized* separately
+        from *ylabel* because normalizing substitutes the unit rather than
+        appending to it (e.g. "PL intensity (counts)" becomes "PL intensity
+        (norm.)", not "PL intensity (counts) (norm.)") and only a caller that
+        knows the signal's name can build that string.
+    smooth_window, smooth_poly : int, optional
+        Forwarded to :func:`~tmdc_optics_tools.processing.maybe_smooth`, run
+        once per plain-array entry before either panel is drawn — not
+        applied to a ``FitResult`` entry's data, which was already the array
+        the fit itself ran on. ``smooth_window=None`` (default) skips
+        smoothing.
+    figsize : tuple
+
+    Returns
+    -------
+    fig, (ax_raw, ax_norm)
+    """
+    fig, (ax_raw, ax_norm) = plt.subplots(1, 2, figsize=figsize)
+    has_plain_entry = False
+
+    for label, entry in entries.items():
+        if isinstance(entry, fitting.FitResult):
+            x_i, y_fit = entry.x_fit, entry.y_fit
+            y_i = entry.residuals + y_fit
+
+            line, = ax_raw.plot(x_i, y_i, ".", ms=3, alpha=0.35)
+            ax_raw.plot(x_i, y_fit, "-", color=line.get_color(), label=label)
+
+            lo, hi = y_i.min(), y_i.max()
+            span = hi - lo if hi > lo else 1.0
+            ax_norm.plot(x_i, (y_i - lo) / span, ".", ms=3, alpha=0.35, color=line.get_color())
+            ax_norm.plot(x_i, (y_fit - lo) / span, "-", color=line.get_color())
+        else:
+            has_plain_entry = True
+            y_i = processing.maybe_smooth(np.asarray(entry, dtype=float), smooth_window, smooth_poly)
+            ax_raw.plot(x, y_i, label=label)
+            ax_norm.plot(x, processing.normalise_minmax(y_i), label=label)
+
+    ax_raw.set_title("Raw")
+    ax_norm.set_title("Normalized to [0, 1]")
+    for ax, label in ((ax_raw, ylabel), (ax_norm, ylabel_normalized)):
+        if xlabel:
+            ax.set_xlabel(xlabel)
+        if label:
+            ax.set_ylabel(label)
+    ax_raw.legend(fontsize=8)
+    if has_plain_entry:
+        # A FitResult entry labels only its fit-sum line, on ax_raw -- its
+        # normalized-panel curves are unlabeled (same color already ties them
+        # to ax_raw's legend), so ax_norm gets a legend only when a
+        # plain-array entry actually labeled something there.
+        ax_norm.legend(fontsize=8)
+
+    fig.tight_layout()
+    return fig, (ax_raw, ax_norm)
 
 
 # ---------------------------------------------------------------------------
@@ -1099,6 +1202,8 @@ def plot_image(
     xlabel         : str   = "x (px)",
     ylabel         : str   = "y (px)",
     show_axes      : bool  = True,
+    extent         : tuple = None,
+    origin         : str   = "upper",
     laser_annotation : bool = False,
     laser_ref             = None,
 ) -> ImagePlot:
@@ -1111,6 +1216,11 @@ def plot_image(
         A 2-D array, or any object exposing a 2-D ``img`` attribute
         (e.g. :class:`~tmdc_optics_tools.loaders.SingleImage`,
         :class:`~tmdc_optics_tools.loaders.AttoCubeSampleImage`).
+        ``NaN`` entries are masked (drawn as nothing) rather than colored at
+        the scale's low end, so "not computed here" stays visually distinct
+        from "computed and found to be small" — e.g. a
+        :class:`~tmdc_optics_tools.loaders.RamanMap` mode fit only over part
+        of the grid.
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
     cmap : str, Colormap, or sequence of colours
@@ -1131,6 +1241,20 @@ def plot_image(
         Axis labels (ignored when *show_axes* is ``False``).
     show_axes : bool
         Show axis ticks/labels. Set ``False`` to hide them entirely.
+    extent : tuple of (left, right, bottom, top), optional
+        Data coordinates of the image's outer edges, e.g.
+        ``(x.min(), x.max(), y.min(), y.max())`` for a map in µm.  ``None``
+        (default) leaves the axes in pixel-index units — the array carries no
+        unit, only row and column numbers, so this is the caller's to supply.
+    origin : {``"upper"``, ``"lower"``}
+        Which end of the array's row axis is drawn at the top.  ``"upper"``
+        (default) puts row 0 at the top, the read-out order of a camera frame;
+        ``"lower"`` puts row 0 at the bottom, so a higher row index is higher
+        up.  With an explicit *extent* the axis numbers increase upward either
+        way, so this flips the data rather than the axis: a map whose row 0
+        holds its smallest Y — as
+        :class:`~tmdc_optics_tools.loaders.RamanMap` builds — needs
+        ``"lower"``, or it is drawn mirrored against correct axis labels.
     laser_annotation : bool
         Overlay the 1/e² laser-spot boundary.  This is the only switch: with
         ``False`` no circle is drawn even when *laser_ref* is supplied.
@@ -1148,18 +1272,25 @@ def plot_image(
         Named 5-tuple of the figure, axes, image, laser-boundary circle and
         colorbar.
     """
-    img = image.img if hasattr(image, "img") else np.asarray(image)
+    img = image.img if hasattr(image, "img") else np.asarray(image, dtype=float)
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     else:
         fig = ax.get_figure()
 
+    # Masking precedes the rescale.  rescale_intensity(in_range="image") takes
+    # its limits from the array's own min and max, and a single NaN makes both
+    # of them NaN, so every pixel comes back NaN and the panel draws blank.  A
+    # masked array's min and max skip the masked entries, and the mask survives
+    # the arithmetic.
+    img = np.ma.masked_invalid(img)
+
     if rescale_img:
         img = rescale_intensity(img, in_range="image", out_range=(0, 1))
-
     vmin, vmax = clim if clim is not None else (None, None)
-    im = ax.imshow(img, cmap=get_cmap(cmap), vmin=vmin, vmax=vmax)
+    im = ax.imshow(img, cmap=get_cmap(cmap), vmin=vmin, vmax=vmax,
+                    extent=extent, origin=origin)
 
     if show_axes:
         ax.set_xlabel(xlabel)
@@ -1181,6 +1312,161 @@ def plot_image(
                            else "Intensity (counts)"))
 
     return ImagePlot(fig, ax, im, circle, cb)
+
+
+_VOIGT_PARAM_KEYS = ["center", "amp", "fwhm_g", "fwhm_l"]
+
+
+def plot_multi_voigt_overlay(fit_results: dict, fit_windows: dict,
+                              mode_names: list = None, ncols: int = 3,
+                              xlabel: str = None, ylabel: str = None, x_unit: str = ""):
+    """
+    Data-vs-fit overlay for several :func:`fitting.fit_multi_voigt` results.
+
+    Draws the fitted sum curve plus each individual Voigt component,
+    reconstructed via :func:`fitting.voigt_approx` from that component's
+    own ``amp``/``center``/``fwhm_g``/``fwhm_l``, so what is drawn is
+    exactly what the fit says rather than a re-derived approximation of
+    it. One panel per entry in *fit_results*, arranged in a grid — not a
+    single row — once there are more than *ncols* of them.
+
+    Parameters
+    ----------
+    fit_results : dict of {name: FitResult}
+        Results from :func:`fitting.fit_multi_voigt` or a wrapper built on
+        it (e.g. :func:`fitting.fit_raman_modes`).
+    fit_windows : dict of {name: (x, y)}
+        The exact windowed data each fit was run on, for the "data"
+        scatter — not re-derived from ``result.residuals + result.y_fit``,
+        since a caller with the original array on hand should not be made
+        to reconstruct it.
+    mode_names : list of str, optional
+        Label for each peak index in the legend, e.g. ``["E2g/A1g",
+        "2LA(M)", "B2g"]``. A result with more peaks than *mode_names* has
+        falls back to ``"peak i"`` for the extra ones rather than raising.
+    ncols : int
+        Panels per row.
+    xlabel, ylabel : str, optional
+        Axis labels, set on every panel. Left blank by default: this
+        function has no way to know what domain the fit's x-axis is in
+        (Raman shift, energy, wavelength, ...) or what the y-axis units
+        are.
+    x_unit : str, optional
+        Appended after each peak's fitted center in the legend, e.g.
+        ``" cm$^{-1}$"`` — again left blank rather than assumed.
+
+    Returns
+    -------
+    fig, axes
+        The full grid, including any unused trailing slots (hidden, not
+        removed, so the grid shape stays rectangular) — index by
+        ``axes[row, col]`` to restyle a panel.
+    """
+    mode_names = mode_names or []
+    names = list(fit_results.keys())
+    ncols = min(ncols, len(names))
+    nrows = -(-len(names) // ncols)  # ceil division -- a partial last row is fine
+    fig, axes = plt.subplots(nrows, ncols, squeeze=False,
+                              figsize=(5.0 * ncols, 4.0 * nrows))
+    axes_flat = axes.flatten()
+
+    for ax, name in zip(axes_flat, names):
+        result = fit_results[name]
+        x, y = fit_windows[name]
+        offset = result.params.get("offset", 0.0)
+
+        ax.plot(x, y, ".", ms=4, alpha=0.4, color="0.4", label="data")
+        ax.plot(x, result.y_fit, "-", color="C0", label="fit (sum)")
+
+        n_peaks = sum(1 for k in result.params if k.startswith("center_"))
+        for i in range(n_peaks):
+            amp, cen, fg, fl = (result.params[f"amp_{i}"], result.params[f"center_{i}"],
+                                 result.params[f"fwhm_g_{i}"], result.params[f"fwhm_l_{i}"])
+            peak_curve = fitting.voigt_approx(x, amp, cen, fg, fl) + offset
+            mode = mode_names[i] if i < len(mode_names) else f"peak {i}"
+            ax.plot(x, peak_curve, "--", lw=1.3, label=f"{mode} ({cen:.1f}{x_unit})")
+
+        ax.set_title(name, fontsize=11)
+        if xlabel:
+            ax.set_xlabel(xlabel)
+        if ylabel:
+            ax.set_ylabel(ylabel)
+        ax.legend(fontsize=7)
+
+    for ax in axes_flat[len(names):]:
+        ax.set_visible(False)  # unused grid slots when len(names) isn't a multiple of ncols
+
+    fig.tight_layout()
+    return fig, axes
+
+
+def plot_fit_param_comparison(fit_results: dict, mode_names: list, param_labels: dict = None):
+    """
+    Compare :func:`fitting.fit_multi_voigt` parameters across several fits.
+
+    One grid figure — rows are peak indices (from *mode_names*), columns
+    are the four Voigt parameter types — rather than one figure per
+    (peak, parameter) combination, so the whole comparison fits on screen
+    at once. Not every result needs every peak: a sample missing a given
+    mode's params (e.g. no B₂g on a monolayer fit) simply leaves a gap at
+    that sample's x-position in that panel, rather than raising or
+    silently shifting the other samples over.
+
+    Parameters
+    ----------
+    fit_results : dict of {name: FitResult}
+        Results from :func:`fitting.fit_multi_voigt` or a wrapper built on
+        it.
+    mode_names : list of str
+        One label per peak index, e.g. ``["E2g/A1g", "2LA(M)", "B2g"]`` —
+        also sets how many peak rows are considered; a row is only drawn
+        if at least one result actually has that peak.
+    param_labels : dict of {"center"|"amp"|"fwhm_g"|"fwhm_l": str}, optional
+        Axis label for each parameter type — pass this to add units, e.g.
+        ``{"center": "Center (cm$^{-1}$)"}`` for a Raman shift, ``"Center
+        (eV)"`` for a PL peak. Falls back to the bare, unitless key name
+        when not given: this function has no way to know what domain the
+        fit's x-axis is in.
+
+    Returns
+    -------
+    fig, axes
+        The grid (rows = active peaks, columns = the 4 Voigt parameters)
+        — index by ``axes[row, col]`` to restyle a panel.
+    """
+    param_labels = param_labels or {}
+    sample_names = list(fit_results.keys())
+    sample_colors = {name: f"C{i}" for i, name in enumerate(sample_names)}
+    x = np.arange(len(sample_names))
+
+    active_peaks = [
+        peak_i for peak_i in range(len(mode_names))
+        if any(f"center_{peak_i}" in fit_results[name].params for name in sample_names)
+    ]
+    n_rows, n_cols = len(active_peaks), len(_VOIGT_PARAM_KEYS)
+    fig, axes = plt.subplots(n_rows, n_cols, squeeze=False,
+                              figsize=(3.2 * n_cols, 2.6 * n_rows))
+
+    for row, peak_i in enumerate(active_peaks):
+        for col, param in enumerate(_VOIGT_PARAM_KEYS):
+            ax = axes[row, col]
+            key = f"{param}_{peak_i}"
+            for j, name in enumerate(sample_names):
+                result = fit_results[name]
+                if key not in result.params:
+                    continue
+                ax.errorbar(j, result.params[key], yerr=result.errors[key],
+                            fmt="o", ms=7, capsize=4, color=sample_colors[name])
+            ax.set_xticks(x)
+            ax.set_xticklabels(sample_names, rotation=25, ha="right", fontsize=8)
+            ax.grid(alpha=0.25)
+            if row == 0:
+                ax.set_title(param_labels.get(param, param), fontsize=10)
+            if col == 0:
+                ax.set_ylabel(mode_names[peak_i], fontsize=10)
+
+    fig.tight_layout()
+    return fig, axes
 
 
 def _format_frame_title(
@@ -1412,6 +1698,70 @@ def plot_stark_shift(
     ax.set_ylabel("Peak energy (eV)")
     ax.legend(frameon=False, fontsize=7)
     return fig, ax
+
+
+def plot_rise_time_vs_distance(
+    distances,
+    rise_times,
+    rise_time_errs = None,
+    labels         = None,
+    ax             = None,
+    figsize        : tuple = (5, 3.5),
+    dpi            : int   = None,
+    **errorbar_kwargs,
+) -> tuple:
+    """
+    Plot fitted rise time vs. distance from the excitation spot.
+
+    One point per measurement location, e.g. the ``tau_rise`` of a
+    :class:`~tmdc_optics_tools.fitting.SparseLifetimeResult` against that
+    spot's distance from the excitation laser.
+
+    Parameters
+    ----------
+    distances : array-like
+        Distance of each spot from the excitation laser (µm).
+    rise_times : array-like
+        Fitted rise time for each spot (ns).
+    rise_time_errs : array-like, optional
+        Per-spot rise time uncertainty, drawn as error bars.
+    labels : sequence of str, optional
+        Per-point legend label (e.g. spot name).
+    ax : matplotlib.axes.Axes, optional
+    **errorbar_kwargs
+        Forwarded to every ``ax.errorbar`` call, e.g. ``fmt``, ``capsize``,
+        ``color``.
+
+    Returns
+    -------
+    fig, ax, artists
+        *artists* is the list of ``ErrorbarContainer`` objects, one per
+        point, in *distances* order — restyle or re-label individual points
+        through these rather than re-plotting.
+    """
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.get_figure()
+
+    distances  = np.asarray(distances, dtype=float)
+    rise_times = np.asarray(rise_times, dtype=float)
+    errs   = np.zeros_like(distances) if rise_time_errs is None else np.asarray(rise_time_errs, dtype=float)
+    labels = [None] * len(distances) if labels is None else list(labels)
+
+    errorbar_kwargs.setdefault("fmt", "o")
+    errorbar_kwargs.setdefault("capsize", 3)
+
+    artists = [
+        ax.errorbar(d, t, yerr=e, label=lbl, **errorbar_kwargs)
+        for d, t, e, lbl in zip(distances, rise_times, errs, labels)
+    ]
+
+    ax.set_xlabel("Distance from excitation spot (µm)")
+    ax.set_ylabel("Rise time (ns)")
+    if any(labels):
+        ax.legend(frameon=False, fontsize=8)
+    return fig, ax, artists
 
 
 # ---------------------------------------------------------------------------
@@ -1785,6 +2135,307 @@ class SpectrumLinePanel(AnimationPanel):
             self._title.set_text(self._frame_title(frame))
             updated.append(self._title)
         return tuple(updated)
+
+
+class NormalizedSpectrumPanel(AnimationPanel):
+    """
+    One spectrum per frame, each normalized to its own range, coloured by
+    the global peak-intensity scale.
+
+    :class:`SpectrumLinePanel` fixes one shared y-axis across every frame,
+    which is the right choice when comparing absolute intensity is the
+    point. Here it is not: a weak frame would otherwise be flattened to a
+    sliver next to a bright one. Each spectrum is instead normalized to its
+    own [0, 1] range (:func:`~tmdc_optics_tools.processing.normalise_minmax`)
+    so every frame fills the same vertical extent — and the intensity that
+    normalizing throws away is put back as the line's *colour*, via a
+    colormap spanning the peak intensity's *global* range across every
+    frame, not each frame's own max, which would erase the same information
+    the height normalization already erased.
+
+    Parameters
+    ----------
+    scan : AttoCubeSpectralSweep (or any object exposing ``energy``/
+        ``wavelength`` plus ``best_energy_spectra``/``spectra`` of shape
+        ``(n_pixels, n_sweeps)``)
+    x_axis : {"energy", "wavelength"}
+    secondary_x_axis : bool
+        Add the other of energy/wavelength as a secondary top axis, via
+        :func:`~tmdc_optics_tools.processing.energy_to_wavelength` /
+        :func:`~tmdc_optics_tools.processing.wavelength_to_energy`.
+    cmap : str or None
+        Colormap name passed to :func:`get_cmap`, mapping each frame's peak
+        intensity to a line colour, with a colorbar showing that scale.
+        ``None`` turns this encoding off entirely: no colorbar, and the line
+        keeps whatever colour :func:`set_style`/rcParams (or a caller
+        restyling the line returned by :meth:`update`) gives it, rather than
+        this panel overriding it every frame. This is a *different* setting
+        from a plain colour: ``cmap`` says a data channel (peak intensity) is
+        drawn through colour, ``None`` says it isn't — not a colour name.
+    smooth_window, smooth_poly : int or None
+        Forwarded to :func:`~tmdc_optics_tools.processing.smooth_savgol`,
+        run once per spectrum before either the colour metric or the
+        normalized curve is computed, so both reflect the same smoothed
+        data rather than two disagreeing versions of it. ``smooth_window=None``
+        skips smoothing.
+    colorbar_label : str
+        Ignored when ``cmap=None``. Labelled as the *peak* of each frame,
+        not the trace's own intensity scale: the colour (and this colorbar)
+        is normalized over each frame's own maximum, not over the full
+        y-axis range the trace itself spans, so the two are different
+        quantities even though they share a unit.
+    sweep_attrs : str or list of str, optional
+        Per-sweep attribute name(s) shown in the frame label — e.g.
+        ``"scanner_y"``, or ``["scanner_x", "scanner_y"]`` for a 2-D
+        position scan. ``None`` (default) shows no label.
+    sweep_units : str or list of str
+        Matching unit(s) for *sweep_attrs*.
+
+    Attributes
+    ----------
+    colorbar : matplotlib.colorbar.Colorbar or None
+        Set by :meth:`init_artists`; ``None`` until then, and always
+        ``None`` when ``cmap=None``. Restyle through this handle (e.g.
+        ``panel.colorbar.set_label(...)``) rather than adding a parameter
+        for it.
+
+    Examples
+    --------
+    >>> panels = [
+    ...     ImageSequencePanel(wl_scan, title="White light"),
+    ...     ImageSequencePanel(pl_scan, title="Real-space PL"),
+    ...     NormalizedSpectrumPanel(
+    ...         spectra_scan, secondary_x_axis=True,
+    ...         sweep_attrs=["scanner_x", "scanner_y"],
+    ...     ),
+    ... ]
+    >>> fig, anim = animate_panels(panels)
+    """
+
+    def __init__(
+        self,
+        scan,
+        x_axis           : str   = "energy",
+        secondary_x_axis : bool  = False,
+        cmap             : str   = "inferno",
+        smooth_window          = 11,
+        smooth_poly      : int  = 3,
+        colorbar_label   : str  = "Peak intensity (counts)",
+        sweep_attrs             = None,
+        sweep_units             = "V",
+    ):
+        self.scan             = scan
+        self.x_axis           = x_axis
+        self.secondary_x_axis = secondary_x_axis
+        self.cmap             = get_cmap(cmap) if cmap is not None else None
+        self.smooth_window    = smooth_window
+        self.smooth_poly      = smooth_poly
+        self.colorbar_label   = colorbar_label
+
+        attrs = ([sweep_attrs] if isinstance(sweep_attrs, str)
+                 else list(sweep_attrs) if sweep_attrs else [])
+        units = ([sweep_units] * len(attrs) if isinstance(sweep_units, str)
+                 else list(sweep_units))
+        self.sweep_attrs = attrs
+        self.sweep_units = units
+
+        self.colorbar     = None
+        self._line        = None
+        self._norm        = None
+        self._normalized  = None
+        self._peaks       = None
+        self._sweep_vals  = None
+
+    @property
+    def n_frames(self) -> int:
+        return self.scan.n_sweeps
+
+    def init_artists(self, ax, n_frames: int) -> None:
+        x, xlabel = _resolve_x_axis(self.scan, self.x_axis)
+        y_full = (self.scan.best_energy_spectra if self.x_axis == "energy"
+                  else self.scan.spectra)
+        raw = np.asarray(y_full[:, :n_frames], dtype=float)
+
+        raw = processing.maybe_smooth(raw, self.smooth_window, self.smooth_poly, axis=0)
+
+        self._peaks      = raw.max(axis=0)
+        self._normalized = processing.normalise_minmax(raw, axis=0)
+        self._sweep_vals = [np.asarray(getattr(self.scan, attr))[:n_frames]
+                             for attr in self.sweep_attrs]
+
+        # A previous init_artists call (re-using this panel instance) would
+        # otherwise leave its colorbar in place, stacking a second one onto
+        # the figure alongside the new one.
+        if self.colorbar is not None:
+            self.colorbar.remove()
+            self.colorbar = None
+
+        if self.cmap is not None:
+            self._norm = Normalize(vmin=self._peaks.min(), vmax=self._peaks.max())
+            sm = ScalarMappable(cmap=self.cmap, norm=self._norm)
+            sm.set_array([])
+            self.colorbar = ax.figure.colorbar(sm, ax=ax, pad=0.02, label=self.colorbar_label)
+        else:
+            self._norm = None
+
+        ax.set_xlim(x.min(), x.max())
+        ax.set_ylim(0.0, 1.0)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(_signal_label(self.scan, normalized=True))
+
+        if self.secondary_x_axis:
+            other = "wavelength" if self.x_axis == "energy" else "energy"
+            _, other_label = _resolve_x_axis(self.scan, other)
+            convert_fn = (processing.energy_to_wavelength if self.x_axis == "energy"
+                          else processing.wavelength_to_energy)
+
+            def convert(v):
+                # secondary_xaxis's own tick/limit setup probes values outside
+                # the real data range, including 0, before syncing to the
+                # parent axes -- not a property of real energy/wavelength data.
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    return convert_fn(v)
+
+            secax = ax.secondary_xaxis("top", functions=(convert, convert))
+            secax.set_xlabel(other_label)
+
+        if self.cmap is not None:
+            (self._line,) = ax.plot(x, self._normalized[:, 0],
+                                     color=self.cmap(self._norm(self._peaks[0])))
+        else:
+            (self._line,) = ax.plot(x, self._normalized[:, 0])
+
+    def update(self, frame: int) -> tuple:
+        self._line.set_ydata(self._normalized[:, frame])
+        if self.cmap is not None:
+            self._line.set_color(self.cmap(self._norm(self._peaks[frame])))
+        return (self._line,)
+
+    def frame_label(self, frame: int):
+        if not self.sweep_attrs:
+            return None
+        parts = [
+            f"{attr} = {vals[frame]:.3g} {unit}".strip()
+            for attr, vals, unit in zip(self.sweep_attrs, self._sweep_vals, self.sweep_units)
+        ]
+        return ", ".join(parts)
+
+
+class TrimmedImageSequence:
+    """
+    A view over an existing image sequence, addressing a sub-range or
+    permutation of its frames.
+
+    Useful when a sequence needs trimming (e.g. one extra frame at the end
+    relative to a paired spectral sweep) or reordering, without loading
+    anything twice: :meth:`load_frame` is forwarded to *base_scan* by index.
+
+    Parameters
+    ----------
+    base_scan : object exposing ``load_frame(idx)``
+        E.g. :class:`~tmdc_optics_tools.loaders.AttoCubePLScanRealSpace`.
+    frame_indices : iterable of int
+        Which of *base_scan*'s frames to expose, and in what order — a
+        contiguous range trims, an arbitrary permutation reorders.
+
+    Examples
+    --------
+    >>> wl = TrimmedImageSequence(wl_scan, range(scan.n_sweeps))  # doctest: +SKIP
+    """
+
+    def __init__(self, base_scan, frame_indices):
+        self._base     = base_scan
+        self._indices  = list(frame_indices)
+        self.laser_ref = getattr(base_scan, "laser_ref", None)
+
+    @property
+    def n_frames(self) -> int:
+        return len(self._indices)
+
+    def load_frame(self, idx: int):
+        return self._base.load_frame(self._indices[idx])
+
+
+class GridImageSequence:
+    """
+    A pre-built ``(height, width, n_frames)`` stack, presented as an
+    :class:`ImageSequencePanel`-compatible sequence.
+
+    For a stack already reshaped or reordered outside any loader — e.g.
+    :meth:`~tmdc_optics_tools.loaders._AttoCubeSweep.as_image_grid` followed
+    by :func:`~tmdc_optics_tools.processing.reorder_grid` — rather than one
+    that still has a ``load_frame`` of its own to forward to, which is what
+    :class:`TrimmedImageSequence` is for.
+
+    Parameters
+    ----------
+    frames : np.ndarray, shape (height, width, n_frames)
+    laser_ref : AttoCubeLaserReferenceImage, optional
+    """
+
+    def __init__(self, frames, laser_ref=None):
+        self._frames   = frames
+        self.laser_ref = laser_ref
+
+    @property
+    def n_frames(self) -> int:
+        return self._frames.shape[-1]
+
+    def load_frame(self, idx: int):
+        return self._frames[:, :, idx]
+
+
+class GridSweep:
+    """
+    A spectral sweep's frames, reordered outside any loader, presented as a
+    :class:`NormalizedSpectrumPanel`-compatible scan.
+
+    For per-frame arrays already reshaped or reordered — e.g. via
+    :meth:`~tmdc_optics_tools.loaders._AttoCubeSweep.as_grid` followed by
+    :func:`~tmdc_optics_tools.processing.reorder_grid` — since the original
+    sweep object's own arrays are in the wrong order for that reordering to
+    apply to directly.
+
+    Parameters
+    ----------
+    base_scan : object exposing ``energy``/``wavelength``
+        Source of the axes, which do not depend on frame order and so are
+        taken as-is.
+    best_energy_spectra : np.ndarray, shape (n_pixels, n_frames), optional
+        Needed for a :class:`NormalizedSpectrumPanel` built with the default
+        ``x_axis="energy"``.
+    spectra : np.ndarray, shape (n_pixels, n_frames), optional
+        Needed only for ``x_axis="wavelength"``.
+    **sweep_attrs
+        Per-frame arrays, already reordered to match *best_energy_spectra*,
+        exposed under their given names — e.g. ``scanner_x=...`` for a
+        :class:`NormalizedSpectrumPanel`'s ``sweep_attrs=["scanner_x"]``.
+
+    Raises
+    ------
+    ValueError
+        If neither *best_energy_spectra* nor *spectra* is given — there
+        would then be no way to know ``n_sweeps``.
+    """
+
+    def __init__(self, base_scan, best_energy_spectra=None, spectra=None, **sweep_attrs):
+        self.energy    = base_scan.energy
+        self.wavelength = base_scan.wavelength
+
+        sized = best_energy_spectra if best_energy_spectra is not None else spectra
+        if sized is None:
+            raise ValueError(
+                "GridSweep needs best_energy_spectra, spectra, or both, to "
+                "know n_sweeps."
+            )
+        self.n_sweeps = sized.shape[-1]
+
+        if best_energy_spectra is not None:
+            self.best_energy_spectra = best_energy_spectra
+        if spectra is not None:
+            self.spectra = spectra
+        for name, value in sweep_attrs.items():
+            setattr(self, name, value)
 
 
 # Map output file extensions to the Matplotlib animation writer that handles
@@ -2347,6 +2998,173 @@ def animate_wl_pl_spectra(
     fig, anim = animate_panels(panels, save=save, **engine_kwargs)
     return fig, anim, panels
 
+
+def trim_to_sweep_count(image_scan, n_sweeps: int, auto_trim: bool = True):
+    """
+    Drop trailing frames beyond *n_sweeps*, warning when it happens.
+
+    The AttoCube acquisition can leave one extra frame (e.g. white light) at
+    the end of an image sequence relative to a paired spectral sweep. That is
+    what the exporter does, not a corrupted sequence.
+    :meth:`~.AttoCubeSpectralSweep.as_image_grid` and
+    :func:`animate_wl_pl_spectra_grid` both need an exact frame-count match,
+    so this is where that quirk gets handled, once, rather than at every call
+    site that runs into it.
+
+    Parameters
+    ----------
+    image_scan : object exposing ``n_frames`` and ``load_frame(idx)``
+        E.g. :class:`~tmdc_optics_tools.loaders.AttoCubePLScanRealSpace`.
+    n_sweeps : int
+        The frame count *image_scan* is expected to match.
+    auto_trim : bool
+        If ``image_scan`` has more frames than *n_sweeps*, wrap it in a
+        :class:`TrimmedImageSequence` keeping only the first *n_sweeps*, with
+        a ``UserWarning`` naming how many frames were dropped. ``False``
+        returns *image_scan* unchanged, so a caller that requires an exact
+        match (e.g. :meth:`~.AttoCubeSpectralSweep.as_image_grid`) raises its
+        own, more specific error instead.
+
+    Returns
+    -------
+    object
+        *image_scan* unchanged if its frame count already matches *n_sweeps*
+        or *auto_trim* is ``False``; otherwise a :class:`TrimmedImageSequence`
+        over it.
+    """
+    if image_scan.n_frames == n_sweeps:
+        return image_scan
+    if auto_trim and image_scan.n_frames > n_sweeps:
+        warnings.warn(
+            f"{type(image_scan).__name__} has {image_scan.n_frames} frames vs "
+            f"{n_sweeps} sweep points -- dropping {image_scan.n_frames - n_sweeps} "
+            f"frame(s) from the end.",
+            UserWarning, stacklevel=2,
+        )
+        return TrimmedImageSequence(image_scan, range(n_sweeps))
+    return image_scan  # let as_image_grid raise its own, more specific error
+
+
+def animate_wl_pl_spectra_grid(
+    scan,
+    wl               = None,
+    pl               = None,
+    inner_axis       : str  = "fast",
+    reverse_fast     : bool = False,
+    reverse_slow     : bool = False,
+    x_axis           : str  = "energy",
+    wl_cmap          : ColormapLike = "gray",
+    pl_cmap          : ColormapLike = "magma",
+    wl_title         : str  = "White light",
+    pl_title         : str  = "Real-space PL",
+    sweep_attrs             = ("scanner_x", "scanner_y"),
+    sweep_units             = "V",
+    secondary_x_axis : bool = True,
+    laser_style      : dict = None,
+    auto_trim        : bool = True,
+    save             : str  = None,
+    **engine_kwargs,
+) -> tuple:
+    """
+    Three-panel animation over a declared 2-D nest, played in a chosen order.
+
+    The nested-sweep sibling of :func:`animate_wl_pl_spectra`: that
+    function's :class:`SpectrumLinePanel` plays a flat sweep in file order
+    and needs no reordering, while a 2-D raster needs *inner_axis* /
+    *reverse_fast* / *reverse_slow* to say what traversal order to play it
+    in. Its spectrum panel is a :class:`NormalizedSpectrumPanel` (each frame
+    normalized to its own range, colour-coded by peak intensity) rather than
+    a :class:`SpectrumLinePanel` (one shared y-axis), since a position
+    raster's brightness commonly spans more than one order of magnitude,
+    which a shared axis would flatten most frames to a sliver.
+
+    Parameters
+    ----------
+    scan : AttoCubeSpectralSweep
+        Must carry a declared nest (``fast_sweep=`` / ``slow_sweep=`` at load
+        time) — raises the same way :meth:`~.AttoCubeSpectralSweep.as_grid`
+        does otherwise.
+    wl, pl : AttoCubePLScanRealSpace, optional
+        White-light and real-space-PL image sequences, one frame per *scan*
+        sweep point. Omit one (leave it ``None``) and the figure drops to two
+        (or one) panels, the same convention as :func:`animate_wl_pl_spectra`.
+        Each must already share *scan*'s ``laser_ref``, if any — read off
+        the sequence itself, not a separate parameter here.
+    inner_axis : {"fast", "slow"}
+        Which nest axis varies fastest during playback. ``"fast"`` (default)
+        reproduces the order the data was written in.
+    reverse_fast, reverse_slow : bool
+        Traverse that axis in decreasing order instead of increasing; the two
+        combine independently of each other and of *inner_axis*.
+    x_axis : {"energy", "wavelength"}
+        Spectrum panel x-axis.
+    wl_cmap, pl_cmap, wl_title, pl_title : str
+        As :func:`animate_wl_pl_spectra`.
+    sweep_attrs, sweep_units : str or list of str
+        Forwarded to :class:`NormalizedSpectrumPanel`'s own ``sweep_attrs`` /
+        ``sweep_units``, for the per-frame position label. Default to both
+        nest axes.
+    secondary_x_axis : bool
+        As :class:`NormalizedSpectrumPanel`.
+    laser_style : dict, optional
+        Forwarded to both image :class:`ImageSequencePanel`\\ s, as
+        :func:`animate_wl_pl_spectra`'s own *laser_style*.
+    auto_trim : bool
+        An image sequence with more frames than ``scan.n_sweeps`` is trimmed
+        to the first ``scan.n_sweeps`` — the AttoCube exporter can write one
+        frame more than its paired sweep — with a ``UserWarning``
+        naming how many frames were dropped. ``False`` raises instead, via
+        :meth:`~.AttoCubeSpectralSweep.as_image_grid`'s own error.
+    save : str, optional
+        As :func:`animate_wl_pl_spectra`.
+    **engine_kwargs
+        Forwarded to :func:`animate_panels` (e.g. ``interval_ms``, ``writer``).
+
+    Returns
+    -------
+    fig, anim
+
+    See Also
+    --------
+    animate_wl_pl_spectra : the flat-sweep counterpart.
+    """
+    laser_style = laser_style or {}
+    # NormalizedSpectrumPanel itself accepts sweep_units as a single string or a
+    # per-attribute list -- only sweep_attrs needs expanding here, to index
+    # axis_grids below.
+    sweep_attrs = [sweep_attrs] if isinstance(sweep_attrs, str) else list(sweep_attrs)
+    order_kwargs = dict(inner_axis=inner_axis, reverse_fast=reverse_fast, reverse_slow=reverse_slow)
+
+    spectra_key  = "best_energy_spectra" if x_axis == "energy" else "spectra"
+    spectra_grid = scan.as_grid(getattr(scan, spectra_key))
+    axis_grids   = {attr: scan.as_grid(np.asarray(getattr(scan, attr))) for attr in sweep_attrs}
+
+    panels = []
+    for image_scan, title, cmap in ((wl, wl_title, wl_cmap), (pl, pl_title, pl_cmap)):
+        if image_scan is None:
+            continue
+        image_scan = trim_to_sweep_count(image_scan, scan.n_sweeps, auto_trim)
+        image_grid = scan.as_image_grid(image_scan)
+        panels.append(ImageSequencePanel(
+            GridImageSequence(processing.reorder_grid(image_grid, **order_kwargs),
+                               laser_ref=getattr(image_scan, "laser_ref", None)),
+            title=title, cmap=cmap, **laser_style,
+        ))
+
+    panels.append(NormalizedSpectrumPanel(
+        GridSweep(
+            scan,
+            **{spectra_key: processing.reorder_grid(spectra_grid, **order_kwargs)},
+            **{attr: processing.reorder_grid(grid, **order_kwargs)
+               for attr, grid in axis_grids.items()},
+        ),
+        x_axis=x_axis, secondary_x_axis=secondary_x_axis,
+        sweep_attrs=sweep_attrs, sweep_units=sweep_units,
+    ))
+
+    return animate_panels(panels, save=save, **engine_kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Diffusion cloud — shared helpers
 # ---------------------------------------------------------------------------
@@ -2458,8 +3276,13 @@ def plot_diffusion_cloud(
 
     Parameters
     ----------
-    image : np.ndarray or object with ``.img``
-        Raw 2-D PL image.
+    image : np.ndarray, str, pathlib.Path, or _AttoCubeImage
+        2-D PL image, forwarded as-is to
+        :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_cloud` when
+        *result* is ``None`` (same accepted types — see that function).
+        Ignored when *result* is supplied: display then uses
+        :attr:`~tmdc_optics_tools.diffusion.DiffusionResult.image` from
+        *result* itself, so the two never disagree about what was analysed.
     result : DiffusionResult, optional
         Pre-computed result from :func:`~tmdc_optics_tools.diffusion.analyse_diffusion_cloud`.
         When ``None`` the analysis is run here with the remaining kwargs.
@@ -2505,11 +3328,13 @@ def plot_diffusion_cloud(
     """
     from . import diffusion as _diffusion
 
-    img = image.img if hasattr(image, "img") else np.asarray(image, float)
-
     if result is None:
+        # Pass the image object/path/array straight through -- _load_image
+        # already knows to use an _AttoCubeImage's *raw* array so that the
+        # bg_region below is the only subtraction that happens. Handing it
+        # an already-corrected `.img` here would subtract twice.
         result = _diffusion.analyse_diffusion_cloud(
-            img,
+            image,
             threshold    = threshold,
             smooth_sigma = smooth_sigma,
             keep_largest = keep_largest,
@@ -2525,7 +3350,7 @@ def plot_diffusion_cloud(
     else:
         fig = ax.get_figure()
 
-    im = ax.imshow(img, cmap=get_cmap(cmap), origin="upper")
+    im = ax.imshow(result.image, cmap=get_cmap(cmap), origin="upper")
 
     for contour in result.contours:
         ax.plot(contour[:, 1], contour[:, 0], color=contour_color,

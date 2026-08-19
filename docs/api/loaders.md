@@ -2,7 +2,8 @@
 
 Data loaders for device geometry and AttoCube confocal scans — spectral sweeps
 over any scanned parameter, time-resolved PL, real-space image sequences, and
-single spectra or images.
+single spectra or images — plus a separate loader for single Raman spectra
+from a LabRAM-style ``.txt`` export, unrelated to the AttoCube instrument.
 
 The two sweep classes share a private base and differ only in their measured
 axis, which is the whole reason they are separate:

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted |
+| **Status** | Accepted · extended by [0025](0025-plot-image-carries-its-colorbar.md) |
 | **Date** | 2026-08-19 |
 
 ## Context

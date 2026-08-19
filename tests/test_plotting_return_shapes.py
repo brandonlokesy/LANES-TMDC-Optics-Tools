@@ -71,7 +71,7 @@ def _close_figures():
 EXPECTED_FIELDS = {
     plotting.SpectrumPlot:       ("fig", "ax", "line", "ax_twin"),
     plotting.CurrentPlot:        ("fig", "ax_left", "ax_right", "lines"),
-    plotting.ImagePlot:          ("fig", "ax", "im", "circle"),
+    plotting.ImagePlot:          ("fig", "ax", "im", "circle", "cb"),
     plotting.SpectralSeriesPlot: ("fig", "ax", "cb", "lines", "ax_twin"),
 }
 
@@ -113,8 +113,9 @@ def test_an_image_return_unpacks_positionally(image):
     res = plotting.plot_image(image)
     assert isinstance(res, tuple)
     assert type(res) is plotting.ImagePlot
-    fig, ax, im, circle = res
-    assert (fig, ax, im, circle) == (res.fig, res.ax, res.im, res.circle)
+    fig, ax, im, circle, cb = res
+    assert (fig, ax, im, circle, cb) == (res.fig, res.ax, res.im,
+                                         res.circle, res.cb)
 
 
 def test_a_current_return_unpacks_positionally(gated_scan):
@@ -153,6 +154,10 @@ def test_the_image_members_hold_what_their_names_say(image):
     assert isinstance(res.fig, Figure)
     assert isinstance(res.ax, Axes)
     assert isinstance(res.im, AxesImage)
+    assert isinstance(res.cb, Colorbar)
+    # Matplotlib's own back-reference must agree with the member: one colorbar,
+    # reachable either way.
+    assert res.im.colorbar is res.cb
 
 
 def test_the_current_members_hold_what_their_names_say(gated_scan):
@@ -175,8 +180,9 @@ def test_the_conjugate_axis_is_none_when_it_was_not_drawn(scan):
     assert plotting.plot_spectrum(scan, index=0).ax_twin is None
 
 
-def test_the_colorbar_is_none_when_it_was_not_drawn(scan):
+def test_the_colorbar_is_none_when_it_was_not_drawn(scan, image):
     assert plotting.plot_spectral_series(scan, colorbar=False).cb is None
+    assert plotting.plot_image(image, colorbar=False).cb is None
 
 
 def test_the_laser_circle_is_none_when_it_was_not_drawn(image):

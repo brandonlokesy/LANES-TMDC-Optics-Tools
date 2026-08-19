@@ -193,9 +193,10 @@ class _FakeImage:
 
 
 def test_plot_image_annotates_from_the_image_reference():
-    fig, ax, im, circle = plotting.plot_image(
+    plot = plotting.plot_image(
         _FakeImage(laser_ref=_FakeLaserRef()), laser_annotation=True,
     )
+    fig, ax, circle = plot.fig, plot.ax, plot.circle
     fig.canvas.draw()
 
     assert _circles(ax) == [circle]
@@ -209,11 +210,12 @@ def test_plot_image_explicit_ref_overrides_the_image_reference():
     class _Other:
         center_x, center_y, radius = 3.0, 4.0, 1.5
 
-    fig, ax, im, circle = plotting.plot_image(
+    plot = plotting.plot_image(
         _FakeImage(laser_ref=_FakeLaserRef()),
         laser_annotation = True,
         laser_ref        = _Other(),
     )
+    fig, circle = plot.fig, plot.circle
     fig.canvas.draw()
 
     assert circle.get_center() == (_Other.center_x, _Other.center_y)
@@ -221,7 +223,8 @@ def test_plot_image_explicit_ref_overrides_the_image_reference():
 
 
 def test_plot_image_no_circle_when_annotation_disabled():
-    fig, ax, im, circle = plotting.plot_image(_FakeImage(laser_ref=_FakeLaserRef()))
+    plot = plotting.plot_image(_FakeImage(laser_ref=_FakeLaserRef()))
+    fig, ax, circle = plot.fig, plot.ax, plot.circle
     fig.canvas.draw()
 
     assert circle is None
@@ -234,9 +237,10 @@ def test_plot_image_laser_ref_alone_draws_nothing():
     reference, it does not enable the overlay. Pinned so the documented gating
     rule is not quietly "fixed" into an implicit enable.
     """
-    fig, ax, im, circle = plotting.plot_image(
+    plot = plotting.plot_image(
         _FakeImage(), laser_ref=_FakeLaserRef(),
     )
+    fig, ax, circle = plot.fig, plot.ax, plot.circle
     fig.canvas.draw()
 
     assert circle is None
@@ -245,9 +249,10 @@ def test_plot_image_laser_ref_alone_draws_nothing():
 
 def test_plot_image_bare_array_with_annotation_does_not_raise():
     """A plain ndarray has no ``laser_ref``; the getattr fallback must hold."""
-    fig, ax, im, circle = plotting.plot_image(
+    plot = plotting.plot_image(
         np.zeros(SHAPE), laser_annotation=True,
     )
+    fig, ax, circle = plot.fig, plot.ax, plot.circle
     fig.canvas.draw()
 
     assert circle is None
@@ -266,7 +271,7 @@ def test_plot_image_draws_into_a_supplied_grid_axes():
         plotting.plot_image(
             _FakeImage(laser_ref=_FakeLaserRef()), ax=ax,
             colorbar=False, show_axes=False, laser_annotation=True,
-        )[3]
+        ).circle
         for ax in axes.ravel()
     ]
     fig.canvas.draw()

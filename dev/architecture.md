@@ -1135,7 +1135,7 @@ with the arguments.
 |---|---|---|
 | `plot_spectrum` | `SpectrumPlot` | `ax_twin` |
 | `plot_current` | `CurrentPlot` | — |
-| `plot_image` | `ImagePlot` | `circle` |
+| `plot_image` | `ImagePlot` | `circle`, `cb` |
 | `plot_spectral_series` | `SpectralSeriesPlot` | `cb`, `ax_twin` |
 
 **The return contract *is* the styling API.** `line.set_color("k")`,

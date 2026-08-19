@@ -244,7 +244,7 @@ class ImagePlot(NamedTuple):
     """
     What :func:`plot_image` drew.
 
-    A tuple, so ``fig, ax, im, circle = plot_image(...)`` unpacks, with names for
+    A tuple, so ``fig, ax, im, circle, cb = plot_image(...)`` unpacks, with names for
     reaching one member without counting positions.
 
     Attributes
@@ -256,11 +256,14 @@ class ImagePlot(NamedTuple):
     circle : matplotlib.patches.Circle or None
         The laser-boundary overlay, ``None`` when none was drawn.  Carried so it can
         be restyled without a parameter per property.
+    cb : matplotlib.colorbar.Colorbar or None
+        ``None`` when the plot was drawn with ``colorbar=False``.
     """
     fig    : object
     ax     : object
     im     : object
     circle : object
+    cb     : object
 
 
 class SpectralSeriesPlot(NamedTuple):
@@ -1113,7 +1116,8 @@ def plot_image(
     cmap : str, Colormap, or sequence of colours
         Passed to :func:`get_cmap`.
     colorbar : bool
-        Show a colorbar alongside the image.
+        Show a colorbar alongside the image.  ``False`` leaves the returned ``cb``
+        member ``None``.
     colorbar_label : str, optional
         Colour-bar label.  Defaults to "Intensity (counts)", or
         "Intensity (norm.)" when *rescale_img*; a plain 2-D array carries no
@@ -1141,7 +1145,8 @@ def plot_image(
     Returns
     -------
     ImagePlot
-        Named 4-tuple of the figure, axes, image and laser-boundary circle.
+        Named 5-tuple of the figure, axes, image, laser-boundary circle and
+        colorbar.
     """
     img = image.img if hasattr(image, "img") else np.asarray(image)
 
@@ -1168,13 +1173,14 @@ def plot_image(
     circle = (_draw_laser_circle(ax, _lr, ls="--")
               if laser_annotation and _lr is not None else None)
 
+    cb = None
     if colorbar:
         cb = fig.colorbar(im, ax=ax, pad=0.02)
         cb.set_label(colorbar_label if colorbar_label is not None
                      else ("Intensity (norm.)" if rescale_img
                            else "Intensity (counts)"))
 
-    return ImagePlot(fig, ax, im, circle)
+    return ImagePlot(fig, ax, im, circle, cb)
 
 
 def _format_frame_title(

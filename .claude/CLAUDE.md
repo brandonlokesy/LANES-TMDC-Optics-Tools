@@ -261,9 +261,11 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
   direction — it refuses, and `[::-1]` is reverse playback.
 - Don't label a peak colour bar with the y-axis label; the two span different ranges.
 - Don't unwind a `<Thing>Plot` return to a bare tuple, swap one for a dataclass, or
-  reorder its fields — callers unpack positionally, so a reorder is silent. Don't
+  reorder its fields — callers unpack positionally, so a reorder is silent. A new
+  member is **appended**, never inserted, even to match another class's order. Don't
   shorten a return when a member is `None`, and don't reach an artist off `ax` instead
   of returning it.
+- Don't drop `ImagePlot.cb` on the grounds that `im.colorbar` already reaches it.
 
 ## Known issues — check before "helpfully" fixing
 

@@ -105,7 +105,9 @@ authoritative before relying on version-specific syntax.
 - Relative imports within the package (`from . import processing`).
 - `loaders` = I/O + geometry; `processing` = pure array functions; `fitting` returns
   dataclasses; `plotting` returns `(fig, ax, <artist>)` and never calls `plt.show()`.
-  A function that draws several artists returns all of them.
+  A function that draws several artists returns all of them. Past that shape the
+  return is a `NamedTuple` named `<Thing>Plot` — still a tuple, so it unpacks, with
+  the members named. An absent artist is a `None` member, never a shorter return.
 - Plotting must not re-implement maths that belongs in `processing`.
 - **Raw arrays are never mutated after load.** `scan.spectra` is the untouched file
   contents; corrections produce new arrays.
@@ -258,6 +260,10 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
 - Don't make `frame_window` swap reversed endpoints, or read them along the axis'
   direction — it refuses, and `[::-1]` is reverse playback.
 - Don't label a peak colour bar with the y-axis label; the two span different ranges.
+- Don't unwind a `<Thing>Plot` return to a bare tuple, swap one for a dataclass, or
+  reorder its fields — callers unpack positionally, so a reorder is silent. Don't
+  shorten a return when a member is `None`, and don't reach an artist off `ax` instead
+  of returning it.
 
 ## Known issues — check before "helpfully" fixing
 

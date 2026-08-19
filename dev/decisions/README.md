@@ -121,5 +121,6 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0020](0020-plot-image-annotates-and-returns-the-circle.md) | `plot_image` carries the laser annotation, and returns the circle it drew | 2026-08-18 | Accepted |
 | [0021](0021-the-conjugate-axis-has-one-implementation.md) | The conjugate spectral axis has one implementation, and a plot returns the one it drew | 2026-08-18 | Accepted |
 | [0022](0022-the-animation-wrapper-returns-its-panels.md) | The animation wrapper forwards one dict to its spectrum panel, and returns its panels | 2026-08-18 | Accepted |
+| [0023](0023-the-cosmic-ray-fill-ignores-flagged-pixels.md) | The cosmic-ray replacement median ignores the pixels it is repairing | 2026-08-18 | Accepted |
 
 This table is the one mutable part of the folder.

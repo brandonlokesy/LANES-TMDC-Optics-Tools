@@ -107,7 +107,7 @@ def test_colorbar_follows_spectra_type(csv_path, spectra_type):
 @pytest.mark.parametrize("spectra_type", sorted(SIGNAL_LABELS))
 def test_ylabel_follows_spectra_type(csv_path, spectra_type):
     scan = _scan(csv_path, spectra_type)
-    _, ax, _ = plotting.plot_spectrum(scan, 0)
+    _, ax, _, _ = plotting.plot_spectrum(scan, index=0)
     assert ax.get_ylabel() == scan.signal_label
 
 
@@ -156,8 +156,8 @@ def test_spectral_map_override_is_verbatim(csv_path, rescale_img):
 @pytest.mark.parametrize("normalize", [False, True])
 def test_spectrum_override_is_verbatim(csv_path, normalize):
     scan = _scan(csv_path, "PL")
-    _, ax, _ = plotting.plot_spectrum(scan, 0, ylabel=CUSTOM,
-                                      normalize=normalize)
+    _, ax, _, _ = plotting.plot_spectrum(scan, index=0, ylabel=CUSTOM,
+                                         normalize=normalize)
     assert ax.get_ylabel() == CUSTOM
 
 
@@ -169,25 +169,25 @@ def test_single_spectrum_override_is_verbatim(single_spectrum, normalize):
 
 
 @pytest.mark.parametrize("spectrum_offset", [0.0, 5.0])
-def test_power_series_override_is_verbatim(csv_path, spectrum_offset):
+def test_spectral_series_override_is_verbatim(csv_path, spectrum_offset):
     scan = _scan(csv_path, "PL")
-    _, ax, _, _ = plotting.plot_power_series(
-        scan, ylabel=CUSTOM, spectrum_offset=spectrum_offset)
+    ax = plotting.plot_spectral_series(
+        scan, ylabel=CUSTOM, spectrum_offset=spectrum_offset).ax
     assert ax.get_ylabel() == CUSTOM
 
 
 @pytest.mark.parametrize("rescale_img", [False, True])
 def test_plot_image_honours_label_when_rescaled(rescale_img):
     """plot_image used to discard the argument whenever rescale_img was set."""
-    _, _, im = plotting.plot_image(
+    im = plotting.plot_image(
         np.arange(16.0).reshape(4, 4), colorbar_label=CUSTOM,
-        rescale_img=rescale_img)
+        rescale_img=rescale_img).im
     assert im.colorbar.ax.get_ylabel() == CUSTOM
 
 
 def test_plot_image_default_still_marks_rescaling():
-    _, _, im = plotting.plot_image(np.arange(16.0).reshape(4, 4),
-                                   rescale_img=True)
+    im = plotting.plot_image(np.arange(16.0).reshape(4, 4),
+                             rescale_img=True).im
     assert im.colorbar.ax.get_ylabel() == "Intensity (norm.)"
 
 
@@ -195,32 +195,32 @@ def test_plot_image_default_still_marks_rescaling():
 # Contrast is a different quantity from the raw signal
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("source", ["contrast", "contrast_wavelength"])
-def test_contrast_source_uses_contrast_label(contrast_scan, source):
-    x_axis = "energy" if source == "contrast" else "wavelength"
-    _, ax, _, _ = plotting.plot_power_series(
-        contrast_scan, spectra_source=source, x_axis=x_axis)
+@pytest.mark.parametrize("x_axis", ["energy", "wavelength"])
+def test_contrast_source_uses_contrast_label(contrast_scan, x_axis):
+    # One source name, either axis: the label follows the quantity, not the axis.
+    ax = plotting.plot_spectral_series(
+        contrast_scan, spectra_source="contrast", x_axis=x_axis).ax
     assert ax.get_ylabel() == contrast_scan.contrast_label
     assert "counts" not in ax.get_ylabel()
 
 
 def test_raw_source_keeps_the_signal_label(contrast_scan):
-    _, ax, _, _ = plotting.plot_power_series(contrast_scan,
-                                             spectra_source="energy")
+    ax = plotting.plot_spectral_series(contrast_scan,
+                                       spectra_source="raw").ax
     assert ax.get_ylabel() == contrast_scan.signal_label
     assert ax.get_ylabel() == "Reflected intensity (counts)"
 
 
 def test_contrast_source_offset_drops_no_unit(contrast_scan):
     """A dimensionless signal has no unit to drop, so it is only marked shifted."""
-    _, ax, _, _ = plotting.plot_power_series(
-        contrast_scan, spectra_source="contrast", spectrum_offset=0.01)
+    ax = plotting.plot_spectral_series(
+        contrast_scan, spectra_source="contrast", spectrum_offset=0.01).ax
     assert ax.get_ylabel() == f"{contrast_scan.contrast_label} (offset)"
 
 
 def test_intensity_offset_marks_arbitrary_units(csv_path):
     scan = _scan(csv_path, "PL")
-    _, ax, _, _ = plotting.plot_power_series(scan, spectrum_offset=5.0)
+    ax = plotting.plot_spectral_series(scan, spectrum_offset=5.0).ax
     assert ax.get_ylabel() == "PL intensity (a.u., offset)"
 
 
@@ -248,7 +248,7 @@ def test_panel_ylabel_defaults_to_the_scan(csv_path):
     scan = _scan(csv_path, "R")
     panel = plotting.SpectrumLinePanel(scan, sweep_attr="scanner_y")
     fig, ax = plt.subplots()
-    panel.init_artists(ax, panel.n_frames)
+    panel.init_artists(ax, range(panel.n_frames))
     assert ax.get_ylabel() == scan.signal_label
 
 
@@ -257,5 +257,31 @@ def test_panel_ylabel_override_is_verbatim(csv_path):
     panel = plotting.SpectrumLinePanel(scan, sweep_attr="scanner_y",
                                        ylabel=CUSTOM)
     fig, ax = plt.subplots()
-    panel.init_artists(ax, panel.n_frames)
+    panel.init_artists(ax, range(panel.n_frames))
     assert ax.get_ylabel() == CUSTOM
+
+
+def test_panel_colorbar_label_says_it_is_a_peak(csv_path):
+    """
+    The bar spans the range of per-frame *peaks* while the y-axis spans the full
+    data range, so labelling both the same would put identical words on two scales
+    that disagree.
+    """
+    scan = _scan(csv_path, "R")
+    panel = plotting.SpectrumLinePanel(scan, sweep_attr="scanner_y", cmap="viridis")
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+
+    assert panel.colorbar.ax.get_ylabel() == f"Peak {scan.signal_label}"
+    assert panel.colorbar.ax.get_ylabel() != ax.get_ylabel()
+
+
+def test_panel_colorbar_label_override_is_verbatim(csv_path):
+    """No "Peak " prefix on a caller's string — nothing is ever appended to one."""
+    scan = _scan(csv_path, "R")
+    panel = plotting.SpectrumLinePanel(scan, sweep_attr="scanner_y",
+                                       cmap="viridis", colorbar_label=CUSTOM)
+    fig, ax = plt.subplots()
+    panel.init_artists(ax, range(panel.n_frames))
+
+    assert panel.colorbar.ax.get_ylabel() == CUSTOM

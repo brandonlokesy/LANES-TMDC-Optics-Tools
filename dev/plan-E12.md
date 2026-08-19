@@ -3,7 +3,7 @@
 Written 2026-08-04. This is a **plan**, not a record of landed work: the code
 described here was implemented, verified, and then reverted at the author's
 request so it can land deliberately rather than as one large pass. Finding E12
-itself is in `audit-2026-07.md`; this file is the fix, in enough detail to
+itself is in `defects.md`; this file is the fix, in enough detail to
 re-apply mechanically.
 
 Status of the tree when this was written: the `plot_pl_map_Vab_scan` →
@@ -252,11 +252,33 @@ plot_spectral_map(scan, colorbar_label=r"$\Delta R/R_0$") # exactly that
 
 ## Step 3 — the renames
 
+**Do the `plot_current` bullet first.** E15 (2026-08-07) already changed that
+function once — `color_ich1` / `color_ich2` deleted, `lines` appended to the return —
+and this step changes it again. Both are breaking; landing them apart breaks callers
+twice over one function.
+
 - **`plot_current(ef_axis=True)` → `sweep_axis=True`.** Body becomes
   `x, xlabel = scan.sweep_axis, scan.sweep_axis_label`, with
   `np.arange(scan.n_sweeps)` / `"Sweep index"` when `False`. The `False` branch
   is not dead weight: the index is the useful reading when the sweep is
   non-monotonic, e.g. a raster flattened into one file (cf. A8).
+
+  Current signature, after E15 — the `ef_axis` line is the only one this bullet
+  touches, and the `scan.ef` branch it names is the block the new body replaces:
+
+  ```python
+  def plot_current(scan, ax=None, figsize=(6, 3.5), dpi=None,
+                   ef_axis=True, color_power="C2") -> tuple:
+      ...
+      return fig, ax_left, ax_right, lines
+  ```
+
+  Two things E15 changed that this bullet must not undo. The current traces are
+  built by looping the declared roles (`i_top`, `i_bot`, `i_channel`) and skipping
+  those the scan refuses, then raising if none survived — that loop stays. And
+  **the function now requires `gates=`**, so any test fixture for it needs a
+  declared mapping; without one a current row cannot be attributed to an electrode
+  and every role raises. `color_power` survives here and is still owed to E11.
 - **`plot_spectrum`'s legend default** — drop the hand-rolled `E_F`/`V_top`
   branch for `_sweep_value_label`.
 - **`SpectrumLinePanel`** — `sweep_attr`, `sweep_label`, `sweep_unit`, `ylabel`
@@ -283,7 +305,7 @@ pre-built sweep with `sweep="piezo_y"`. Say so in the `spectra` docstring entry.
 
 ### Correction owed to the audit
 
-The E12 entry in `audit-2026-07.md` calls the old `sweep_unit="V"` default "a position
+The E12 entry in `defects.md` calls the old `sweep_unit="V"` default "a position
 default carrying a voltage unit, **wrong** before this rewrite and now
 redundant". The 2026-08-04 answer that the scanner rows carry piezo *drive
 voltage* makes it not wrong — only redundant. Fix that line when this lands.
@@ -412,8 +434,8 @@ from `test_contrast`.
 
 Two gotchas found the hard way, recorded so they are not rediscovered:
 
-- `plot_power_series` returns `(fig, ax, cb, lines)`, not the module's usual
-  3-tuple.
+- `plot_spectral_series` (named `plot_power_series` when this was written) returns
+  `(fig, ax, cb, lines, ax_twin)`, not the module's usual 3-tuple.
 - `pcolormesh` with `shading="auto"` resolves to `"nearest"` for equal-shaped
   X/Y/C, so `mesh._coordinates` holds cell *edges* — outer edges extrapolated
   half a cell beyond the data. Averaging adjacent edges recovers the centres.

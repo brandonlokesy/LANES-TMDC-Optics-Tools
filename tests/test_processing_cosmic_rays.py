@@ -103,6 +103,72 @@ def test_three_pixel_spike_needs_iteration():
     assert one_pass.sum() < converged.sum()
 
 
+@pytest.mark.parametrize("width", [1, 2, 3, 4, 5, 6])
+def test_spike_of_any_width_up_to_the_window_is_removed(width):
+    """
+    Every pixel of the spike is flagged and put back on the local baseline, for any
+    width the default window can still find an unflagged neighbour for.
+
+    The replacement median ignores the flagged pixels.  Were it taken over the whole
+    window, it would be drawn from the spike itself as soon as half the window was
+    flagged -- from *width* 4 at the default ``median_window=7`` -- and the plateau
+    it produced would then survive every later pass.
+    """
+    clean = _spectrum()
+    data  = clean.copy()
+    spike = slice(300, 300 + width)
+    data[spike] += 3000.0
+
+    cleaned, mask = remove_cosmic_rays(data, max_iter=10)
+
+    assert mask[spike].all()                                    # no interior left behind
+    assert not mask[:295].any() and not mask[320:].any()        # and nothing else flagged
+    assert np.abs(cleaned[spike] - clean[spike]).max() < 5 * NOISE
+
+
+def _curved_spike(centre=304, width=9, amp=3000.0):
+    """
+    A cosmic ray *width* pixels wide with curvature at every pixel, so all of them
+    are individually detectable.  A flat-topped spike hides its interior from the
+    Laplacian instead, which is a different limit (see the module docstring).
+    """
+    x = np.arange(N_PIX)
+    return amp * np.exp(-((x - centre) / (width / 4.5)) ** 2)
+
+
+def test_run_wider_than_the_window_warns_and_keeps_its_raw_values():
+    """
+    A flagged run at least ``median_window`` wide leaves its centre with no
+    unflagged neighbour, so no median exists for it.  Those pixels keep their raw
+    values and the caller is told which, rather than the repair half-working with
+    nothing said.
+    """
+    clean  = _spectrum()
+    data   = clean + _curved_spike(width=9)      # 9 px, wider than median_window=7
+    centre = slice(303, 306)
+
+    with pytest.warns(UserWarning, match="median_window"):
+        cleaned, mask = remove_cosmic_rays(data, median_window=7, max_iter=10)
+
+    assert mask[300:309].all()                            # all nine detected
+    assert np.array_equal(cleaned[centre], data[centre])  # centre could not be filled
+    # The pixels that did have a clean neighbour were still repaired.
+    assert np.abs(cleaned[300:303] - clean[300:303]).max() < 5 * NOISE
+
+
+def test_a_wide_enough_window_repairs_the_same_run(recwarn):
+    """The warning names a larger median_window as the remedy, so it has to work."""
+    clean = _spectrum()
+    data  = clean + _curved_spike(width=9)
+    spike = slice(300, 309)
+
+    cleaned, mask = remove_cosmic_rays(data, median_window=15, max_iter=10)
+
+    assert mask[spike].all()
+    assert np.abs(cleaned[spike] - clean[spike]).max() < 5 * NOISE
+    assert not [w for w in recwarn if "median_window" in str(w.message)]
+
+
 def test_broad_peak_and_noise_are_left_alone():
     """A real PL peak is many pixels wide and must survive untouched."""
     clean = _spectrum()

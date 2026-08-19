@@ -119,22 +119,30 @@ def test_broad_peak_is_left_alone(csv_path):
 # ---------------------------------------------------------------------------
 
 
-def test_energy_spectra_are_built_from_the_repair(csv_path):
-    """Every energy-space array comes off ``spectra_cr`` once one exists."""
+def test_the_repair_is_its_own_rung_on_both_axes(csv_path):
+    """``spectra_cr`` has an energy-axis mirror; the first rung stays the file's."""
     scan = _load(csv_path, cosmic_rays={})
 
+    np.testing.assert_allclose(scan.energy_spectra_cr,
+                               _ascending_energy(scan.spectra_cr))
     np.testing.assert_allclose(scan.energy_spectra,
-                               _ascending_energy(scan.spectra_cr))
+                               _ascending_energy(scan.spectra))
     np.testing.assert_allclose(scan.energy_spectra_pre_jacobian,
-                               _ascending_energy(scan.spectra_cr))
+                               _ascending_energy(scan.spectra))
+    # The guard: without a flagged spike the two rungs would be equal and every
+    # assertion above would hold for the wrong reason.
+    assert not np.allclose(scan.energy_spectra, scan.energy_spectra_cr)
 
 
 def test_repair_alone_leaves_no_background_array(csv_path):
-    """A repair is not a background subtraction, so ``energy_spectra_bg`` stays None."""
+    """A repair is not a background subtraction, so the bg rungs stay None."""
     scan = _load(csv_path, cosmic_rays={})
 
+    assert scan.spectra_bg is None
     assert scan.energy_spectra_bg is None
-    assert scan.best_energy_spectra is scan.energy_spectra
+    # Both accessors fall back to the repair rung, and to the same one.
+    assert scan.best_energy_spectra is scan.energy_spectra_cr
+    assert scan.best_spectra is scan.spectra_cr
 
 
 def test_spike_in_the_window_does_not_bias_the_pedestal(csv_path, spiked):

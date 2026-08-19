@@ -40,6 +40,52 @@ SIGNAL_LABELS = {
     "TRPL": ("PL intensity",          "counts"),
 }
 
+# ----- Spectral x-axis vocabulary ----- #
+# The two orderings a spectrum can be served on, as (name, unit) — the same shape
+# as SIGNAL_LABELS above, so an axis label composes the same way.  The keys are
+# what every x_axis= argument in the package accepts.
+X_AXES = {
+    "energy":     ("Energy",     "eV"),
+    "wavelength": ("Wavelength", "nm"),
+}
+
+
+def _x_axis_name_unit(x_axis: str, what: str = None) -> tuple:
+    """
+    Return ``(name, unit)`` for a spectral axis, refusing anything else.
+
+    The one check behind every ``x_axis=`` in the package.  Each caller still
+    picks its own arrays, but none of them decides what the vocabulary is, so an
+    unrecognised value cannot be read as one of the two by the branch below it.
+
+    Parameters
+    ----------
+    x_axis : str
+        Axis name to check, a key of :data:`X_AXES`.
+    what : str, optional
+        Calling function, spelled ``"pixel_slice()"``, used to prefix the
+        message.  Omitted where the caller's other messages are unprefixed.
+
+    Returns
+    -------
+    tuple of (str, str)
+        Quantity name and unit, e.g. ``("Energy", "eV")``.
+
+    Raises
+    ------
+    ValueError
+        If *x_axis* is not a key of :data:`X_AXES`.
+    """
+    try:
+        return X_AXES[x_axis]
+    except (KeyError, TypeError):       # TypeError: an unhashable x_axis
+        # Derived from the table, so a key added there cannot go unmentioned here.
+        raise ValueError(
+            f"{what + ': ' if what else ''}x_axis must be "
+            f"{' or '.join(repr(key) for key in X_AXES)}, got {x_axis!r}."
+        ) from None
+
+
 # ----- Material dielectric constants ----- #
 # Sources cited as comments where known
 EPS_HBN   = 3.9    # hBN out-of-plane, Laturia et al. 2018
@@ -119,8 +165,10 @@ BANDGAP_ENERGY_BULK = {
 # no fit_pl_peaks wrapper the way RAMAN_MODES feeds fitting.fit_raman_modes,
 # so a caller reads "peak_config" directly into p0/bounds at the call site.
 # "seed" is a starting guess, not a measured value: the fit is free to move
-# each center by "center_tol" during fitting. General lab knowledge rather
-# than a literature citation -- note EXCITON_ENERGY["WSe2"]["XA0"] above
+# each center by "center_tol" during fitting. These positions are inherited
+# group practice, not a literature value -- what would be needed to make
+# them citable is listed in dev/physics-conventions.md section 9. Note that
+# EXCITON_ENERGY["WSe2"]["XA0"] above
 # (1.75 eV, Nature Nanotechnology 8, 634-638 (2013)) is a different figure
 # for the same neutral intralayer exciton; the two were not reconciled here.
 #
@@ -154,8 +202,8 @@ PL_PEAKS = {
 # each was tuned against examples/example-Raman.ipynb's reference spectra
 # and the values differ between layer counts even for a mode with the same
 # name -- 2LA(M)'s center_tol is 6.0 here but 8.0 in the monolayer entry --
-# see CLAUDE.md's "Raman" section for the literature comparison
-# (doi:10.1088/2053-1583/ac83d4).
+# see dev/physics-conventions.md section 10 for the literature comparison
+# (Pan et al. 2022, doi:10.1088/2053-1583/ac83d4).
 RAMAN_MODES = {
     "WSe2": {
         2: {  # bilayer
@@ -170,7 +218,8 @@ RAMAN_MODES = {
             "fit_window": (220.0, 340.0),
         },
         1: {  # monolayer -- no B2g: it requires interlayer coupling a
-              # single layer does not have (see CLAUDE.md's "Raman" section)
+              # single layer does not have -- dev/physics-conventions.md
+              # section 10 has the evidence
             "modes": ["E2g/A1g", "2LA(M)"],
             "shoulder_mode": "2LA(M)",
             "peaks": {

@@ -56,6 +56,7 @@ from .constants import (
     HC_EV_NM,
     SIGNAL_LABELS,
     SPECTROSCOPY_TYPES,
+    _x_axis_name_unit,
 )
 
 from . import processing
@@ -275,6 +276,55 @@ class DeviceGeometry:
             label        = label,
         )
 
+    # --- Class method for generating DeviceGeometry from dict -------------
+    @classmethod
+    def from_dict(cls, device_dict: dict) -> "DeviceGeometry":
+        """
+        Build a DeviceGeometry from a Python dictionary.
+
+        Parameters
+        ----------
+        device_dict : dict
+            Dictionary describing the device stack, with the structure
+            shown in Examples below.  ``"tmdc_stack"`` is required;
+            ``"d_hbn_top"``, ``"d_hbn_bottom"``, ``"eps_hbn"``, and
+            ``"label"`` are optional and fall back to the same defaults
+            as :meth:`DeviceGeometry.__init__` when omitted.
+
+        Returns
+        -------
+        DeviceGeometry
+            The constructed device geometry.
+
+        See Also
+        --------
+        to_dict : Generate a Python dictionary from the DeviceGeometry class.
+
+        Examples
+        --------
+        >>> device_dict = {
+        ...     "tmdc_stack": [
+        ...         {"material": "WSe2", "n_layers": 1, "d_monolayer": 0.65, "eps": 7.0},
+        ...     ],
+        ...     "d_hbn_top": 12.0,      # nm; None if that side has no hBN
+        ...     "d_hbn_bottom": 18.0,   # nm
+        ...     "eps_hbn": 3.0,
+        ...     "label": "hBN/1L-WSe2/hBN on SiO2/Si, back-gated",
+        ... }
+        >>> geom = DeviceGeometry.from_dict(device_dict)
+        """
+        layers = []
+        for material in device_dict["tmdc_stack"]:
+            layers.append(StackLayer(**material))
+
+        return cls(
+            tmdc_stack   = layers,
+            d_hbn_top    = device_dict.get("d_hbn_top"),
+            d_hbn_bottom = device_dict.get("d_hbn_bottom"),
+            eps_hbn      = device_dict.get("eps_hbn", EPS_HBN),
+            label        = device_dict.get("label"),
+        )
+    
     # --- Internal: build the ordered slab list ----------------------------
 
     def _slabs(self) -> list:
@@ -382,6 +432,60 @@ class DeviceGeometry:
         if self.d_hbn_bottom is not None:
             parts.append(f"hBN({self.d_hbn_bottom:.0f} nm)")
         return " / ".join(parts)
+
+    def to_dict(self) -> dict:
+        """
+        Generate a Python dictionary from the DeviceGeometry class.
+
+        Returns
+        -------
+        dict
+            Dictionary describing the device stack, with the structure
+            shown in Examples below.  ``"label"`` is the raw ``label``
+            attribute, ``None`` unless a custom label was given at
+            construction — not the derived :attr:`stack_label`.
+
+        See Also
+        --------
+        from_dict : Build a DeviceGeometry from a Python dictionary.
+
+        Examples
+        --------
+        >>> geom.to_dict()
+        {
+            "tmdc_stack": [
+                {"material": "WSe2", "n_layers": 1, "d_monolayer": 0.65, "eps": 7.0},
+            ],
+            "d_hbn_top": 12.0,      # nm; None if that side has no hBN
+            "d_hbn_bottom": 18.0,   # nm
+            "eps_hbn": 3.0,
+            "label": "hBN/1L-WSe2/hBN on SiO2/Si, back-gated",  # or None
+        }
+        """
+
+        def format_tmdc_dict(
+                material : str,
+                n_layers : int,
+                d_monolayer : float,
+                eps : float
+            ) -> dict:
+
+            return {"material" : material, "n_layers" : n_layers, "d_monolayer" : d_monolayer, "eps" : eps}
+
+        d = {}
+        stacks = []
+        d["tmdc_stack"] = stacks
+        # if self.d_hbn_top is not None:
+        #     stacks.append(format_material_dict("hBN", np.nan, self.d_hbn_top, self.eps_hbn))
+        for layer in self.tmdc_stack:
+            stacks.append(format_tmdc_dict(layer.material, layer.n_layers, layer.d_monolayer, layer.eps))
+        # if self.d_hbn_bottom is not None:
+        #     stacks.append(format_material_dict("hBN", np.nan, self.d_hbn_bottom, self.eps_hbn))
+        d["d_hbn_top"] = self.d_hbn_top if self.d_hbn_top is not None else None
+        d["d_hbn_bottom"] = self.d_hbn_bottom if self.d_hbn_bottom is not None else None
+        d["eps_hbn"] = self.eps_hbn
+        d["label"] = self.label
+        return d
 
     def electric_field(
         self, v_top: np.ndarray, v_bot: np.ndarray
@@ -639,91 +743,198 @@ _GATE_ELECTRODES = tuple(_GATE_ROLE_CURATED)
 # and is what makes a single-gate declaration unambiguous.
 _GATE_ROLES = _GATE_ELECTRODES + ("channel",)
 
+# Voltage row -> the current row measured at the same terminal.  A source-meter
+# channel applies a bias and reports the current it sources, so both rows describe
+# one electrode and a declaration naming either names both.  This is a property of
+# the export, fixed across every file seen, whereas which electrode that channel
+# reached is per-session wiring — so it belongs here rather than in ``gates``.
+_CHANNEL_SIBLING_CURRENT = {"V_A": "I_A", "V_B": "I_B"}
+
+# Which curated entry carries each role's current.  Covers all three roles, unlike
+# the voltage map above: a current flows at the channel contact just as it does at a
+# gate, and only the *field* is restricted to the two gate electrodes.
+_ROLE_CURRENT_CURATED = {"top": "i_top", "bottom": "i_bot", "channel": "i_channel"}
+_CURRENT_CURATED      = tuple(_ROLE_CURRENT_CURATED.values())
+
+# Curated entries whose label comes from ``gates`` and nowhere else.  Rejected as
+# ``curated_labels`` keys, and dropped from an HDF5 file's curated dump on read, so
+# that a written label can never be mistaken for a declared mapping.
+_DECLARED_CURATED = _GATE_CURATED + _CURRENT_CURATED
+
 
 # ---------------------------------------------------------------------------
 # Spectra-source registry
 # ---------------------------------------------------------------------------
 
-# Mapping of string names → spectra array attribute on AttoCubeSpectralSweep.
-# The sentinel value None means "wavelength-space spectra" — these are
-# served on the wavelength axis regardless of x_axis.
+# Correction state → the array holding it, as (wavelength axis, energy axis).  A
+# source names the state and x_axis picks the column, so every state is reachable
+# on either axis and a source cannot be served on the wrong one.  Contrast is
+# opt-in by name: "best" never returns it, ΔR/R₀ being a different physical
+# quantity from the counts rather than a better-corrected version of them.
 _SPECTRA_SOURCES = {
-    "best"                      : None,   # resolved at call time
-    "raw"                       : "spectra",
-    "energy"                    : "energy_spectra",
-    "energy_bg"                 : "energy_spectra_bg",
-    "energy_pre_jacobian"       : "energy_spectra_pre_jacobian",
-    # Contrast is opt-in by name: "best" never returns it, because ΔR/R₀ is a
-    # different physical quantity from the counts, not a better-corrected version
-    # of them.  See AttoCubeSpectralSweep.best_energy_spectra.
-    "contrast"                  : "energy_contrast",
-    "contrast_wavelength"       : "contrast",
+    "raw"      : ("spectra",    "energy_spectra"),
+    "cr"       : ("spectra_cr", "energy_spectra_cr"),
+    "bg"       : ("spectra_bg", "energy_spectra_bg"),
+    "contrast" : ("contrast",   "energy_contrast"),
 }
 
-_SPECTRA_SOURCE_LABELS = {
-    "best"                      : "best available (repaired, bg-corrected if set)",
-    "raw"                       : "raw counts, wavelength space",
-    "energy"                    : "energy axis (Jacobian if configured)",
-    "energy_bg"                 : "energy axis, bg-subtracted",
-    "energy_pre_jacobian"       : "energy axis, no Jacobian",
-    "contrast"                  : "contrast vs reference, energy axis",
-    "contrast_wavelength"       : "contrast vs reference, wavelength space",
+# Served on the energy axis whatever x_axis says.  The Jacobian is a property of
+# the energy representation rather than a state of the counts, so it is not a
+# column of the table above — the wavelength arrays *are* the pre-Jacobian values.
+_SPECTRA_SOURCES_ENERGY_ONLY = {"pre_jacobian": "energy_spectra_pre_jacobian"}
+
+# "best" asks for the most-corrected rung the object has, which each class answers
+# through its own best_* pair, so it is a request rather than a row of the table.
+_SPECTRA_SOURCE_BEST = "best"
+
+# Which argument would make an absent source available — one message per source,
+# each naming the argument that fixes it rather than guessing between two.
+_SOURCE_REQUIRES = {
+    "cr"       : "cosmic_rays=",
+    "bg"       : "bg_region_nm=, bg_region_eV= or bg_spectrum=",
+    "contrast" : "a reference= spectrum",
 }
+
+
+def _spectra_source_names() -> list:
+    """Every accepted ``spectra_source``, for a message."""
+    return ([_SPECTRA_SOURCE_BEST] + list(_SPECTRA_SOURCES)
+            + list(_SPECTRA_SOURCES_ENERGY_ONLY))
 
 
 def _resolve_spectra(scan, spectra_source: str, x_axis: str) -> np.ndarray:
     """
     Return the ``(n_pixels, n_sweeps)`` array for *spectra_source*.
 
-    Reads *scan* by attribute name, so it serves anything mirroring
-    :class:`AttoCubeSpectralSweep`.  :class:`SingleSpectrum` carries only a subset
-    of the arrays; a source it lacks degrades to the nearest available one where
-    there is one, and raises otherwise.
+    A source names a **correction state** — ``"raw"``, ``"cr"``, ``"bg"``,
+    ``"contrast"`` — and *x_axis* picks the axis it is served on, so the two
+    cannot disagree.  ``"best"`` asks for the most-corrected state the object
+    holds.  ``"pre_jacobian"`` is the one exception: the Jacobian belongs to the
+    energy representation rather than to the counts, so it exists on that axis
+    only.
 
-    Raises ``ValueError`` when the requested source is unavailable (e.g.
-    ``"energy_bg"`` but no ``bg_region`` was set) or incompatible with the
-    chosen *x_axis* (e.g. wavelength-space source with ``x_axis="energy"``).
+    Reads *scan* by attribute name, so it serves anything mirroring
+    :class:`AttoCubeSpectralSweep`, and distinguishes a correction the class does
+    not offer from one that was simply not requested.
+
+    Raises ``ValueError`` when *x_axis* names no spectral axis, when the source is
+    unrecognised, when the class has no such correction (a
+    :class:`SingleSpectrum` has no cosmic-ray repair), when the correction exists
+    but was not requested at load time, or when ``"pre_jacobian"`` is asked for on
+    the wavelength axis.
     """
+    # Ahead of the source lookup: the axis chooses the column below, so an
+    # unrecognised one would be read as wavelength.
+    _x_axis_name_unit(x_axis)
+
     src = spectra_source.lower()
-    if src not in _SPECTRA_SOURCES:
+
+    if src == _SPECTRA_SOURCE_BEST:
+        # Each class decides what its own "best" is, so this serves a
+        # SingleSpectrum's background-corrected array and a sweep's most-corrected
+        # rung through one expression.
+        arr = (scan.best_energy_spectra if x_axis == "energy"
+               else scan.best_spectra)
+        return np.asarray(arr, dtype=float)
+
+    if src in _SPECTRA_SOURCES_ENERGY_ONLY:
+        if x_axis != "energy":
+            raise ValueError(
+                f"spectra_source={src!r} exists on the energy axis only — the "
+                f"Jacobian is a property of that representation, and the "
+                f"wavelength-space arrays already hold the values it is applied "
+                f"to. Ask for 'raw', 'cr' or 'bg' on the wavelength axis."
+            )
+        attr = _SPECTRA_SOURCES_ENERGY_ONLY[src]
+    elif src in _SPECTRA_SOURCES:
+        attr = _SPECTRA_SOURCES[src][0 if x_axis == "wavelength" else 1]
+    else:
         raise ValueError(
             f"spectra_source {src!r} is not recognised. "
-            f"Choose from: {list(_SPECTRA_SOURCES)}."
+            f"Choose from: {_spectra_source_names()}."
         )
 
-    if src == "best":
-        if x_axis == "energy":
-            arr = scan.best_energy_spectra
-        else:
-            # Wavelength space has no background-corrected array to offer, but a
-            # cosmic-ray repair does live here — and "best" ignoring a declared
-            # one would put spikes on the plot that no other source shows.
-            arr = getattr(scan, "spectra_cr", None)
-            if arr is None:
-                arr = scan.spectra
-    elif src == "raw":
-        arr = scan.spectra
-    else:
-        attr = _SPECTRA_SOURCES[src]
-        arr = getattr(scan, attr, None)
-        if arr is None:
-            needs = ("a reference= spectrum" if src.startswith("contrast")
-                     else "bg_region and/or apply_jacobian")
-            raise ValueError(
-                f"spectra_source={src!r} is not available on this scan.  "
-                f"Check that {needs} was set at load time."
-            )
-
-    # Warn if wavelength-space data is being plotted on energy axis.
-    if src == "raw" and x_axis == "energy":
-        warnings.warn(
-            "spectra_source='raw' uses the wavelength-space array which has "
-            "descending energy order and unequal pixel spacing.  "
-            "Consider 'energy' or 'best' for an energy-axis plot.",
-            UserWarning, stacklevel=3,
+    # Two different failures, and the advice differs: a class that never offers
+    # this correction cannot be fixed by passing an argument at load time.
+    if not hasattr(scan, attr):
+        raise ValueError(
+            f"a {type(scan).__name__} has no {src!r} spectra ({attr!r}), so that "
+            f"correction cannot be asked of it. Available: "
+            f"{_spectra_source_names()}."
+        )
+    arr = getattr(scan, attr)
+    if arr is None:
+        raise ValueError(
+            f"spectra_source={src!r} is not available on this scan. Check that "
+            f"{_SOURCE_REQUIRES[src]} was set at load time."
         )
 
     return np.asarray(arr, dtype=float)
+
+
+# Mapping of string names → the accessor that reads a real-space frame.  The
+# frame counterpart of _SPECTRA_SOURCES, and `None` is the same sentinel: "best"
+# is resolved at call time because which array it names depends on how the scan
+# was loaded.
+_FRAME_SOURCES = {
+    "best" : None,             # bg-subtracted where available, else raw
+    "raw"  : "load_frame",
+    "bg"   : "load_frame_bg",
+}
+
+# Statistics _apply_bg_region can estimate a pedestal with.  Kept next to the
+# sources because the two together are the whole frame-correction vocabulary.
+_BG_STATS = ("median", "mean")
+
+
+def _resolve_frame(scan, idx: int, frame_source: str = "best") -> np.ndarray:
+    """
+    Return frame *idx* of *scan* as the array *frame_source* names.
+
+    Reads *scan* by accessor name, so it serves anything exposing
+    ``load_frame(idx)`` — a scan that offers no background-corrected frames is
+    not an error under ``"best"``, it simply has one fewer array to choose from.
+
+    Parameters
+    ----------
+    scan : AttoCubePLScanRealSpace or object exposing ``load_frame(idx)``
+    idx : int
+        Frame index.
+    frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+        ``"raw"`` is the file's own counts; ``"bg"`` is background-subtracted;
+        ``"best"`` gives ``"bg"`` when a *bg_region* was set at load time and
+        ``"raw"`` otherwise.
+
+    Returns
+    -------
+    np.ndarray
+        2-D frame, ``float``.
+
+    Raises
+    ------
+    ValueError
+        If *frame_source* is not recognised, or if ``"bg"`` is asked for on a
+        scan carrying no *bg_region*.
+    """
+    src = frame_source.lower()
+    if src not in _FRAME_SOURCES:
+        raise ValueError(
+            f"frame_source {src!r} is not recognised. "
+            f"Choose from: {list(_FRAME_SOURCES)}."
+        )
+
+    # "best" prefers the corrected frame; asking for it by name makes it required.
+    attr   = _FRAME_SOURCES["bg"] if src == "best" else _FRAME_SOURCES[src]
+    getter = getattr(scan, attr, None)
+    if src != "raw" and (getter is None or getattr(scan, "bg_region", None) is None):
+        if src == "bg":
+            raise ValueError(
+                f"frame_source={src!r} is not available on this scan.  "
+                f"Check that bg_region was set at load time."
+            )
+        getter = getattr(scan, _FRAME_SOURCES["raw"])
+
+    return np.asarray(getter(idx), dtype=float)
 
 
 # Recognised input formats, dispatched on the file suffix.
@@ -771,6 +982,29 @@ _BLOCK_FIELD_INDEX = re.compile(r"_?\d+$")
 _BLOCK_START = re.compile(r"^Par_?\d+$")
 
 
+def _n_rows_upto(fh, limit: int) -> int:
+    """
+    Count the non-blank lines remaining in *fh*, reading no further than *limit*.
+
+    Bounded so classifying a file costs one short read however large it is.  The
+    result is therefore **not** the file's row count and must not be reported as
+    one — only the comparison against *limit* is meaningful.
+
+    Parameters
+    ----------
+    fh : file object
+        Open text handle, read from its current position.
+    limit : int
+        Stop after this many lines, blank ones included.
+
+    Returns
+    -------
+    int
+        Non-blank lines seen, at most *limit*.
+    """
+    return sum(1 for _, line in zip(range(limit), fh) if line.strip())
+
+
 def _read_block_layout(path) -> dict:
     """
     Determine an export's block layout from its **header line alone**.
@@ -802,10 +1036,9 @@ def _read_block_layout(path) -> dict:
     """
     with open(path, "r") as fh:
         header = fh.readline() # Reads the header
-        # Only whether a third row exists matters, and bounding the read keeps this
-        # cheap on a 300 MB export.  The count is therefore not the file's row
-        # count and must not be reported as one.
-        two_rows_only = sum(1 for _, line in zip(range(2), fh) if line.strip()) < 2 # Reads the next two rows -> returns number of non-empty rows
+        # Only whether a third row exists matters, so two lines past the header
+        # settle it.
+        two_rows_only = _n_rows_upto(fh, 2) < 2
     names = [name.strip() for name in header.split(",")] # Splits into the column names
 
     # Every block starts with a Par column, so the Par positions give both the
@@ -931,6 +1164,109 @@ def _drop_unwritten_blocks(axis_col: np.ndarray, path) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Per-point file ordering
+# ---------------------------------------------------------------------------
+
+# The per-point index in a directory export's filenames, e.g. "..._iter_12.csv".
+# Ordering must be numeric on this: plain lexicographic sorting puts iter_10
+# before iter_2, which would silently pair every point with the wrong parameters.
+# Exports are usually zero-padded, but the width varies between them, so the
+# padding is not something to rely on.
+_ITER_INDEX = re.compile(r"_iter_(\d+)$", re.IGNORECASE)
+
+
+def _order_by_iter(files: list, path, *, stacklevel: int) -> list:
+    """
+    Sort per-point export files by the integer in their ``_iter_N`` suffix.
+
+    Lexicographic order places ``iter_10`` before ``iter_2``, pairing every point
+    with the wrong index.  A gap in the sequence, and an index claimed by more than
+    one file, are both reported rather than repaired: a missing point means an
+    aborted or partly copied acquisition, a repeated one usually means two
+    acquisitions share a directory, and closing up or discarding either would
+    misalign the axis silently.
+
+    Parameters
+    ----------
+    files : list of Path
+        Per-point files, in any order.
+    path : str or Path
+        Directory they came from.  Used in messages only.
+    stacklevel : int
+        Stack level for the warnings below, counted from inside this function, so
+        ``2`` attributes them to the immediate caller.  A caller reached through
+        several private layers passes the depth that lands on its own entry point.
+
+    Returns
+    -------
+    list of Path
+        The same files, ordered by iteration index.  Nothing is dropped, and
+        neither a gap nor a repeat is repaired, so index *i* is not necessarily
+        iteration *i*.
+
+    Warns
+    -----
+    UserWarning
+        If any file carries no ``_iter_N`` suffix.  Filename order is returned
+        instead, which need not be acquisition order.
+    UserWarning
+        If more than one file claims the same index.  Both are kept, so the count
+        exceeds the number of distinct points and every point from the collision
+        onward is offset against a per-point variable array.
+    UserWarning
+        If iterations are missing between the lowest and highest present.
+    """
+    indexed = []
+    for f in files:
+        m = _ITER_INDEX.search(f.stem)
+        indexed.append((int(m.group(1)) if m else None, f))
+
+    if any(idx is None for idx, _ in indexed):
+        warnings.warn(
+            f"Some files in '{path}' carry no '_iter_N' suffix "
+            f"({', '.join(f.name for idx, f in indexed if idx is None)}); "
+            f"falling back to filename order, which may not be acquisition "
+            f"order.",
+            UserWarning, stacklevel=stacklevel,
+        )
+        return [f for _, f in indexed]
+
+    indexed.sort(key=lambda item: item[0])
+
+    # Grouped by index so the message can name the colliding files, which is what
+    # says whether two acquisitions were merged. The gap check below cannot see a
+    # repeat: it compares against the *set* of indices, which a repeat leaves
+    # unchanged.
+    by_index = {}
+    for idx, f in indexed:
+        by_index.setdefault(idx, []).append(f)
+    collisions = {idx: fs for idx, fs in by_index.items() if len(fs) > 1}
+    if collisions:
+        detail = "; ".join(f"iter_{idx}: {', '.join(f.name for f in fs)}"
+                           for idx, fs in sorted(collisions.items()))
+        warnings.warn(
+            f"'{path}' has {len(collisions)} iteration index(es) claimed by more "
+            f"than one file ({detail}). Index i is therefore not iteration i, and a "
+            f"per-point variable array will be mispaired from the first collision "
+            f"onward. Nothing is dropped — narrow the prefix if two acquisitions "
+            f"share a directory.",
+            UserWarning, stacklevel=stacklevel,
+        )
+
+    seen    = [idx for idx, _ in indexed]
+    missing = sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
+    if missing:
+        warnings.warn(
+            f"'{path}' is missing iteration(s) {missing} between iter_"
+            f"{seen[0]} and iter_{seen[-1]} — an aborted or partly copied "
+            f"export. The {len(seen)} file(s) present are loaded in order, so "
+            f"index i is not iteration i.",
+            UserWarning, stacklevel=stacklevel,
+        )
+    return [f for _, f in indexed]
+
+
+# ---------------------------------------------------------------------------
 # _AttoCubeSweep — shared machinery
 # ---------------------------------------------------------------------------
 
@@ -954,32 +1290,153 @@ class SweepGrid(NamedTuple):
                 f"{self.n_fast * self.n_slow}")
 
 
-# Fraction of an axis's own span by which two values may differ and still count
-# as the same grid point.  Scaled to the span rather than to the value so that an
-# axis crossing zero — an anti-symmetric field sweep, say — is handled like any
-# other, and loose enough for a derived axis that is recomputed per sweep point
-# rather than read back as a repeated literal.
-_NEST_RTOL = 1e-3
+# Fraction by which two readings of a *driven* axis may differ and still count as the
+# same value, and — the same number used the other way round — the fraction of its own
+# magnitude a row must travel before it counts as driven at all.  Relative rather than
+# absolute so it carries across volts, microwatts and kelvin without a table.
+#
+# This describes and matches the *sweep axis*; it does not resolve a nest.  One
+# tolerance for a whole axis has to sit above the scatter within a level and below
+# the step between levels, and on a measured axis no such value need exist: a power
+# meter's scatter grows with the reading while the smallest step it must resolve
+# does not.  ``_levels_separate`` compares each level against its neighbour instead.
+_AXIS_RTOL = 1e-3
+
+# Fraction of its own travel by which consecutive readings may step and still be a
+# sweep progressing through its range, rather than scatter jumping about inside one.
+# A driven axis of n points steps about 1/(n-1) of its travel each time — 10% at 11
+# points, 0.5% at 201 — whereas scatter sits near 40% however many readings there are.
+_AXIS_STEP_FRAC = 0.1
+
+# Non-zero steps a row must take before the *direction* of those steps is evidence of
+# anything.  Below this, scatter runs one way often enough by chance to be worth
+# nothing: on a held 5 V gate, 9% of four-point rows never reverse, against 2% at five
+# readings and 0.2% at six.
+_AXIS_MIN_MOVES = 4
 
 
-def _axis_atol(values: np.ndarray, rtol: float = _NEST_RTOL) -> float:
-    """Absolute tolerance for *values*, scaled to their span."""
+def _axis_driven(values: np.ndarray, rtol: float = _AXIS_RTOL) -> bool:
+    """
+    Whether *values* record a driven axis rather than one setting plus scatter.
+
+    Three independent signs, any one of which is enough, because each is blind where
+    another sees:
+
+    ==========================  ==============================  ======================
+    sign                        draws on                        blind to
+    ==========================  ==============================  ======================
+    travel against size         how far it went for how large   a fine sweep on a
+                                it is                           large offset — 300.0
+                                                                to 300.2 K travels
+                                                                0.07% of its readings
+    how far it steps            a sweep progresses where        a coarse sweep, whose
+                                scatter jumps about             few points step as far
+                                                                as scatter would
+    which way it steps          a sweep does not turn round;    a sweep that revisits
+                                scatter does                    values, which restarts
+                                                                every row of a nest
+    ==========================  ==============================  ======================
+
+    Requiring all three to fail before calling an axis undriven is what keeps a real
+    sweep from being collapsed: the safe error here is leaving scatter uncollapsed,
+    which is what happens without any of them.  The third sign is what covers the two
+    blind spots that *overlap* — a sweep both coarse and narrow for its offset, such as
+    six points from 300.0 K to 300.2 K, defeats the first two together.
+
+    That safety sets the reach.  Because the first sign fires as soon as a row's span
+    exceeds *rtol* of its magnitude, a held setting is recognised only while its
+    read-back is stable to better than that — reliably so for a commanded row (a
+    source-meter reports a 5 V gate to ~20 µV) and not at all for a power meter, whose
+    scatter runs to a few parts per thousand of the reading.  A noisy instrument holding
+    one setting therefore still reads as many, exactly as it did before.  Read-back that
+    *drifts* rather than jitters is seen by the last two signs at any amplitude, so a
+    held row is recognised only while its scatter is directionless.
+    """
     finite = values[np.isfinite(values)]
-    span   = float(np.ptp(finite)) if finite.size else 0.0
-    return max(rtol * span, np.finfo(float).tiny)
+    if finite.size < 2:
+        return False
+    travel = float(np.ptp(finite))
+    if travel == 0.0:
+        return False        # every reading identical: one setting, nothing to judge
+
+    # RMS rather than |mean|, because a row can sit astride zero — an anti-symmetric
+    # gate pair sweeping the field does — and its mean is then no measure of how large
+    # it is.  Floored so an identically zero row cannot divide by nothing.
+    size = max(float(np.sqrt(np.mean(finite ** 2))), np.finfo(float).tiny)
+    if travel > rtol * size:
+        return True
+
+    # (n_finite - 1,) consecutive differences in *acquisition order*, which is what
+    # scatter destroys and a sweep preserves.  Median rather than mean, so the jump
+    # back at the end of each row of a flattened nest is outvoted rather than read as
+    # scatter.
+    if float(np.median(np.abs(np.diff(finite)))) < _AXIS_STEP_FRAC * travel:
+        return True
+
+    # The same differences with the exact repeats dropped, leaving (n_moves,) actual
+    # moves: a slow axis sits still between its steps, and standing still is not
+    # turning round.  Judged on direction alone, so this sign carries no magnitude and
+    # no point count — which is why it still sees a sweep too coarse for the second
+    # sign and too narrow for the first.
+    steps = np.diff(finite)
+    steps = steps[steps != 0.0]
+    if steps.size < _AXIS_MIN_MOVES:
+        return False
+    return bool(np.all(steps > 0) or np.all(steps < 0))
+
+
+def _axis_atol(values: np.ndarray, rtol: float = _AXIS_RTOL) -> float:
+    """
+    How far apart two readings may be and still count as the same setting.
+
+    A driven axis is judged on a fraction of its travel, which is a fair proxy for how
+    finely it steps.  An undriven one is judged on the whole of it: there the travel
+    *is* the instrument's scatter, so everything inside it is the one setting that was
+    set.  Taking a fraction of the travel in that case is circular — the tolerance
+    shrinks with the scatter it exists to absorb, so it never absorbs it, and a quieter
+    instrument does not help.
+    """
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return np.finfo(float).tiny
+    travel = float(np.ptp(finite))
+    if _axis_driven(values, rtol):
+        return max(rtol * travel, np.finfo(float).tiny)
+    return max(travel, np.finfo(float).tiny)
+
+
+def _level_labels(values: np.ndarray, atol: float) -> tuple:
+    """
+    Index the grid level each value sits on, and count the levels.
+
+    Two readings share a level when the gap between them, in sorted order, is at
+    most *atol* — so a level is a run of readings each within *atol* of its
+    neighbour, however far the ends of the run are from each other.  Non-finite
+    entries sit on no level and are labelled ``-1``.
+
+    Returns ``(labels, n_levels)``, *labels* shaped like *values*.
+    """
+    labels = np.full(values.shape, -1, dtype=int)
+    finite = np.flatnonzero(np.isfinite(values))
+    if finite.size == 0:
+        return labels, 0
+
+    # Sort the finite entries, cut the run wherever a consecutive gap exceeds
+    # atol, and scatter the running cut count back to where each value came
+    # from: one vectorised pass rather than a pairwise comparison.
+    order         = finite[np.argsort(values[finite], kind="stable")]
+    cuts          = np.diff(values[order]) > atol         # (n_finite - 1,)
+    labels[order] = np.concatenate(([0], np.cumsum(cuts)))
+    return labels, int(labels[order[-1]]) + 1
 
 
 def _count_distinct(values: np.ndarray, atol: float) -> int:
     """
     Number of distinct values in *values*, treating gaps ≤ *atol* as equal.
 
-    Sorting first turns "how many distinct" into "how many gaps exceed atol",
-    which is one vectorised pass rather than a pairwise comparison.
+    Non-finite entries are not counted.
     """
-    ordered = np.sort(values[np.isfinite(values)])
-    if ordered.size == 0:
-        return 0
-    return int(1 + np.count_nonzero(np.diff(ordered) > atol))
+    return _level_labels(values, atol)[1]
 
 
 def _render_indices(indices: np.ndarray, limit: int = 6) -> str:
@@ -990,39 +1447,134 @@ def _render_indices(indices: np.ndarray, limit: int = 6) -> str:
     return f"{indices.size} sweep points (indices {shown})"
 
 
+# Which way a grid is collapsed to recover one axis's levels.  A slow axis holds
+# still while the fast axis runs to completion, so its levels are the grid's *rows*;
+# a fast axis repeats the same run of settings in every row, so its levels are the
+# grid's *columns*.
+_SLOW_LEVELS_AXIS = 1
+_FAST_LEVELS_AXIS = 0
+
+
+def _level_bounds(grid: np.ndarray, axis: int) -> tuple:
+    """
+    Lowest and highest reading of each grid level, ordered by value.
+
+    *grid* is one axis's readings reshaped to ``(n_slow, n_fast)``, and *axis* is
+    :data:`_SLOW_LEVELS_AXIS` or :data:`_FAST_LEVELS_AXIS`.
+
+    Returns ``(lo, hi)``, both ``(n_levels,)``, sorted by *lo*.  A level holding a
+    non-finite reading gets a non-finite bound, which no comparison below accepts,
+    so such an axis is refused rather than grouped on the finite readings alone.
+    """
+    lo, hi = grid.min(axis), grid.max(axis)          # (n_levels,) each
+    order  = np.argsort(lo, kind="stable")           # levels in value order
+    return lo[order], hi[order]
+
+
+def _levels_separate(grid: np.ndarray, axis: int) -> bool:
+    """
+    True when the readings of different grid levels never interleave.
+
+    Every level must begin above where the level below it ended.  This is what makes
+    a reshape trustworthy without a tolerance: the only comparison made is between
+    one level's own scatter and the step to its immediate neighbour, at the same
+    place on the axis.  A single tolerance for the whole axis cannot do that, which
+    is why a log-spaced power series read back by a meter defeats one — the scatter
+    at the top of the axis exceeds the step at the bottom.
+
+    Separable is all this checks, not tight.  A level whose readings are spread far
+    wider than expected still passes when that spread happens to fall in a gap.
+    Testing tightness needs a width to compare against, and the only scale-free
+    candidate — demanding the neighbour gap exceed the level's own spread — refuses
+    genuine log-spaced power sweeps.
+    """
+    lo, hi = _level_bounds(grid, axis)
+    # (n_levels - 1,): clearance from each level's top to the next level's floor.
+    return bool(np.all(lo[1:] - hi[:-1] > 0))
+
+
+def _nest_candidates(fast: np.ndarray, slow: np.ndarray, n_sweeps: int) -> list:
+    """
+    Every ``(n_fast, n_slow)`` under which *fast* nests inside *slow*.
+
+    Both arrays are the flattened ``(n_sweeps,)`` readings of the two declared axes.
+    The exporter writes the fast axis running fastest, so each slow step gets one
+    complete run of the fast axis and ``n_fast * n_slow == n_sweeps`` exactly: only
+    the divisors of *n_sweeps* can be shapes, and both counts must reach 2 for there
+    to be a nest at all.  A shape survives when both axes' levels are separable
+    under it.
+
+    Normally exactly one does.  Returning all of them lets the caller refuse an
+    ambiguous file by naming the shapes rather than choosing one of them.
+    """
+    # Trial division to the square root, pairing each divisor with its cofactor, so
+    # a long sweep does not walk every integer below n_sweeps.
+    divisors = set()
+    for d in range(1, int(np.sqrt(n_sweeps)) + 1):
+        if n_sweeps % d == 0:
+            divisors.update((d, n_sweeps // d))
+
+    hits = []
+    for n_fast in sorted(divisors):
+        n_slow = n_sweeps // n_fast
+        if n_fast < 2 or n_slow < 2:
+            continue
+        if (_levels_separate(fast.reshape(n_slow, n_fast), _FAST_LEVELS_AXIS)
+                and _levels_separate(slow.reshape(n_slow, n_fast), _SLOW_LEVELS_AXIS)):
+            hits.append((n_fast, n_slow))
+    return hits
+
+
 def _nest_shape(fast: np.ndarray, slow: np.ndarray, n_sweeps: int) -> tuple:
     """
-    Return ``(n_fast, n_slow)`` if *fast* runs to completion inside *slow*.
+    Return the one ``(n_fast, n_slow)`` describing *fast* nested inside *slow*.
 
-    Both arrays are the flattened ``(n_sweeps,)`` readings of the two declared
-    axes.  ``None`` when they do not form a nest in that order — the caller
-    retries with the arguments swapped to tell a genuine mismatch from a
-    reversed declaration.
+    ``None`` when no shape fits, and also when more than one does — a file that
+    reshapes two ways is not one to pick between.  Callers that need to tell those
+    apart, or to report them, use :func:`_nest_candidates` directly.
     """
-    fast_atol = _axis_atol(fast)
-    slow_atol = _axis_atol(slow)
+    candidates = _nest_candidates(fast, slow, n_sweeps)
+    return candidates[0] if len(candidates) == 1 else None
 
-    n_fast = _count_distinct(fast, fast_atol)
-    if n_fast < 2 or n_sweeps % n_fast:
-        return None
-    n_slow = n_sweeps // n_fast
 
-    fast_grid = fast.reshape(n_slow, n_fast)
-    slow_grid = slow.reshape(n_slow, n_fast)
+def _level_coordinates(grid: np.ndarray, axis: int) -> tuple:
+    """
+    One coordinate per grid level, with the spread of the readings behind it.
 
-    # (n_fast,) broadcast down the rows: the fast axis must repeat the same run
-    # of values in every row.  (n_slow, 1) broadcast across the columns: the slow
-    # axis must hold still for the whole of each row.
-    if not np.allclose(fast_grid, fast_grid[0], rtol=0, atol=fast_atol,
-                       equal_nan=True):
-        return None
-    if not np.allclose(slow_grid, slow_grid[:, :1], rtol=0, atol=slow_atol,
-                       equal_nan=True):
-        return None
-    # A slow axis that revisits a value would make a lookup by value ambiguous.
-    if _count_distinct(slow_grid[:, 0], slow_atol) != n_slow:
-        return None
-    return n_fast, n_slow
+    The **median** represents a level.  Every reading in a level was taken at the same
+    setting, so the scatter between them is the instrument's, not the experiment's, and
+    a level's coordinate should not move because one reading was bad — a stray reading
+    small enough to pass :func:`_levels_separate` still drags a mean.  The median is
+    also unbiased when a level *drifts* through its readings, which a read-back power
+    does while the laser settles after a setpoint change; the first reading of the level
+    is the one taken before it settled.
+
+    Levels stay in acquisition order — index *i* is the *i*-th level as measured, not the
+    *i*-th smallest — so a descending sweep stays descending.
+
+    Returns ``(coordinate, spread)``, both ``(n_levels,)``.  *spread* is each level's
+    peak-to-peak range, which is what makes a level that is not really one visible.
+    """
+    return np.median(grid, axis=axis), np.ptp(grid, axis=axis)
+
+
+def _overlap_report(values: np.ndarray, axis: int, shape: tuple, unit: str = "") -> str:
+    """
+    Describe the first pair of grid levels whose readings interleave.
+
+    *values* is the flat ``(n_sweeps,)`` axis and *shape* the ``(n_fast, n_slow)``
+    candidate being explained.  Returns ``""`` when the levels are in fact separate.
+    """
+    n_fast, n_slow = shape
+    lo, hi = _level_bounds(values.reshape(n_slow, n_fast), axis)
+    # ~(gap > 0) rather than (gap <= 0), so a non-finite bound counts as a clash.
+    clash = np.flatnonzero(~(lo[1:] - hi[:-1] > 0))
+    if clash.size == 0:
+        return ""
+    i = int(clash[0])
+    suffix = f" {unit}" if unit else ""
+    return (f"one covers {lo[i]:.6g}–{hi[i]:.6g}{suffix} and the next "
+            f"{lo[i + 1]:.6g}–{hi[i + 1]:.6g}{suffix}")
 
 
 @_dataclass(frozen=True, eq=False)
@@ -1030,18 +1582,36 @@ class SweepNesting:
     """
     A declared 2-D sweep: a fast (inner) axis run to completion inside a slow one.
 
-    Held by :attr:`_AttoCubeSweep.nesting`.  The two coordinate arrays are the
-    distinct values of each axis in acquisition order, so a descending sweep stays
-    descending; they are *not* sorted.
+    Held by :attr:`_AttoCubeSweep.nesting`.  Each coordinate array holds one value per
+    level of that axis, in acquisition order, so a descending sweep stays descending;
+    they are *not* sorted.  A coordinate is the **median** of the readings taken at
+    that level, and ``fast_spread`` / ``slow_spread`` carry the peak-to-peak range
+    those medians came from — zero for a commanded axis read back exactly, and the
+    thing to look at when a level is not as flat as it should be.
+
+    ``asserted`` records that the shape was named with ``n_fast=`` / ``n_slow=``
+    rather than established from the readings, so at least one axis may not be able
+    to tell its own settings apart.  A caller reading coordinates off such a nest is
+    reading what the instrument happened to report at each level.
+
+    ``fast_group`` / ``slow_group`` name the row that established each axis's levels.
+    Normally that is the axis itself; it differs when ``fast_group_by=`` /
+    ``slow_group_by=`` pointed the grouping at a commanded setpoint while the
+    coordinates stayed on a measured quantity.
     """
-    fast_type  : str
-    fast_label : str
-    fast_unit  : str
-    fast_axis  : np.ndarray
-    slow_type  : str
-    slow_label : str
-    slow_unit  : str
-    slow_axis  : np.ndarray
+    fast_type   : str
+    fast_label  : str
+    fast_unit   : str
+    fast_axis   : np.ndarray
+    slow_type   : str
+    slow_label  : str
+    slow_unit   : str
+    slow_axis   : np.ndarray
+    asserted    : bool = False
+    fast_spread : np.ndarray = None
+    slow_spread : np.ndarray = None
+    fast_group  : str = None
+    slow_group  : str = None
 
     @property
     def n_fast(self) -> int:
@@ -1071,9 +1641,16 @@ class SweepNesting:
             else self.slow_label
 
     def __str__(self) -> str:
-        return (f"{self.fast_type} ({self.n_fast}, fast) × "
-                f"{self.slow_type} ({self.n_slow}, slow) = "
-                f"{self.n_fast * self.n_slow}")
+        # A grouping row is named where it differs, since it is what decided which
+        # spectra share a setting and a reader cannot infer it from the coordinates.
+        def side(kind, n, group):
+            axis = getattr(self, f"{kind}_type")
+            via  = f" via {group}" if group is not None and group != axis else ""
+            return f"{axis} ({n}, {kind}{via})"
+        shape = "" if not self.asserted else ", shape asserted"
+        return (f"{side('fast', self.n_fast, self.fast_group)} × "
+                f"{side('slow', self.n_slow, self.slow_group)} = "
+                f"{self.n_fast * self.n_slow}{shape}")
 
 
 class _AttoCubeSweep:
@@ -1118,16 +1695,23 @@ class _AttoCubeSweep:
     # generic :attr:`parameters` store.  A row listed here that a given file does
     # not contain is not an error — the property raises only if accessed.
     #
-    # The two gate entries are the exception: their labels come from ``gates``
+    # The role-backed entries are the exception: their labels come from ``gates``
     # alone, and the rows below are never read without one.  They are listed here
     # so that the file's own candidate rows can be named in that error, and so
     # ``curated_scales`` still reaches them.
+    #
+    # The two voltages carry a default row because ``_gate_candidates`` and
+    # ``gate_mode`` both describe an *undeclared* scan and need somewhere to look;
+    # the currents have no such reader, so a default there would be a guess nothing
+    # consults.  Their label is filled in from ``gates`` via
+    # ``_CHANNEL_SIBLING_CURRENT``, and access is refused until it is.
     _CURATED = {
         "v_top":     ("V_A",              1.0,      "V"),
         "v_bot":     ("V_B",              1.0,      "V"),
         "power":     ("Excitation Power", 0.303e6,  "µW"),
-        "Ich1":      ("I_A",              1e9,      "nA"),
-        "Ich2":      ("I_B",              1e9,      "nA"),
+        "i_top":     (None,               1e9,      "nA"),
+        "i_bot":     (None,               1e9,      "nA"),
+        "i_channel": (None,               1e9,      "nA"),
         "scanner_x": ("Scanner X",        1.0,      "V"),
         "scanner_y": ("Scanner Y",        1.0,      "V"),
     }
@@ -1189,7 +1773,7 @@ class _AttoCubeSweep:
         meta_labels = {
             name: value
             for name, value in (meta.get("curated_labels") or {}).items()
-            if name not in _GATE_CURATED
+            if name not in _DECLARED_CURATED
         }
         # Curated config has format (label, scale, unit).  Only label (index 0) and scale (index 1) can be overwritten
         for store, idx in ((meta_labels,                0),
@@ -1202,13 +1786,15 @@ class _AttoCubeSweep:
                         f"'{name}' is not a curated parameter. "
                         f"Valid names: {sorted(self._CURATED)}."
                     )
-                if idx == 0 and name in _GATE_CURATED:
+                if idx == 0 and name in _DECLARED_CURATED:
                     raise ValueError(
                         f"'{name}' cannot be set through curated_labels. Which "
-                        f"acquisition channel drove which physical gate is "
+                        f"acquisition channel drove which physical electrode is "
                         f"per-session wiring, declared through gates= so that the "
                         f"mapping is recorded once and travels with the scan: "
-                        f"gates={{'top': '<row>', 'bottom': '<row>'}}."
+                        f"gates={{'top': '<row>', 'bottom': '<row>'}}. A declared "
+                        f"row names that electrode's current row too, so the "
+                        f"currents are not set separately either."
                     )
                 # If a curated parameter is not present in the file's metadata or the provided overrides, it retains its default value from _CURATED.
                 # If idx == 0, we are updating the label; if idx == 1, we are updating the scale. The value is converted to float for scales.
@@ -1223,6 +1809,15 @@ class _AttoCubeSweep:
             label = (self._gates or {}).get(role)
             if label is not None:
                 self._curated[attr][0] = label
+
+        # The same declaration also names each electrode's current row, because a
+        # source-meter channel's bias and current are one terminal.  A role declared
+        # on a row outside _CHANNEL_SIBLING_CURRENT leaves its current label None,
+        # and _role_current raises rather than guessing a sibling from the spelling.
+        for role, attr in _ROLE_CURRENT_CURATED.items():
+            label = (self._gates or {}).get(role)
+            if label is not None:
+                self._curated[attr][0] = _CHANNEL_SIBLING_CURRENT.get(label)
 
         # Conver to tuple - not mutable, so that the curated parameters cannot be changed after initialization.
         self._curated = {name: tuple(cfg) for name, cfg in self._curated.items()}
@@ -1293,7 +1888,9 @@ class _AttoCubeSweep:
             sweep_unit  if sweep_unit  is not None else meta.get("sweep_unit"),
         )
 
-    def _bind_nesting(self, fast_sweep, slow_sweep) -> None:
+    def _bind_nesting(self, fast_sweep, slow_sweep, *,
+                      n_fast=None, n_slow=None,
+                      fast_group_by=None, slow_group_by=None) -> None:
         """
         Resolve the declared nest, then check the sweep axis against it.
 
@@ -1301,7 +1898,9 @@ class _AttoCubeSweep:
         ``n_sweeps`` and are verified against it, and a curated axis may read a
         property that the sweep resolution has already checked the rows for.
         """
-        self._nesting = self._resolve_nesting(fast_sweep, slow_sweep)
+        self._nesting = self._resolve_nesting(
+            fast_sweep, slow_sweep, n_fast=n_fast, n_slow=n_slow,
+            fast_group_by=fast_group_by, slow_group_by=slow_group_by)
         self._warn_if_sweep_axis_repeats()
 
     def _warn_if_sweep_axis_repeats(self) -> None:
@@ -1332,9 +1931,16 @@ class _AttoCubeSweep:
             return
 
         # For the message only: naming the nest, when there is one to name, turns
-        # "this is wrong" into "here is what to use instead".
+        # "this is wrong" into "here is what to use instead".  A single value is its
+        # own case — the row was held still, so it is not a nest axis at all and
+        # pointing at fast_sweep= would send the reader the wrong way.
         structure = self._nesting if self._nesting is not None else self.sweep_grid()
-        if structure is not None:
+        if n_distinct == 1:
+            fix = (" This row was held at one setting for the whole file, so these "
+                   "are repeat measurements rather than a sweep: varying_parameters()"
+                   " lists the rows that did move, and sweep=None gives the flat "
+                   "index.")
+        elif structure is not None:
             fix = (f" These points are a 2-D nest ({structure}) — address it with "
                    f"as_grid() and get_spectrum_at(fast=..., slow=...).")
         else:
@@ -1342,9 +1948,10 @@ class _AttoCubeSweep:
                    "slow_sweep=; if they are repeat measurements at each setting, "
                    "sweep=None gives the flat index.")
 
-        unit = f" {self._sweep_unit}" if self._sweep_unit else ""
+        unit  = f" {self._sweep_unit}" if self._sweep_unit else ""
+        value = "value" if n_distinct == 1 else "different values"
         warnings.warn(
-            f"sweep={self.sweep_type!r} takes only {n_distinct} different values "
+            f"sweep={self.sweep_type!r} takes only {n_distinct} {value} "
             f"across {finite.size} sweep points in '{self.path}' "
             f"({finite.min():.4g} → {finite.max():.4g}{unit}), so it does not "
             f"label them individually. Plotted against it, points sharing a value "
@@ -1352,13 +1959,35 @@ class _AttoCubeSweep:
             UserWarning, stacklevel=4,
         )
 
-    def _resolve_nesting(self, fast_sweep, slow_sweep) -> SweepNesting:
+    def _resolve_nesting(self, fast_sweep, slow_sweep, *,
+                         n_fast=None, n_slow=None,
+                         fast_group_by=None, slow_group_by=None) -> SweepNesting:
         """Build the declared nest, or return ``None`` when none was declared."""
         meta = self.source_metadata
         fast = fast_sweep if fast_sweep is not None else meta.get("fast_sweep")
         slow = slow_sweep if slow_sweep is not None else meta.get("slow_sweep")
+        n_fast = n_fast if n_fast is not None else meta.get("n_fast")
+        n_slow = n_slow if n_slow is not None else meta.get("n_slow")
+        fast_group_by = (fast_group_by if fast_group_by is not None
+                         else meta.get("fast_group_by"))
+        slow_group_by = (slow_group_by if slow_group_by is not None
+                         else meta.get("slow_group_by"))
 
         if fast is None and slow is None:
+            # An asserted shape says how many points each axis has, and a grouping row
+            # says which points share a setting.  Neither says what was scanned, so
+            # neither can stand in for the declaration.
+            for name, value in (("n_fast/n_slow", n_fast if n_fast is not None
+                                 else n_slow),
+                                ("fast_group_by/slow_group_by",
+                                 fast_group_by if fast_group_by is not None
+                                 else slow_group_by)):
+                if value is not None:
+                    raise ValueError(
+                        f"{name} was given without fast_sweep= and slow_sweep=. It "
+                        f"says how the {self.n_sweeps} sweep points divide up, not "
+                        f"what was scanned along each axis. Name both axes as well."
+                    )
             return None
 
         # One without the other cannot be told from a forgotten second axis, and
@@ -1394,34 +2023,204 @@ class _AttoCubeSweep:
         (fast_key, fast_flat, fast_label, fast_unit) = resolved["fast_sweep"]
         (slow_key, slow_flat, slow_label, slow_unit) = resolved["slow_sweep"]
 
-        shape = _nest_shape(fast_flat, slow_flat, self.n_sweeps)
-        if shape is None:
-            raise ValueError(self._nesting_failure(
-                fast_key, fast_flat, slow_key, slow_flat))
-        n_fast, n_slow = shape
+        # Which row establishes each axis's levels.  Normally the axis itself; a
+        # separate row when the labelled quantity is measured and cannot resolve its
+        # own settings while a commanded one can.
+        fast_group_key, fast_group = self._resolve_grouping(
+            "fast_group_by", fast_group_by, fast_key, fast_flat)
+        slow_group_key, slow_group = self._resolve_grouping(
+            "slow_group_by", slow_group_by, slow_key, slow_flat)
 
-        # Read the coordinates straight out of the verified reshape, in
-        # acquisition order: row 0 holds one full run of the fast axis, and column
-        # 0 holds the slow value each row was taken at.
+        fast_side = ("fast_sweep" if fast_group_key == fast_key else "fast_group_by",
+                     fast_group_key, fast_group, fast_unit if
+                     fast_group_key == fast_key else "", _FAST_LEVELS_AXIS)
+        slow_side = ("slow_sweep" if slow_group_key == slow_key else "slow_group_by",
+                     slow_group_key, slow_group, slow_unit if
+                     slow_group_key == slow_key else "", _SLOW_LEVELS_AXIS)
+
+        asserted = n_fast is not None or n_slow is not None
+        if asserted:
+            # Asserted, so the checks report rather than decide: the whole point of
+            # naming a shape is to load a file whose readings cannot establish one.
+            n_fast, n_slow = self._asserted_shape(n_fast, n_slow)
+            self._warn_if_asserted_levels_overlap(
+                fast_side, slow_side, (n_fast, n_slow))
+        else:
+            candidates = _nest_candidates(fast_group, slow_group, self.n_sweeps)
+            if len(candidates) != 1:
+                raise ValueError(
+                    self._nesting_failure(fast_side, slow_side, candidates))
+            n_fast, n_slow = candidates[0]
+
+        # One coordinate per level, taken from the *labelled* row rather than the row
+        # that grouped the points — the grouping settles which spectra share a
+        # setting, the label settles what that setting is called.
+        fast_axis, fast_spread = _level_coordinates(
+            fast_flat.reshape(n_slow, n_fast), _FAST_LEVELS_AXIS)
+        slow_axis, slow_spread = _level_coordinates(
+            slow_flat.reshape(n_slow, n_fast), _SLOW_LEVELS_AXIS)
+
+        # A grouped axis is expected to be messy — that is why it was grouped by
+        # something else — but a coordinate whose levels overlap cannot be plotted or
+        # looked up meaningfully, and only the caller can decide whether that matters.
+        for param, key, label, unit, values, axis, shape in (
+            ("fast_sweep", fast_key, fast_label, fast_unit, fast_flat,
+             _FAST_LEVELS_AXIS, (n_fast, n_slow)),
+            ("slow_sweep", slow_key, slow_label, slow_unit, slow_flat,
+             _SLOW_LEVELS_AXIS, (n_fast, n_slow)),
+        ):
+            grouped_by = fast_group_key if axis == _FAST_LEVELS_AXIS else slow_group_key
+            if grouped_by == key:
+                continue                    # not grouped separately; already checked
+            if _levels_separate(values.reshape(n_slow, n_fast), axis):
+                continue
+            warnings.warn(
+                f"{param}={key!r} is the coordinate of a nest grouped by "
+                f"{grouped_by!r}, and its levels overlap: "
+                f"{_overlap_report(values, axis, shape, unit)}. The grouping is sound, "
+                f"so the grid is right and every spectrum is on the setting it was "
+                f"measured at. What is not sound is this axis as a coordinate — "
+                f"plotting against it misleads and get_spectrum_at() on it is "
+                f"ambiguous. Use {grouped_by!r} as the axis if you need to address the "
+                f"nest by value.",
+                UserWarning, stacklevel=4,
+            )
+
         return SweepNesting(
-            fast_type = fast_key,
-            fast_label= fast_label,
-            fast_unit = fast_unit,
-            fast_axis = fast_flat.reshape(n_slow, n_fast)[0].copy(),
-            slow_type = slow_key,
-            slow_label= slow_label,
-            slow_unit = slow_unit,
-            slow_axis = slow_flat.reshape(n_slow, n_fast)[:, 0].copy(),
+            fast_type   = fast_key,
+            fast_label  = fast_label,
+            fast_unit   = fast_unit,
+            fast_axis   = fast_axis,
+            slow_type   = slow_key,
+            slow_label  = slow_label,
+            slow_unit   = slow_unit,
+            slow_axis   = slow_axis,
+            asserted    = asserted,
+            fast_spread = fast_spread,
+            slow_spread = slow_spread,
+            fast_group  = fast_group_key,
+            slow_group  = slow_group_key,
         )
 
-    def _nesting_failure(self, fast_key, fast_flat, slow_key, slow_flat) -> str:
-        """Explain why a declared nest did not verify, checking for a swap first."""
-        n        = self.n_sweeps
-        n_fast   = _count_distinct(fast_flat, _axis_atol(fast_flat))
-        n_slow   = _count_distinct(slow_flat, _axis_atol(slow_flat))
-        head     = (f"fast_sweep={fast_key!r} ({n_fast} distinct) inside "
-                    f"slow_sweep={slow_key!r} ({n_slow} distinct) does not "
-                    f"describe the {n} sweep points in '{self.path}'.")
+    def _resolve_grouping(self, param, declared, axis_key, axis_flat) -> tuple:
+        """
+        Resolve a ``*_group_by=`` row, defaulting to the axis it groups.
+
+        Returns ``(key, values)``.  The key equals *axis_key* when nothing separate was
+        declared, which is what every caller tests to tell the two cases apart.
+        """
+        if declared is None:
+            return axis_key, axis_flat
+        key, source, _, _ = self._resolve_sweep(declared, None, None, param=param)
+        if key == "index":
+            raise ValueError(
+                f"{param}='index' cannot group a nest — the sweep index is a "
+                f"different value at every point, so it puts each spectrum on a level "
+                f"of its own. Name the row that was commanded."
+            )
+        return key, self._axis_for_source(source)
+
+    def _asserted_shape(self, n_fast, n_slow) -> tuple:
+        """
+        Validate an asserted nest shape against ``n_sweeps``, filling in the other half.
+
+        Either count alone is enough, since the total is known exactly; giving both is
+        allowed and cross-checked, which is what catches a half-remembered scan.  Each
+        count is a number of grid points, so neither may be below 2 — a nest with one
+        row is not a nest.
+        """
+        n = self.n_sweeps
+        for name, value in (("n_fast", n_fast), ("n_slow", n_slow)):
+            if value is None:
+                continue
+            if int(value) != value or value < 2:
+                raise ValueError(
+                    f"{name}={value!r} is not a usable axis length. It counts grid "
+                    f"points along one axis of the nest, so it must be a whole "
+                    f"number of at least 2."
+                )
+
+        if n_fast is not None and n_slow is not None:
+            if int(n_fast) * int(n_slow) != n:
+                raise ValueError(
+                    f"n_fast={int(n_fast)} × n_slow={int(n_slow)} = "
+                    f"{int(n_fast) * int(n_slow)}, but '{self.path}' holds {n} sweep "
+                    f"points. Every point of the slow axis carries one complete run "
+                    f"of the fast axis, so the two counts multiply to the total. If "
+                    f"the scan was aborted part-way through a row, the completed rows "
+                    f"have to be sliced out first."
+                )
+            return int(n_fast), int(n_slow)
+
+        # One given: the other follows from the total, which also rejects a count that
+        # leaves a partial row rather than silently truncating one.
+        given_name, given = (("n_fast", n_fast) if n_fast is not None
+                             else ("n_slow", n_slow))
+        given = int(given)
+        if n % given:
+            raise ValueError(
+                f"{given_name}={given} does not divide the {n} sweep points in "
+                f"'{self.path}' — it leaves {n % given} over. Every point of the slow "
+                f"axis carries one complete run of the fast axis, so each count "
+                f"divides the total. If the scan was aborted part-way through a row, "
+                f"the completed rows have to be sliced out first."
+            )
+        other = n // given
+        if other < 2:
+            raise ValueError(
+                f"{given_name}={given} leaves {other} point(s) on the other axis of "
+                f"the {n}-point sweep, which is not a nest. Leave fast_sweep= and "
+                f"slow_sweep= off to keep the sweep flat."
+            )
+        return (given, other) if given_name == "n_fast" else (other, given)
+
+    def _warn_if_asserted_levels_overlap(self, fast_side, slow_side, shape) -> None:
+        """
+        Warn for each axis whose levels interleave under an asserted *shape*.
+
+        An asserted shape exists to load a file whose readings cannot establish one, so
+        this cannot refuse.  What it can do is say which axis does not hold apart, and
+        that is worth doing in both directions: on the file this was built for the
+        warning names the axis already known to be bad, while a shape asserted the
+        wrong way round names an axis known to be good — which is the loud signal that
+        the two counts were transposed.
+        """
+        n_fast, n_slow = shape
+        for param, key, values, unit, axis in (fast_side, slow_side):
+            if _levels_separate(values.reshape(n_slow, n_fast), axis):
+                continue
+            warnings.warn(
+                f"{param}={key!r} does not hold apart at the asserted "
+                f"{n_fast} × {n_slow}: "
+                f"{_overlap_report(values, axis, shape, unit)}. The reshape was done "
+                f"as asserted, so the grid is the shape you named, but this axis "
+                f"cannot tell its own settings apart. If it is one you expect to step "
+                f"cleanly, check that n_fast and n_slow are not the wrong way round.",
+                UserWarning, stacklevel=5,
+            )
+
+    def _nesting_failure(self, fast_side, slow_side, candidates) -> str:
+        """
+        Explain why a declared nest did not resolve to one shape.
+
+        Each side is ``(param, key, values, unit, levels_axis)`` for the row that was
+        actually tested, which is the declared axis unless a ``*_group_by=`` replaced
+        it.  *candidates* is what :func:`_nest_candidates` returned — empty when nothing
+        fitted, longer than one when the file reshapes more than one way.
+        """
+        n = self.n_sweeps
+        (fast_param, fast_key, fast_flat, fast_unit, _) = fast_side
+        (slow_param, slow_key, slow_flat, slow_unit, _) = slow_side
+        head = (f"{fast_param}={fast_key!r} inside {slow_param}={slow_key!r} does not "
+                f"describe the {n} sweep points in '{self.path}'.")
+
+        # More than one shape fits, so the file does not say which was measured.
+        if candidates:
+            shapes = ", ".join(f"{f} × {s}" for f, s in candidates)
+            return (f"{head}\n  {len(candidates)} shapes fit it equally well "
+                    f"({shapes} as fast × slow), and nothing in the file says which "
+                    f"was measured. Name it with n_fast= or n_slow=, declare an axis "
+                    f"whose readings distinguish the shapes, or leave the sweep flat.")
 
         # The declaration exists to settle which axis is inner, so the reversed
         # reading is the one mistake worth naming outright.
@@ -1431,18 +2230,42 @@ class _AttoCubeSweep:
                     f"axis is the one that runs to completion at each point of "
                     f"the slow one.")
 
-        if n_fast * n_slow != n:
-            return (f"{head}\n  {n_fast} × {n_slow} = {n_fast * n_slow}, not {n}. "
-                    f"Either one of these is not a nest axis, or the scan was "
-                    f"aborted part-way through a row — a partial final row cannot "
-                    f"be reshaped. Compare against sweep_grid() and "
-                    f"varying_parameters(); slice the completed rows, or leave the "
-                    f"sweep flat.")
+        # Nothing fitted.  What is worth reporting is the shape the file *does* look
+        # to have, and which axis broke it.  Whichever axis separates pins that
+        # shape — a fast axis that separates fixes the period of the inner loop, a
+        # slow axis that separates fixes the outer one — and the axis that does not
+        # is then the one at fault, so its overlapping readings can be quoted.
+        # Anchoring on an arbitrary divisor instead would blame a healthy axis at a
+        # shape the caller never declared.
+        shapes = [(d, n // d) for d in range(2, n // 2 + 1)
+                  if n % d == 0 and n // d >= 2]
 
-        return (f"{head}\n  The counts multiply correctly, but the values do not "
-                f"repeat in a regular nest — the fast axis does not run the same "
-                f"values in every row, or the slow axis does not hold still "
-                f"across a row. Compare against sweep_grid().")
+        # The fast axis is tried as the anchor first: it is the declared inner loop,
+        # and it is the axis a commanded parameter is usually on.
+        for anchor, culprit in ((fast_side, slow_side), (slow_side, fast_side)):
+            a_param, a_key, a_values, _, a_axis = anchor
+            c_param, c_key, c_values, c_unit, c_axis = culprit
+            for n_fast, n_slow in shapes:
+                if not _levels_separate(a_values.reshape(n_slow, n_fast), a_axis):
+                    continue
+                detail = _overlap_report(c_values, c_axis, (n_fast, n_slow), c_unit)
+                return (
+                    f"{head}\n  At {n_fast} × {n_slow}, {a_param}={a_key!r} holds "
+                    f"apart but {c_param}={c_key!r} does not: {detail}. Readings "
+                    f"that overlap cannot be told apart, so those spectra cannot be "
+                    f"assigned to a setting by value. Declare a row that steps "
+                    f"exactly — a commanded setpoint rather than a measured "
+                    f"read-back — and compare against varying_parameters() to find "
+                    f"one. To reshape anyway and accept the axis as it is, assert the "
+                    f"shape with n_fast={n_fast} (or n_slow={n_slow})."
+                )
+
+        return (f"{head}\n  No shape fits: {n} sweep points do not divide into two "
+                f"axes whose readings hold apart. Either one of these is not a nest "
+                f"axis, or the scan was aborted part-way through a row — a partial "
+                f"final row cannot be reshaped. Compare against sweep_grid() and "
+                f"varying_parameters(); slice the completed rows, or leave the "
+                f"sweep flat.")
 
     def _validate_axis_and_signals(self, axis, signals: dict) -> None:
         """
@@ -1788,6 +2611,36 @@ class _AttoCubeSweep:
         return (self._curated_value(attr) if attr is not None
                 else self.get_parameter(label))
 
+    def _role_current(self, role: str) -> np.ndarray:
+        """
+        The current at a declared electrode, in nA.
+
+        Unlike :meth:`_gate_value`, a role declared ``None`` raises: grounding an
+        electrode is what holds its potential at zero, but it says nothing about the
+        current flowing through it, which is merely unrecorded.
+        """
+        row = self._gates[role]
+        if row is None:
+            raise ValueError(
+                f"i_{role} needs a recorded current, but the {role!r} electrode was "
+                f"declared as tied to ground with no row for it. Grounding fixes "
+                f"that electrode's potential, not its current — the current still "
+                f"flows and simply was not measured, so there is no value to "
+                f"return. Declare the row that drove it if one exists: "
+                f"gates={{..., '{role}': '<row>'}}."
+            )
+        attr  = _ROLE_CURRENT_CURATED[role]
+        label = self._curated[attr][0]
+        if label is None:
+            raise ValueError(
+                f"i_{role} is not available: the {role!r} electrode is declared on "
+                f"row '{row}', which is not a source-meter channel, so no row "
+                f"records the current at that terminal. Channels carrying both a "
+                f"bias and a current in this format: "
+                f"{sorted(_CHANNEL_SIBLING_CURRENT)}. The voltage is unaffected."
+            )
+        return self._curated_value(attr)
+
     def _gate_candidates(self) -> list:
         """
         Rows that plausibly carry an electrode voltage, for the undeclared error.
@@ -1840,14 +2693,41 @@ class _AttoCubeSweep:
         return self._curated_value("power")
 
     @property
-    def Ich1(self) -> np.ndarray:
-        """Channel-1 current in nA (per sweep)."""
-        return self._curated_value("Ich1")
+    def i_top(self) -> np.ndarray:
+        """
+        Leakage current at the top gate in nA (per sweep).
+
+        Raises ``ValueError`` unless *gates* declared a top gate on a source-meter
+        channel; see :attr:`gates`.
+        """
+        self._require_role("top", "i_top")
+        return self._role_current("top")
 
     @property
-    def Ich2(self) -> np.ndarray:
-        """Channel-2 current in nA (per sweep)."""
-        return self._curated_value("Ich2")
+    def i_bot(self) -> np.ndarray:
+        """
+        Leakage current at the bottom gate in nA (per sweep).
+
+        Raises ``ValueError`` unless *gates* declared a bottom gate on a source-meter
+        channel; see :attr:`gates`.
+        """
+        self._require_role("bottom", "i_bot")
+        return self._role_current("bottom")
+
+    @property
+    def i_channel(self) -> np.ndarray:
+        """
+        Current sourced into the contact on the TMDC itself, in nA (per sweep).
+
+        Transport through the flake rather than leakage across a dielectric, which
+        is what distinguishes it from :attr:`i_top` / :attr:`i_bot`.
+
+        Raises ``ValueError`` unless *gates* declared a ``"channel"`` role on a
+        source-meter channel — including when the contact is declared grounded with
+        no row, since that fixes its potential but leaves its current unmeasured.
+        """
+        self._require_role("channel", "i_channel")
+        return self._role_current("channel")
 
     @property
     def scanner_x(self) -> np.ndarray:
@@ -2114,7 +2994,7 @@ class _AttoCubeSweep:
 
     # --- Locating a sweep point ----------------------------------------------
 
-    def _lookup_axis(self, axis: str) -> tuple:
+    def _lookup_axis(self, axis: str, param : str = "axis") -> tuple:
         """
         Return ``(values, label, unit)`` for an axis name.
 
@@ -2122,17 +3002,20 @@ class _AttoCubeSweep:
         nest coordinates.  Anything else resolves the way ``sweep=`` does — a
         registry key or a raw row label — so any per-sweep-point quantity can be
         looked up, whether or not it is what the sweep was declared with.
+
+        *param* is the name of the argument being resolved, interpolated into
+        every message so the error names the argument the caller actually passed.
         """
         if axis == "sweep":
             return self.sweep_axis, self.sweep_label, self.sweep_unit
         if axis in ("fast", "slow"):
-            nest = self._require_nesting(f"axis={axis!r}")
+            nest = self._require_nesting(f"{param}={axis!r}")
             return (getattr(nest, f"{axis}_axis"),
                     getattr(nest, f"{axis}_label"),
                     getattr(nest, f"{axis}_unit"))
         try:
             _, source, label, unit = self._resolve_sweep(
-                axis, None, None, param="axis")
+                axis, None, None, param=param)
         except ValueError as exc:
             raise ValueError(
                 f"{exc}\n  Also accepted : 'sweep' (the declared sweep axis), "
@@ -2219,7 +3102,12 @@ class _AttoCubeSweep:
                   if finite.size > 1 else 0.0)
         suffix = f" {unit}" if unit else ""
 
-        if abs(found - value) > 0.5 * step:
+        # Half a typical gap is the distance at which a request has clearly missed a
+        # grid point.  On an undriven axis those gaps are scatter-sized, so that alone
+        # would report a value as absent when it is the only value the axis holds; the
+        # tolerance floors it, and on a driven axis it is far the smaller of the two
+        # and changes nothing.
+        if abs(found - value) > max(0.5 * step, _axis_atol(values)):
             warnings.warn(
                 f"Looking up {value:.6g}{suffix} on {label} (axis={axis!r}) found "
                 f"no point there; using index {idx} at {found:.6g}{suffix}, which "
@@ -2250,7 +3138,14 @@ class _AttoCubeSweep:
             return idx
 
         grid = self.sweep_grid()
-        if grid is not None:
+        if matches.size == self.n_sweeps:
+            # Every point matched, so the axis holds one setting and nothing to select
+            # between.  A nest is the wrong suggestion here: a row that never moved is
+            # not an axis of one.
+            fix = (" This row was held at one setting for the whole file, so no value "
+                   "on it picks out a spectrum. varying_parameters() lists the rows "
+                   "that did move.")
+        elif grid is not None:
             fix = (f" This file looks like {grid} — declare it with "
                    f"fast_sweep='{grid.fast_label}', slow_sweep='{grid.slow_label}', "
                    f"and fast= / slow= then return every spectrum at a coordinate "
@@ -2396,16 +3291,28 @@ class _AttoCubeSweep:
         Report which parameter rows actually changed across the sweep.
 
         Evidence for choosing a *sweep*, and the check for "was only one gate
-        driven?".  A row counts as varying when its span exceeds *rtol* times its
-        own RMS magnitude, so instrument read-back jitter on a nominally static
-        channel does not register.  RMS rather than mean, so that a row straddling
-        zero — an anti-symmetric gate pair, say — is measured by how large it is
-        rather than by how nearly it cancels.
+        driven?".  A row counts as varying on any of three signs: its span exceeds
+        *rtol* times its own RMS magnitude, or its readings step through that span a
+        small part at a time in acquisition order, or those readings only ever move
+        one way.  Directionless jitter on a nominally static channel satisfies none
+        of the three, so it does not register; a fine sweep sitting on a large offset
+        satisfies the second or the third even though it fails the first.  RMS rather
+        than mean, so that a row straddling zero — an anti-symmetric gate pair, say —
+        is measured by how large it is rather than by how nearly it cancels.
+
+        Membership is decided by the same helper the loader groups readings with, so
+        this report and the tolerance behind :meth:`get_spectrum_at` cannot disagree
+        about which rows are only jittering.  A held row whose read-back *drifts*
+        rather than jitters therefore registers here, at any amplitude.
 
         Parameters
         ----------
         rtol : float
-            Relative span above which a row is reported.  Default ``1e-3``.
+            Relative span above which the **first** sign fires.  Default ``1e-3``.
+            It does not reach the other two, which are fixed: a row satisfying either
+            of them is reported whatever *rtol* is set to.  Raising it therefore
+            narrows the report only among rows that are recognised by their span
+            alone.
 
         Returns
         -------
@@ -2433,22 +3340,23 @@ class _AttoCubeSweep:
             finite = arr[np.isfinite(arr)]
             if finite.size < 2:
                 continue
-            span  = float(np.ptp(finite))
-            # Relative to the row's own magnitude: a 1 mV wobble on a 10 V gate
-            # is noise, the same wobble on a 2 mV channel is a sweep.
-            #
-            # RMS rather than |mean|, because a row can sit astride zero — an
-            # anti-symmetric gate pair sweeping the field does, and is routine —
-            # and its mean is then no measure of how large it is.  Flooring a
-            # vanishing mean at finfo.tiny turned the division by zero into a
-            # division by 2.2e-308, i.e. into inf.  RMS cannot vanish unless the
-            # row is identically zero, which a zero span already excludes; the
-            # floor below is belt and braces.  The threshold uses the same scale
-            # as the ranking, so the two cannot disagree about what is noise.
+            span = float(np.ptp(finite))
+            # Ranked by span relative to the row's own magnitude.  RMS rather than
+            # |mean|, because a row can sit astride zero — an anti-symmetric gate
+            # pair sweeping the field does, and is routine — and its mean is then no
+            # measure of how large it is.  Flooring a vanishing mean at finfo.tiny
+            # turned the division by zero into a division by 2.2e-308, i.e. into
+            # inf.  RMS cannot vanish unless the row is identically zero, which a
+            # zero span already excludes; the floor below is belt and braces.
             scale = max(float(np.sqrt(np.mean(finite ** 2))),
                         np.finfo(float).tiny)
-            # Checks if span of the data is bigger than the defined jitter threshold
-            if span > rtol * scale:
+            # Membership comes from the same helper the loader groups readings with,
+            # so this report and the tolerance behind get_spectrum_at() cannot
+            # disagree about which rows are only jittering.  It is wider than the
+            # ranking: a fine sweep on a large offset fails span-against-RMS and is
+            # still caught by the other two signs, which the ranking below then places
+            # low, correctly.
+            if _axis_driven(arr, rtol):
                 found.append((span / scale, label,
                               (float(finite.min()), float(finite.max()), span)))
         found.sort(reverse=True)
@@ -2738,7 +3646,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
        The CSV parser is still the PL-shaped 4-column layout.  ``spectra_type``
        currently drives **labelling and metadata only** — it does not change how
        the file is decoded, because no reflectance or reflectance-contrast
-       export has been characterised yet (see E9 in ``dev/audit-2026-07.md``).
+       export has been characterised yet (see E9 in ``dev/defects.md``).
        Loading an ``"R"`` file works only if it happens to share the PL layout.
 
     Parameters
@@ -2766,6 +3674,59 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     sweep_label, sweep_unit : str, optional
         Override the axis label / unit for the resolved sweep.  Needed mainly
         for raw-row sweeps, whose units the file does not state.
+    fast_sweep, slow_sweep : str, optional
+        Declare that the sweep points are a 2-D nest: *fast_sweep* is the inner
+        axis, which runs to completion at every point of *slow_sweep*.  Both take
+        the same vocabulary as *sweep*, a derived quantity included, and both are
+        needed — one alone raises, since which axis is inner is the fact the
+        declaration exists to carry.  Omit both to leave the sweep flat, which is
+        the default: :attr:`spectra` keeps shape ``(n_points, n_sweeps)`` either
+        way, and :meth:`as_grid` is how the grid is reached.
+
+        The shape is worked out from the readings.  Only the divisors of
+        :attr:`n_sweeps` can be shapes, since every point of the slow axis carries
+        one complete run of the fast axis, and the shape that fits is the one under
+        which neither axis's settings overlap each other.  A file whose readings
+        fit no shape, or fit more than one, is refused rather than guessed at.
+    n_fast, n_slow : int, optional
+        Assert the nest's shape instead of resolving it from the readings, for a
+        file that cannot establish one — a laser that plateaued, so two commanded
+        settings read back the same power.  Either count alone is enough, since
+        :attr:`n_sweeps` is known exactly; giving both cross-checks them.  A count
+        that does not divide :attr:`n_sweeps` raises, so a scan aborted part-way
+        through a row is still refused rather than truncated.
+
+        Requires *fast_sweep* and *slow_sweep*: a shape says how the points divide
+        up, not what was scanned along each axis.  The overlap checks still run and
+        **warn** for every axis that cannot tell its own settings apart, which is
+        also what surfaces the two counts being given the wrong way round — that
+        shows up as a warning about the axis you expect to be clean.
+
+        Asserting the shape settles the reshape only.  An overlapping axis's
+        coordinates are still whatever was read at each level, so plotting against
+        them misleads and :meth:`get_spectrum_at` on them stays ambiguous; prefer
+        declaring a row that steps exactly where the file has one.
+    fast_group_by, slow_group_by : str, optional
+        Establish that axis's levels from a **different row** than the one being
+        plotted.  Takes the same vocabulary as *fast_sweep*.
+
+        The case this exists for is a power series: the commanded setpoint steps
+        exactly and so says which spectra share a power, while the meter reading
+        carries the physical µW the axis should be labelled in.  One row cannot do
+        both, so::
+
+            slow_sweep    = "power",                 # coordinate, in µW
+            slow_group_by = "Fianium_Select_A4",     # the exact setpoint
+
+        The grouping row is what the shape is resolved from and what must hold
+        apart.  The labelled row supplies the coordinates and is **not** required to:
+        each level's coordinate is the median of the readings taken at it, with the
+        peak-to-peak range in :attr:`SweepNesting.slow_spread`.  If the labelled
+        row's own levels overlap the load warns, because the grid is then right while
+        the axis is not usable for plotting or for :meth:`get_spectrum_at`.
+
+        Which row drives an instrument is per-session configuration, so it is named
+        here and nowhere else — there is no default and no per-instrument shortcut.
     geometry : DeviceGeometry, optional
         Device geometry used to convert gate voltages to a displacement field.
         Without it :attr:`ef` is ``None``, and ``sweep="electric_field"``
@@ -2779,11 +3740,12 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         loader read and the axis convention it stores it in.
 
         Runs in wavelength space and **before every other correction**, so it
-        feeds each array below: a spike inside the *bg_region* window would
-        otherwise bias the pedestal estimate, and a spike in either array of a
-        contrast biases the ratio non-linearly.  :attr:`spectra` is left as the
-        file wrote it — the repaired counts are :attr:`spectra_cr` and the pixels
-        replaced are :attr:`cosmic_ray_mask`.
+        feeds the background estimate and the contrast: a spike inside the
+        *bg_region* window would otherwise bias the pedestal estimate, and a spike
+        in either array of a contrast biases the ratio non-linearly.
+        :attr:`spectra` is left as the file wrote it — the repaired counts are
+        :attr:`spectra_cr` and :attr:`energy_spectra_cr`, and the pixels replaced
+        are :attr:`cosmic_ray_mask`.
     bg_region_nm : tuple of (wl_min, wl_max), optional
         Wavelength range in **nm** used to estimate the background level.
         The mean counts in this window are subtracted from every sweep
@@ -2846,9 +3808,16 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         ``"channel"`` — one gate with a floating TMDC defines neither a field nor a
         density, so the declaration would be ambiguous rather than informative.
 
+        Naming a source-meter row declares that electrode's **current** as well as
+        its voltage: the instrument applies a bias and reports the current it
+        sources at the same terminal, so ``"bottom": "V_A"`` also makes ``I_A``
+        available as :attr:`i_bot`.  An electrode declared on a row that is not
+        such a channel keeps its voltage and has no current.
+
         The electrodes can be wired either way round and no export records which
         way, so this is per-session information the file cannot supply.  Without
-        it, :attr:`v_top`, :attr:`v_bot`, :attr:`v_channel`, :attr:`ef` and
+        it, :attr:`v_top`, :attr:`v_bot`, :attr:`v_channel`, :attr:`i_top`,
+        :attr:`i_bot`, :attr:`i_channel`, :attr:`ef` and
         ``sweep="electric_field"`` / ``"top_voltage"`` / ``"bottom_voltage"`` all
         raise rather than assume one: transposing two gates mirrors the field axis
         and flips the sign of any extracted dipole.  Work in channel terms with
@@ -2858,9 +3827,11 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         into exported HDF5.
     curated_labels : dict, optional
         Override which CSV row backs a curated attribute, e.g.
-        ``{"power": "Laser Power"}``.  Keys are :attr:`_CURATED` names; unknown
-        keys raise, as do ``"v_top"`` and ``"v_bot"`` — those are declared through
-        *gates*, so that one fact has one spelling.
+        ``{"power": "Laser Power"}``.  Keys are curated attribute names — the names
+        listed under *Attributes*, not CSV row labels.  Unknown keys raise, as do
+        the role-backed ones (``"v_top"``, ``"v_bot"``, ``"i_top"``, ``"i_bot"``,
+        ``"i_channel"``): those are declared through *gates*, so that one fact has
+        one spelling.
     curated_scales : dict, optional
         Override the scale factor of a curated attribute, e.g.
         ``{"power": 1.0}`` to keep raw power.  Same keys as *curated_labels*.
@@ -2875,11 +3846,16 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     energy : np.ndarray, shape (n_pixels,)
         Photon energy axis in eV (ascending order).
     spectra : np.ndarray, shape (n_pixels, n_sweeps)
-        Raw PL counts in wavelength space. Never modified after loading.
+        The file's own counts in wavelength space. Never modified after loading.
     spectra_cr : np.ndarray or None, shape (n_pixels, n_sweeps)
-        Wavelength-space counts with cosmic rays replaced by local medians, or
-        ``None`` when *cosmic_rays* was not given.  Where it exists it is what
-        every array below is built from, :attr:`contrast` included.
+        :attr:`spectra` with cosmic rays replaced by local medians, or ``None``
+        when *cosmic_rays* was not given.  Where it exists it is what the
+        corrections below are computed from, :attr:`contrast` included.
+    spectra_bg : np.ndarray or None, shape (n_pixels, n_sweeps)
+        Background-subtracted counts in wavelength space, or ``None`` when neither
+        *bg_region_nm* / *bg_region_eV* nor *bg_spectrum* was given.  Carries the
+        cosmic-ray repair as well where one was declared, so
+        ``spectra - spectra_bg`` is the pedestal alone only when no repair ran.
     cosmic_ray_mask : np.ndarray[bool] or None, shape (n_pixels, n_sweeps)
         Which pixels :attr:`spectra_cr` replaced, ``None`` when no repair was
         asked for.  ``cosmic_ray_mask.mean(axis=1)`` localises a detector defect
@@ -2888,18 +3864,22 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     cosmic_rays : dict or None
         The repair arguments as declared, or ``None``.
     energy_spectra : np.ndarray, shape (n_pixels, n_sweeps)
-        Spectra remapped to the energy axis.  Jacobian correction applied
-        if *apply_jacobian* is ``True``.  No background subtraction.
+        :attr:`spectra` on the ascending energy axis, Jacobian-corrected when
+        *apply_jacobian* is ``True``.  No repair and no background subtraction.
+    energy_spectra_cr : np.ndarray or None, shape (n_pixels, n_sweeps)
+        :attr:`spectra_cr` on the energy axis, or ``None`` when no repair was
+        declared.
     energy_spectra_pre_jacobian : np.ndarray, shape (n_pixels, n_sweeps)
-        Spectra remapped to the energy axis with **no** Jacobian correction,
-        regardless of *apply_jacobian*.  Useful for comparing raw counts
-        on the energy axis or for peak-position fitting where the density
-        correction is undesirable. No background subtraction.
+        :attr:`energy_spectra` without the Jacobian, regardless of
+        *apply_jacobian* — the same object when it is off.  Useful for
+        peak-position fitting, where the density correction moves a centre.  The
+        repaired and background-subtracted rungs have no pre-Jacobian variant of
+        their own: their wavelength-space arrays hold exactly those values.
     energy_spectra_bg : np.ndarray or None, shape (n_pixels, n_sweeps)
-        Background-subtracted version of *energy_spectra*.  Background is
-        removed in wavelength space *before* the Jacobian is applied, so
-        the correction does not amplify the residual baseline.  ``None``
-        when neither *bg_region_nm* / *bg_region_eV* nor *bg_spectrum* was given.
+        :attr:`spectra_bg` on the energy axis, or ``None`` when neither
+        *bg_region_nm* / *bg_region_eV* nor *bg_spectrum* was given.  The
+        background comes off in wavelength space *before* the Jacobian, so the
+        correction does not curve the residual baseline.
     contrast : np.ndarray or None, shape (n_pixels, n_sweeps)
         Contrast against *reference* in wavelength space, or ``None`` when no
         reference was supplied.  See :attr:`contrast_label`.
@@ -2954,8 +3934,14 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Read-only property.
     power : np.ndarray, shape (n_sweeps,)
         Excitation power in µW.  Read-only property (scaled view).
-    Ich1, Ich2 : np.ndarray, shape (n_sweeps,)
-        Gate-channel currents in nA.  Read-only properties (scaled views).
+    i_top, i_bot : np.ndarray, shape (n_sweeps,)
+        Leakage current at each gate in nA.  Raise unless *gates* declared that
+        electrode on a source-meter channel.  Read-only properties (scaled views).
+    i_channel : np.ndarray, shape (n_sweeps,)
+        Current sourced into the contact on the TMDC in nA — transport, not
+        leakage.  Raises unless *gates* declared a ``"channel"`` on a source-meter
+        channel; a contact declared grounded with no row has no current to report.
+        Read-only property (scaled view).
     scanner_x, scanner_y : np.ndarray, shape (n_sweeps,)
         Piezo scanner X / Y drive voltage in V — a drive level, not a distance.
         Converting to µm needs a per-stage µm/V calibration that is not in the
@@ -3003,6 +3989,19 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
 
     Notes
     -----
+    The spectra come in one three-rung ladder per axis, and the two axes mirror
+    each other: :attr:`spectra` / :attr:`spectra_cr` / :attr:`spectra_bg` in
+    wavelength space, and :attr:`energy_spectra` / :attr:`energy_spectra_cr` /
+    :attr:`energy_spectra_bg` on the ascending energy axis.  Each rung is the one
+    above it plus one further correction, so a suffix names the **last** correction
+    applied rather than the only one — a background-subtracted array also carries
+    the cosmic-ray repair where one was declared.  A rung is ``None`` when its
+    correction was not asked for; the first rung always exists.
+    :attr:`best_spectra` / :attr:`best_energy_spectra` return the most-corrected
+    rung present, so downstream code need not know which corrections ran.
+    :attr:`contrast` / :attr:`energy_contrast` sit outside the ladder: a different
+    quantity, not a better-corrected one.
+
     Use :attr:`parameter_labels` to list every available row name and
     :meth:`get_parameter` (or ``scan["label"]``) to pull any one of them, with
     an optional ``scale`` factor for unit conversion.
@@ -3109,6 +4108,10 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         sweep_unit     : str   = None,
         fast_sweep     : str   = None,
         slow_sweep     : str   = None,
+        n_fast          : int   = None,
+        n_slow          : int   = None,
+        fast_group_by   : str   = None,
+        slow_group_by   : str   = None,
         geometry        : DeviceGeometry = None,
         cosmic_rays     : dict  = None,
         bg_region_nm    : tuple = None,
@@ -3191,7 +4194,9 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         # What *is* checked is the row the declared sweep needs — which is why
         # this comes after the signal array, since it validates against n_sweeps.
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
-        self._bind_nesting(fast_sweep, slow_sweep)
+        self._bind_nesting(fast_sweep, slow_sweep, n_fast=n_fast, n_slow=n_slow,
+                           fast_group_by=fast_group_by,
+                           slow_group_by=slow_group_by)
 
         # --- Resolve background window to nm (always work in wavelength space) ---
         if bg_region_eV is not None:
@@ -3206,8 +4211,8 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         # The Jacobian multiplies by λ², so it turns a constant dark pedestal
         # into a curve rather than leaving it as an offset a fit can absorb.
         # Both background mechanisms run in wavelength space below, so either
-        # one satisfies this; neither means the pedestal is already curved by
-        # the time any caller sees energy_spectra.
+        # one satisfies this; neither means the pedestal is already curved on
+        # every energy-axis rung.
         if apply_jacobian and self.bg_region_nm is None and self.bg_spectrum is None:
             warnings.warn(
                 "apply_jacobian=True with no background subtraction: pass "
@@ -3215,8 +4220,8 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
                 "multiplies by λ²/hc, so an un-subtracted dark pedestal B "
                 "becomes B·λ²/hc — a baseline curving up towards the red "
                 "rather than a flat offset, which inflates fitted amplitude "
-                "and FWHM. energy_spectra_pre_jacobian holds the uncorrected "
-                "array.",
+                "and FWHM. energy_spectra_pre_jacobian holds the file's counts on "
+                "the energy axis with the Jacobian left off.",
                 UserWarning, stacklevel=3,
             )
 
@@ -3236,9 +4241,9 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
                 self.spectra, axis=0, **cosmic_rays
             )
 
-        # What every array below is built from: the repaired counts where a repair
-        # was asked for, the file's own otherwise.  `spectra` is never reassigned,
-        # so a repair adds an array rather than replacing one.
+        # What the corrections below read: the repaired counts where a repair was
+        # asked for, the file's own otherwise.  `spectra` is never reassigned, so a
+        # repair adds a rung to the ladder rather than replacing one.
         signal = self.spectra if self.spectra_cr is None else self.spectra_cr
 
         # --- Build energy axis and energy-space spectra ---
@@ -3246,20 +4251,32 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         _sort_idx         = np.argsort(self.energy)                 # ascending energy sort index
         self.energy       = self.energy[_sort_idx]                  # eV, ascending
 
-        # energy_spectra: Jacobian applied (or not), no background subtraction
+        # The first rung, on both axes: the file's own counts, uncorrected. Built
+        # from `spectra` rather than `signal` so that each rung has one meaning —
+        # a repair is `energy_spectra_cr` below, not a silent change of this one.
         self.energy_spectra = self._build_energy_spectra(
-            signal, self.wavelength, _sort_idx, apply_jacobian
+            self.spectra, self.wavelength, _sort_idx, apply_jacobian
         )
 
-        # energy_spectra_pre_jacobian: always no Jacobian, no background subtraction.
-        # Identical to energy_spectra when apply_jacobian=False; a separate array
-        # when apply_jacobian=True so both representations are always available.
+        # energy_spectra_pre_jacobian: the same rung with no Jacobian, whatever
+        # apply_jacobian says.  Identical object when it is off; a separate array
+        # when it is on so both representations are always available.  The other
+        # rungs need no pre-Jacobian variant of their own: their wavelength-space
+        # arrays hold exactly those values.
         if apply_jacobian:
             self.energy_spectra_pre_jacobian = self._build_energy_spectra(
-                signal, self.wavelength, _sort_idx, apply_jacobian=False
+                self.spectra, self.wavelength, _sort_idx, apply_jacobian=False
             )
         else:
             self.energy_spectra_pre_jacobian = self.energy_spectra
+
+        # The repair rung on the energy axis, mirroring spectra_cr.
+        if self.spectra_cr is None:
+            self.energy_spectra_cr = None
+        else:
+            self.energy_spectra_cr = self._build_energy_spectra(
+                self.spectra_cr, self.wavelength, _sort_idx, apply_jacobian
+            )
 
         # --- Wavelength-space corrections, in the order the physics requires ---
         # 1. the bg_region window mean
@@ -3279,15 +4296,17 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
             corrected = processing.subtract_spectrum(
                 corrected, self.bg_spectrum, axis=0)
 
-        # energy_spectra_bg: background-corrected, then Jacobian applied (or not).
-        # None when neither background mechanism was used.  Compared against
-        # `signal`, not `spectra`, so a cosmic-ray repair on its own does not
-        # masquerade as a background subtraction.
+        # The background rung, on both axes.  Compared against `signal`, not
+        # `spectra`, so a cosmic-ray repair on its own does not masquerade as a
+        # background subtraction; both stay None in that case and `best_*` falls
+        # back to the repair rung.
         if corrected is not signal:
+            self.spectra_bg        = corrected
             self.energy_spectra_bg = self._build_energy_spectra(
                 corrected, self.wavelength, _sort_idx, apply_jacobian
             )
         else:
+            self.spectra_bg        = None
             self.energy_spectra_bg = None
 
         # --- Contrast against a reference spectrum -------------------------
@@ -3501,27 +4520,46 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     # --- What the spectra are ----------------------------------------------
 
     @property
+    def best_spectra(self) -> np.ndarray:
+        """
+        Most-corrected wavelength-axis spectra available — the counterpart of
+        :attr:`best_energy_spectra`, returning the same rung of the ladder.
+
+        Returns :attr:`spectra_bg` when a background was supplied at load time,
+        :attr:`spectra_cr` when a cosmic-ray repair was declared without one, and
+        :attr:`spectra` otherwise, so downstream code need not know which.
+
+        Never returns the contrast, even when a *reference* was supplied: that is
+        a different quantity rather than a better-corrected one, and it is
+        negative-going, which peak fits and intensity colour bars both misread.
+        Use :attr:`contrast`.
+        """
+        for rung in (self.spectra_bg, self.spectra_cr):
+            if rung is not None:
+                return rung
+        return self.spectra
+
+    @property
     def best_energy_spectra(self) -> np.ndarray:
         """
-        Return the best available energy-axis spectra.
+        Most-corrected energy-axis spectra available — the counterpart of
+        :attr:`best_spectra`, returning the same rung of the ladder.
 
-        Yields :attr:`energy_spectra_bg` when a background was supplied at
-        construction time, otherwise :attr:`energy_spectra`.  Use this in
-        downstream code (fitting, plotting) to automatically benefit from
-        background correction without needing to know whether it was configured.
+        Returns :attr:`energy_spectra_bg` when a background was supplied at load
+        time, :attr:`energy_spectra_cr` when a cosmic-ray repair was declared
+        without one, and :attr:`energy_spectra` otherwise, so downstream code need
+        not know which.
 
-        **A contrast array is deliberately not returned here**, even when a
-        *reference* was given.  "Best" means the same physical quantity, better
-        corrected — not a different quantity.  Contrast is negative-going, so
-        feeding it to :func:`~tmdc_optics_tools.fitting.fit_scan_peak`, whose peak
-        models decay to zero in their wings, would give quietly meaningless fits;
-        and a PL map's colour bar would silently start meaning ΔR/R₀.  Ask for
-        :attr:`energy_contrast` explicitly, or ``spectra_source="contrast"`` in
+        Never returns the contrast, even when a *reference* was supplied: that is
+        a different quantity rather than a better-corrected one, and it is
+        negative-going, which peak fits and intensity colour bars both misread.
+        Use :attr:`energy_contrast`, or ``spectra_source="contrast"`` in
         :mod:`~tmdc_optics_tools.plotting`.
         """
-        return (self.energy_spectra_bg
-                if self.energy_spectra_bg is not None
-                else self.energy_spectra)
+        for rung in (self.energy_spectra_bg, self.energy_spectra_cr):
+            if rung is not None:
+                return rung
+        return self.energy_spectra
 
     @property
     def contrast_label(self) -> str:
@@ -3537,6 +4575,75 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
             return r"$R/R_0$"
         name, unit = SIGNAL_LABELS["RC"]
         return f"{name} ({unit})" if unit else name
+
+    # --- Picking a window out of the spectral axis ----------------------------
+
+    def pixel_slice(self, x_range: tuple, *, x_axis: str = "energy") -> slice:
+        """
+        Positions of the spectrometer pixels lying inside a spectral window.
+
+        Gives back *where* the window is rather than the data inside it, so that
+        one slice cuts a spectrum and its axis together and the two cannot drift
+        apart — which is what a fit over part of a spectrum needs:
+
+        >>> px   = scan.pixel_slice((1.63, 1.72))            # doctest: +SKIP
+        >>> x, y = scan.energy[px], scan.get_spectrum_at(value=50)[px]
+
+        Parameters
+        ----------
+        x_range : tuple of (lo, hi)
+            The window, in the units of *x_axis* — eV for ``"energy"``, nm for
+            ``"wavelength"``.  Bounds are inclusive, and their order carries no
+            information: ``(1.72, 1.63)`` is the same window as ``(1.63, 1.72)``.
+        x_axis : {"energy", "wavelength"}
+            Which spectral axis *x_range* is given on.  It also fixes what the
+            result may index, since the two orderings are reversed with respect
+            to each other: :attr:`energy` and every ``energy_*`` array take an
+            ``"energy"`` slice, while :attr:`wavelength`, the ``spectra*`` rungs
+            and :attr:`contrast` take a ``"wavelength"`` one.  A slice from the
+            wrong axis returns a real but wrong window.
+
+        Returns
+        -------
+        slice
+            Indexes the pixel axis — axis 0 of the spectra arrays, and the whole
+            of :attr:`energy` / :attr:`wavelength`.  A slice rather than a mask,
+            so indexing with it gives a view rather than a copy.
+
+        Raises
+        ------
+        ValueError
+            If no pixel lies inside the window, the message giving the span of
+            the axis.  An empty window is refused here rather than being left to
+            surface as an empty spectrum inside a fit.
+        ValueError
+            If the axis is not monotonic, so that the window is not one
+            consecutive run of pixels and cannot be expressed as a slice.
+        TypeError
+            If *x_range* is not a pair of numbers.
+
+        Warns
+        -----
+        UserWarning
+            When a bound lies beyond the end of the axis by more than half a
+            pixel, so the window returned is narrower than the one asked for.
+
+        See Also
+        --------
+        nearest_index : the same idea on the sweep axis, one point rather than a
+            run of them.
+
+        Examples
+        --------
+        >>> scan.pixel_slice((1.63, 1.72))                     # doctest: +SKIP
+        slice(400, 730, None)
+        >>> scan.pixel_slice((720, 760), x_axis="wavelength")  # doctest: +SKIP
+        slice(210, 540, None)
+        """
+        _, unit = _x_axis_name_unit(x_axis, what="pixel_slice()")
+        values  = self.energy if x_axis == "energy" else self.wavelength
+        return processing._window_slice(values, x_range, axis=x_axis, unit=unit,
+                                       what="pixel_slice()", stacklevel=3)
 
     # --- Picking spectra out of the sweep ------------------------------------
 
@@ -3572,12 +4679,12 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
             Coordinates on the nest axes.  Give both for a single spectrum, or
             one to hold that axis and take every point of the other.
         source : str
-            Which array to read: ``"best"`` (repaired and background-corrected
-            where available), ``"raw"``, ``"energy"``, ``"energy_bg"``,
-            ``"energy_pre_jacobian"``, ``"contrast"``, ``"contrast_wavelength"``.
+            Which correction state to read: ``"best"`` (the most-corrected state
+            available), ``"raw"``, ``"cr"``, ``"bg"``, ``"contrast"``, or
+            ``"pre_jacobian"`` (energy axis only).
         x_axis : {"energy", "wavelength"}
-            Which spectral ordering ``"best"`` should resolve to.  The returned
-            spectra run along :attr:`energy` or :attr:`wavelength` accordingly.
+            Which spectral ordering *source* is served on.  The returned spectra
+            run along :attr:`energy` or :attr:`wavelength` accordingly.
 
         Returns
         -------
@@ -3737,8 +4844,6 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
         bot_gate_label  : str   = None,
         power_label     : str   = None,
         power_scale     : float = None,
-        ich1_label      : str   = None,
-        ich2_label      : str   = None,
         roi             : int   = 1,
     ):
         warnings.warn(
@@ -3751,7 +4856,6 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
 
         labels = {name: value for name, value in (
             ("power", power_label),
-            ("Ich1",  ich1_label),     ("Ich2",  ich2_label),
         ) if value is not None}
 
         # Both sweeps below resolve through a gate role, which the new API requires
@@ -3787,11 +4891,6 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
 # Picoharp rows in the parameter list and a ~78 MHz repetition rate. Defined once
 # so the unit is a single edit if it is ever found to be otherwise.
 _TRPL_TIME_UNIT = "ns"
-
-# The per-point index in a TRPL sweep's filenames, e.g. "..._iter_12.csv".
-# Ordering must be numeric on this: plain lexicographic sorting puts iter_10
-# before iter_2, which would silently pair every decay with the wrong parameters.
-_ITER_INDEX = re.compile(r"_iter_(\d+)$", re.IGNORECASE)
 
 
 class AttoCubeTRPLSweep(_AttoCubeSweep):
@@ -3830,6 +4929,11 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
     sweep, sweep_label, sweep_unit : str, optional
         As :class:`AttoCubeSpectralSweep`.  A gate sweep needs a *geometry* for
         ``"electric_field"``, and *gates* for any of the three.
+    fast_sweep, slow_sweep, n_fast, n_slow, fast_group_by, slow_group_by : optional
+        As :class:`AttoCubeSpectralSweep`: declare a 2-D nest, optionally assert its
+        shape, and optionally group its levels from a different row than the one
+        labelled.  :meth:`as_grid` reshapes :attr:`decays` onto it.  No nested TRPL
+        sweep has been seen, so this is untested against a real file.
     geometry : DeviceGeometry, optional
     bg_region_ns : tuple of (t_min, t_max), optional
         **Pre-pulse** time window whose mean is subtracted from every decay —
@@ -3925,6 +5029,10 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         sweep_unit     : str   = None,
         fast_sweep     : str   = None,
         slow_sweep     : str   = None,
+        n_fast         : int   = None,
+        n_slow         : int   = None,
+        fast_group_by  : str   = None,
+        slow_group_by  : str   = None,
         geometry       : DeviceGeometry = None,
         bg_region_ns   : tuple = None,
         gates          : dict  = None,
@@ -3949,7 +5057,9 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         self._validate_axis_and_signals(self.time, {"Exp": self.decays})
 
         self._bind_sweep_axis(sweep, sweep_label, sweep_unit)
-        self._bind_nesting(fast_sweep, slow_sweep)
+        self._bind_nesting(fast_sweep, slow_sweep, n_fast=n_fast, n_slow=n_slow,
+                           fast_group_by=fast_group_by,
+                           slow_group_by=slow_group_by)
 
         # Pre-pulse baseline.  processing.subtract_background is generic in x, so
         # a time window needs no separate implementation from a spectral one.
@@ -4052,51 +5162,18 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
                 f"A TRPL export has a [Par, Wavelength, Exp] block layout."
             )
 
-        data_files = self._order_by_iter(data_files, path)
+        # _order_by_iter speaks paths; the shared image-sequence loader has no
+        # layouts. dict is Path -> layout, so they re-attach by lookup after the
+        # sort. stacklevel 4 matches this call chain's existing depth.
+        layouts    = dict(data_files)
+        data_files = [(f, layouts[f]) for f in _order_by_iter(
+            [f for f, _ in data_files], path, stacklevel=4)]
         payload    = self._assemble(data_files, path)
         payload["irf_files"] = irf_files
 
         if companions:
             self._cross_check_companion(payload, companions, path)
         return payload
-
-    @staticmethod
-    def _order_by_iter(data_files: list, path) -> list:
-        """
-        Sort per-point files by the integer in their ``_iter_N`` suffix.
-
-        Lexicographic order would place ``iter_10`` before ``iter_2`` and pair
-        every decay with the wrong parameter values.  A gap in the sequence is
-        reported rather than closed silently: a missing point means an aborted
-        sweep, and shifting the rest would misalign the whole axis.
-        """
-        indexed = []
-        for f, layout in data_files:
-            m = _ITER_INDEX.search(f.stem)
-            indexed.append((int(m.group(1)) if m else None, f, layout))
-
-        if any(idx is None for idx, _, _ in indexed):
-            warnings.warn(
-                f"Some files in '{path}' carry no '_iter_N' suffix "
-                f"({', '.join(f.name for idx, f, _ in indexed if idx is None)}); "
-                f"falling back to filename order, which may not be acquisition "
-                f"order.",
-                UserWarning, stacklevel=4,
-            )
-            return [(f, layout) for _, f, layout in indexed]
-
-        indexed.sort(key=lambda item: item[0])
-        seen    = [idx for idx, _, _ in indexed]
-        missing = sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
-        if missing:
-            warnings.warn(
-                f"'{path}' is missing iteration(s) {missing} between iter_"
-                f"{seen[0]} and iter_{seen[-1]} — an aborted or partly copied "
-                f"sweep. The {len(seen)} file(s) present are loaded in order; "
-                f"sweep index i is not iteration i.",
-                UserWarning, stacklevel=4,
-            )
-        return [(f, layout) for _, f, layout in indexed]
 
     def _assemble(self, data_files: list, path) -> dict:
         """
@@ -4626,11 +5703,29 @@ class RamanMap:
 # AttoCubePLScanRealSpace
 # ---------------------------------------------------------------------------
 
-# The trailing frame number in a real-space sequence's filenames, e.g.
-# "PLdualgatesweep_iter_12.csv" -> 12. Unlike AttoCubeTRPLSweep's _ITER_INDEX,
-# this does not require the literal "_iter_" text, since `prefix` is caller-
-# supplied and only the trailing digit run is guaranteed.
-_TRAILING_INT = re.compile(r"(\d+)$")
+# Rows a bare numeric grid needs before it counts as a frame.  Two rows is a
+# single spectrum (row 0 wavelength, row 1 counts), which is numeric on its first
+# line exactly like an image and so cannot be told apart by parsing that line.
+_IMAGE_MIN_ROWS = 3
+
+# What each _classify_csv kind is, and where it should go instead — shared by the
+# "nothing usable here" error and the "these were skipped" warning so one file
+# kind is described one way.  The two _BLOCK_LAYOUTS kinds take their class name
+# from _CLASS_FOR_KIND rather than repeating it.
+_CSV_KIND_REASON = {
+    "spectrum"     : "a two-row single spectrum (row 0 wavelength in nm, row 1 "
+                     "counts) — load it with SingleSpectrum",
+    "spectral"     : f"a spectral export — load it with {_CLASS_FOR_KIND['spectral']}",
+    "temporal"     : f"a temporal export — load it with {_CLASS_FOR_KIND['temporal']}",
+    "too_short"    : "a single row of numbers",
+    "unrecognised" : "headed, but by no known AttoCube block layout",
+    "unreadable"   : "empty or unreadable",
+}
+
+# Kinds that belong in an image directory and are therefore dropped in silence: an
+# acquisition writes its parameter export alongside the frames every time.  Every
+# other kind is named in a warning, having no routine reason to be there.
+_EXPECTED_NON_IMAGE_KINDS = frozenset(_CLASS_FOR_KIND)
 
 
 class AttoCubePLScanRealSpace:
@@ -4638,9 +5733,16 @@ class AttoCubePLScanRealSpace:
     Loader for a gate-dependent sequence of real-space PL images from the
     AttoCube cryogenic confocal.
 
-    Files must be pure numeric CSVs (no header row) matching the pattern
-    ``{prefix}*.csv`` in *path*. Files that contain a text header (e.g. a
-    spectral scan file) are automatically excluded.
+    Frames are the pure numeric CSVs (no header row) matching ``{prefix}*.csv``
+    in *path*, and must have **at least three rows** — a two-row grid is a single
+    spectrum rather than an image, and is excluded along with anything carrying a
+    text header.  An excluded file is named in a warning unless it is an AttoCube
+    export, which an acquisition routinely writes beside its frames.
+
+    Frames are ordered by the integer in their ``_iter_N`` filename suffix, so
+    ``iter_10`` follows ``iter_2`` rather than preceding it.  A file with no such
+    suffix, and a gap in the sequence, are both warned about; a gap is never
+    closed up, so ``load_frame(i)`` is not necessarily iteration ``i``.
 
     Parameters
     ----------
@@ -4653,6 +5755,14 @@ class AttoCubePLScanRealSpace:
         compute a field axis (gate voltages are not embedded in these files).
     laser_ref : AttoCubeLaserReferenceImage, optional
         Laser spot reference, used for annotation in animations.
+    bg_region : tuple of (row_slice, col_slice), optional
+        Pixel-space patch of signal-free detector used to estimate a dark
+        pedestal, e.g. ``(slice(0, 40), slice(0, 40))`` for a corner.  Supplying
+        it makes :meth:`load_frame_bg` available; :meth:`load_frame` is
+        unaffected and always returns the file's own counts.
+    bg_stat : {``"median"``, ``"mean"``}
+        Statistic used to reduce *bg_region* to the pedestal.  ``"median"``
+        survives a cosmic ray inside the patch; ``"mean"`` does not.
     """
 
     def __init__(
@@ -4664,6 +5774,14 @@ class AttoCubePLScanRealSpace:
         bg_region : tuple = None,
         bg_stat   : str   = "median",
     ):
+        if bg_stat not in _BG_STATS:
+            # _apply_bg_region falls through to the mean for anything that is not
+            # "median", so an unchecked typo silently changes the estimator.
+            raise ValueError(
+                f"bg_stat {bg_stat!r} is not recognised. "
+                f"Choose from: {list(_BG_STATS)}."
+            )
+
         self.path      = str(path)
         self.geometry  = geometry
         self.laser_ref = laser_ref
@@ -4671,100 +5789,164 @@ class AttoCubePLScanRealSpace:
         self.bg_stat   = bg_stat
 
         candidates = sorted(Path(path).glob(f"{prefix}*.csv"))
-        files, skipped = [], []
-        for f in candidates:
-            (files if self._is_image_csv(f) else skipped).append(f)
-        if not files:
+        kinds      = {f: self._classify_csv(f) for f in candidates}
+        images     = [f for f, kind in kinds.items() if kind == "image"]
+        skipped    = {f: kind for f, kind in kinds.items() if kind != "image"}
+        if not images:
             raise ValueError(
                 f"No real-space image CSV files found with prefix '{prefix}' in '{path}'. "
-                f"Found {len(candidates)} candidate(s) but none passed the numeric-grid check "
-                f"(spectral scan files with a header row, and two-row SingleSpectrum files, "
-                f"are excluded automatically)."
+                f"Found {len(candidates)} candidate(s), none of them an image of at "
+                f"least {_IMAGE_MIN_ROWS} rows:\n"
+                + self._describe_skipped(skipped)
             )
-        if skipped:
+        # An export beside the frames is the expected case and says nothing; a
+        # spectrum or an unreadable file among them means the directory is not
+        # what the caller thinks it is, and silently dropping it is how a
+        # half-loaded sequence reaches a diffusion fit.
+        unexpected = {f: kind for f, kind in skipped.items()
+                      if kind not in _EXPECTED_NON_IMAGE_KINDS}
+        if unexpected:
             warnings.warn(
-                f"Skipped {len(skipped)} of {len(candidates)} candidate file(s) in '{path}' "
-                f"that are not real-space images (a header row, or exactly two rows — a "
-                f"SingleSpectrum's wavelength/counts shape): "
-                f"{', '.join(f.name for f in skipped)}.",
-                UserWarning, stacklevel=2,
+                f"Skipped {len(unexpected)} file(s) in '{path}' that are not "
+                f"real-space images:\n" + self._describe_skipped(unexpected),
+                stacklevel=2,
             )
-        self.files = self._order_by_index(files, path)
+        # Acquisition order, read from `_iter_N` — not the glob's lexicographic
+        # order, which puts iter_10 before iter_2 on any export whose padding is
+        # absent or narrower than the frame count. Every frame would then carry
+        # the wrong index into animations and into
+        # analyse_diffusion_sequence(var_array=…).
+        # stacklevel 3: the helper, this __init__, the caller's line.
+        self.files = _order_by_iter(images, path, stacklevel=3)
 
     @staticmethod
-    def _is_image_csv(path: Path) -> bool:
+    def _classify_csv(path: Path) -> str:
         """
-        Return True if *path* is a bare numeric grid of at least three rows.
+        Name what kind of CSV *path* is, from its opening lines alone.
 
-        The first line must parse as floats — a text header (e.g. a
-        spectral scan file) fails this and returns False. Exactly two
-        numeric rows is a `SingleSpectrum` (row 0 the wavelength axis, row 1
-        counts), not an image, so that shape returns False too — the same
-        row-count distinction :func:`_read_block_layout` already draws for
-        headerless CSVs.
+        Cheap enough to run over a whole directory: at most three lines are read,
+        so a multi-hundred-MB export costs the same as a small one.
+
+        Parameters
+        ----------
+        path : Path
+
+        Returns
+        -------
+        str
+            ``"image"`` for a numeric grid of at least three rows;
+            ``"spectrum"`` for one of exactly two (a wavelength axis and its
+            counts); ``"too_short"`` for one of a single row; ``"spectral"`` or
+            ``"temporal"`` for an AttoCube export, named as in its header;
+            ``"unrecognised"`` for a header matching no known block layout; and
+            ``"unreadable"`` for an empty or unopenable file.
+
+        See Also
+        --------
+        _read_block_layout : names the two export layouts, and is what this
+            defers to once a text header is seen.
         """
         try:
             with open(path, "r") as fh:
                 first_line = fh.readline()
-                float(first_line.strip().split(",")[0])
-                n_more_rows = sum(1 for _, line in zip(range(2), fh) if line.strip())
-        except (ValueError, OSError):
-            return False
-        return n_more_rows >= 2
+                if not first_line.strip():
+                    return "unreadable"
+                try:
+                    # Only the first field, and split no further: a frame's row is
+                    # wide, and one field is all that separates a numeric grid from
+                    # a header whose leading column reads "Parameters Labels".
+                    float(first_line.split(",", 1)[0].strip())
+                except ValueError:
+                    header = True
+                else:
+                    header = False
+                    # The handle sits on row 1, so two more lines settle whether a
+                    # third exists.  Nothing beyond _IMAGE_MIN_ROWS is read, so this
+                    # is a threshold test and not a row count.
+                    n_rows = 1 + _n_rows_upto(fh, _IMAGE_MIN_ROWS - 1)
+        except OSError:
+            return "unreadable"
+
+        if not header:
+            if n_rows >= _IMAGE_MIN_ROWS:
+                return "image"
+            return "spectrum" if n_rows == 2 else "too_short"
+
+        # Headed files are classified where every other loader classifies them,
+        # so "spectral" and "temporal" keep meaning the block layouts they name.
+        try:
+            return _read_block_layout(path)["kind"]
+        except ValueError:
+            return "unrecognised"
 
     @staticmethod
-    def _order_by_index(files: list, path) -> list:
-        """
-        Sort files by the trailing integer in their filename.
-
-        Lexicographic order places frame 10 before frame 2 once a sequence
-        passes 9 frames, pairing every image with the wrong index —
-        animations play out of order and
-        ``analyse_diffusion_sequence(var_array=...)`` mislabels each frame's
-        variable. Mirrors :meth:`AttoCubeTRPLSweep._order_by_iter`: a gap in
-        the sequence is reported rather than closed silently, since a
-        missing frame means an aborted acquisition, and shifting the rest
-        would misalign whatever external variable the frames are paired with.
-        """
-        indexed = []
-        for f in files:
-            m = _TRAILING_INT.search(f.stem)
-            indexed.append((int(m.group(1)) if m else None, f))
-
-        if any(idx is None for idx, _ in indexed):
-            warnings.warn(
-                f"Some files in '{path}' carry no trailing index number "
-                f"({', '.join(f.name for idx, f in indexed if idx is None)}); "
-                f"falling back to filename order, which may not be acquisition order.",
-                UserWarning, stacklevel=3,
-            )
-            return [f for _, f in indexed]
-
-        indexed.sort(key=lambda item: item[0])
-        seen    = [idx for idx, _ in indexed]
-        missing = sorted(set(range(seen[0], seen[-1] + 1)) - set(seen))
-        if missing:
-            warnings.warn(
-                f"'{path}' is missing frame index(es) {missing} between {seen[0]} and "
-                f"{seen[-1]} — an aborted or partly copied sequence. The {len(seen)} "
-                f"file(s) present are loaded in order; frame i is not necessarily index i.",
-                UserWarning, stacklevel=3,
-            )
-        return [f for _, f in indexed]
+    def _describe_skipped(skipped: dict) -> str:
+        """One indented ``name — why`` line per entry of a ``{Path: kind}`` map."""
+        return "\n".join(
+            f"  {f.name} — {_CSV_KIND_REASON.get(kind, kind)}"
+            for f, kind in skipped.items()
+        )
 
     def load_frame(self, idx: int) -> np.ndarray:
-        """Load and return a single frame as a 2-D NumPy array."""
+        """
+        Load frame *idx* as a 2-D array of the file's own counts.
+
+        Never background-corrected, whatever was passed as *bg_region* — see
+        :meth:`load_frame_bg` for that.
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(ny, nx)``.
+        """
         return np.loadtxt(self.files[idx], delimiter=",")
+
+    def load_frame_bg(self, idx: int) -> np.ndarray:
+        """
+        Load frame *idx* with the *bg_region* pedestal subtracted.
+
+        Returns
+        -------
+        np.ndarray
+            Shape ``(ny, nx)``.  A new array; :meth:`load_frame` is unaffected.
+
+        Raises
+        ------
+        ValueError
+            If no *bg_region* was supplied at load time.  There is no pedestal
+            to estimate, and returning the raw frame would silently answer a
+            different question.
+        """
+        if self.bg_region is None:
+            raise ValueError(
+                f"No background-corrected frames on this scan: '{self.path}' was "
+                f"loaded without a bg_region. Pass bg_region=(row_slice, col_slice) "
+                f"to the constructor, or use load_frame() for the raw counts."
+            )
+        return processing._apply_bg_region(
+            self.load_frame(idx), self.bg_region, self.bg_stat
+        )
 
     @property
     def n_frames(self) -> int:
         """Number of frames loaded."""
         return len(self.files)
 
-    def preview_image(self, idx: int, cmap = "gray") -> tuple:
-        """Plot a single frame and return (fig, ax)."""
+    def preview_image(self, idx: int, cmap = "gray", frame_source: str = "best") -> tuple:
+        """
+        Plot a single frame and return ``(fig, ax)``.
+
+        Parameters
+        ----------
+        idx : int
+            Frame index.
+        cmap : str or Colormap
+        frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+            Which frame to draw.  ``"best"`` is background-corrected when a
+            *bg_region* was supplied at load time, and raw otherwise.
+        """
         fig, ax = plt.subplots()
-        ax.imshow(self.load_frame(idx), cmap)
+        ax.imshow(_resolve_frame(self, idx, frame_source), cmap)
         ax.axis("off")
         return fig, ax
 

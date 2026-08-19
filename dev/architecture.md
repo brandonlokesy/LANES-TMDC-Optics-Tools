@@ -14,15 +14,17 @@ when you need the argument rather than the mechanism.
 
 | File | Holds |
 |---|---|
-| `.claude/CLAUDE.md` | standing conventions, physics record, design principles, settled decisions |
-| `dev/audit-2026-07.md` | the defect register: what is broken, what was fixed and when |
-| `dev/E7b-E7c-gates.md` | the gate machinery line by line — the deep dive this file summarises |
-| `dev/plan-E12.md`, `dev/cosmic_ray_fix.md`, … | one change each |
+| `.claude/CLAUDE.md` | how to write code here — the rules, not the reasoning |
+| `dev/decisions/` | one record per decision: what was chosen, what was rejected, what followed |
+| `dev/design-principles.md` | the argument behind the rules, with worked examples |
+| `dev/physics-conventions.md` | what each physical quantity means, and when it is valid |
+| `dev/instruments/` | one file per acquisition system: export format and hardware facts |
+| `dev/defects.md` | the defect register: what is broken, what was fixed and when |
+| `dev/plan-E12.md`, … | work planned but not yet landed |
 | **this file** | how the pieces fit and what the words mean |
 
 **On line numbers.** This file names functions and attributes rather than line
-numbers, because names survive edits. `dev/E7b-E7c-gates.md` uses line numbers
-deliberately (it is pinned to one dated change); this one is meant to stay true.
+numbers, because names survive edits and line numbers rot silently.
 
 ---
 
@@ -41,7 +43,8 @@ anything above it.
              │
              ├──► fitting.py     arrays → dataclasses (FitResult, DipoleResult)
              ├──► diffusion.py   image arrays → DiffusionResult
-             └──► plotting.py    objects/arrays → (fig, ax, artist)
+             └──► plotting.py    objects/arrays → (fig, ax, artist), or a
+                                 <Thing>Plot NamedTuple past that shape
 ```
 
 The contracts, in one line each:
@@ -55,7 +58,8 @@ The contracts, in one line each:
   `loaders._decode` so `h5py` is only needed if you actually touch an `.h5`.
 - **`fitting`** — curve fits, returning dataclasses that carry parameters,
   uncertainties, and diagnostics.
-- **`plotting`** — draws. Returns `(fig, ax, <artist>)`, never calls `plt.show()`.
+- **`plotting`** — draws. Returns `(fig, ax, <artist>)`, or a named tuple when it
+  draws more than that, and never calls `plt.show()`.
 - **`diffusion`** — real-space exciton cloud analysis (segment, centroid, area).
 
 Two rules that come up constantly and are easy to break by accident:
@@ -186,8 +190,9 @@ leakage current. Which axis was swept is the caller's to declare.
 
 ### Curated parameter / curated attribute / the curated registry
 
-Seven rows are **analysis-primary**, so they get promoted to first-class properties
-with a unit conversion attached. That promotion is the **curated registry**.
+A handful of rows are **analysis-primary**, so they get promoted to first-class
+properties with a unit conversion attached. That promotion is the **curated
+registry**.
 
 The class-level table `_AttoCubeSweep._CURATED` maps
 
@@ -200,15 +205,28 @@ _CURATED = {
     "v_top":     ("V_A",              1.0,      "V"),
     "v_bot":     ("V_B",              1.0,      "V"),
     "power":     ("Excitation Power", 0.303e6,  "µW"),
-    "Ich1":      ("I_A",              1e9,      "nA"),
-    "Ich2":      ("I_B",              1e9,      "nA"),
+    "i_top":     (None,               1e9,      "nA"),
+    "i_bot":     (None,               1e9,      "nA"),
+    "i_channel": (None,               1e9,      "nA"),
     "scanner_x": ("Scanner X",        1.0,      "V"),
     "scanner_y": ("Scanner Y",        1.0,      "V"),
 }
 ```
 
 So a **curated attribute** is the Python-side name (`power`), and the row label is
-the file-side name (`"Excitation Power"`). Reading one is:
+the file-side name (`"Excitation Power"`).
+
+A `None` label means the row is not a fixed property of the format but comes from
+the session's `gates=` declaration. The two voltages carry a default anyway, because
+`_gate_candidates()` and `gate_mode` both describe an *undeclared* scan and need
+somewhere to look; the three currents have no such reader, so a default there would
+be a guess nothing consults. Their labels are filled in from `gates` through
+`_CHANNEL_SIBLING_CURRENT`, which records that a source-meter channel's bias row and
+current row are one terminal — `{"bottom": "V_A"}` therefore also makes `I_A`
+reachable as `i_bot`. A gate declared on some other row keeps its voltage and has no
+current.
+
+Reading a curated entry is:
 
 ```python
 def _curated_value(self, name):
@@ -294,8 +312,32 @@ row recording it.
 Channel-level work needs no declaration at all: `scan["V_A"]` and `sweep="V_A"` are
 unaffected by any of this.
 
-Full treatment, including every refusal and why each one is where it is:
-`dev/E7b-E7c-gates.md`.
+### The refusal matrix
+
+What each access does under each declaration:
+
+| Access | undeclared | `{top, bottom}` | `{bottom, channel}` |
+|---|---|---|---|
+| `scan["V_A"]`, `sweep="V_A"` | ok | ok | ok |
+| `gate_mode`, `repr()` | ok | ok | ok |
+| `v_bot` | **raise** | ok | ok |
+| `v_top` | **raise** | ok | **raise** (no such gate) |
+| `v_channel` | **raise** | **raise** (not declared) | ok |
+| `ef`, no geometry | `None` | `None` | `None` |
+| `ef`, with geometry | **raise** | ok | **raise** (no field) |
+| `carrier_density`, no geometry | `None` | `None` | `None` |
+| `carrier_density`, with geometry | **raise** | **raise** (no channel) | ok |
+| `sweep="top_voltage"` | **raise** | ok | **raise** |
+| `sweep="electric_field"` | **raise** | ok (needs geometry) | **raise** |
+| `sweep="carrier_density"` | **raise** | **raise** (no channel) | ok (needs geometry) |
+| `sweep="power"`, `"piezo_x"`, … | ok | ok | ok |
+
+**Load-time vs access-time:** everything in a `sweep=` row raises during construction;
+everything in a property row raises on first access.
+
+Why each refusal is where it is:
+`dev/decisions/0002-gate-wiring-must-be-declared.md` and
+`dev/decisions/0003-gates-declares-device-topology.md`.
 
 ### Sweep type vs sweep source
 
@@ -435,14 +477,20 @@ Precedence is the same everywhere: **explicit argument > file metadata > default
 | `_resolve_sweep` | loaders | the sweep axis | unknown sweep; missing row; missing role/geometry |
 | `_resolve_aux_spectrum` | loaders | a background or reference onto this scan's grid | axis mismatch (never resamples) |
 | `_resolve_baseline` | fitting | `"constant"`/`"linear"`/`"none"` → model terms | unrecognised key |
-| `_resolve_x_axis` | plotting | `"energy"`/`"wavelength"` → `(array, label)` | anything else |
-| `_resolve_spectra` | loaders | `spectra_source=` / `source=` → the actual array | source unavailable on this scan |
+| `_x_axis_name_unit` | constants | `"energy"`/`"wavelength"` → `(name, unit)` | anything else |
+| `_resolve_x_axis` | plotting | an axis name → `(array, label)` | delegates the refusal |
+| `_resolve_spectra` | loaders | a correction state + `x_axis` → the actual array | unknown axis or source; the class has no such correction; the correction was not requested; `"pre_jacobian"` off the energy axis |
 
 Two design habits visible in all of them:
 
-- **They are the only place that ambiguity is decided.** If you find yourself
-  branching on `x_axis == "energy"` in a new plot function, call `_resolve_x_axis`
-  instead — that is what it is for.
+- **They are the only place that ambiguity is decided.** The `x_axis` vocabulary is
+  the worked example of why that matters, since it is the one ambiguity decided in
+  three modules: `constants.X_AXES` holds the two axes and `_x_axis_name_unit` is the
+  only thing that refuses a third, so `_resolve_x_axis` (plotting), `_resolve_spectra`
+  and `pixel_slice` (loaders) and `fit_scan_peak` (fitting) share one message. A
+  branch on `x_axis == "energy"` still picks the arrays — that mapping is not uniform
+  — but it must sit *after* the refusal, or the `else` is a two-way test on a
+  free-form string and every misspelling reads as wavelength (A14).
 - **A disagreement is not swallowed.** `_resolve_spectra_type` warns when the
   argument and the file disagree, then uses the argument. A relabelled measurement is
   exactly the error that survives into every downstream figure.
@@ -508,7 +556,7 @@ geom.carrier_density(v_bot=…)       # cm⁻², electrons positive
 ```
 
 Two things about this class that a maintainer will otherwise get wrong, both recorded
-in `.claude/CLAUDE.md` with the full derivation:
+in `dev/physics-conventions.md` §2 with the full derivation:
 
 - **`electric_field` is exact as written.** Two plausible "simplifications" are
   already shipped elsewhere in the group and both change the numbers — one by 0.6%,
@@ -714,46 +762,75 @@ scan.n_points / n_pixels, scan.n_sweeps, scan.n_declared_sweeps
 scan.wavelength         # nm, ascending, as the file wrote it
 scan.energy             # eV, ascending  (hc/λ, then argsorted)
 
-# — signals, wavelength space —
+# — signals, wavelength space —  (one cumulative ladder, mirrored below)
 scan.spectra            # THE FILE'S OWN COUNTS.  never mutated.
 scan.spectra_roi1/roi2  # both ROIs, always present
-scan.spectra_cr         # cosmic-ray repaired, or None
+scan.spectra_cr         # + cosmic-ray repaired, or None
+scan.spectra_bg         # + background subtracted, or None
 scan.cosmic_ray_mask    # which pixels moved, or None
-scan.contrast           # (S−R)/R, or None
+scan.best_spectra       # _bg if present, else _cr, else spectra
+scan.contrast           # (S−R)/R, or None — outside the ladder
 
 # — signals, energy space (all ascending in energy) —
-scan.energy_spectra                  # Jacobian per apply_jacobian, no background
-scan.energy_spectra_pre_jacobian     # never Jacobian; same object when it is off
-scan.energy_spectra_bg               # background-corrected, or None
+scan.energy_spectra                  # the file's counts; Jacobian per apply_jacobian
+scan.energy_spectra_cr               # + cosmic-ray repaired, or None
+scan.energy_spectra_bg               # + background subtracted, or None
+scan.energy_spectra_pre_jacobian     # first rung, never Jacobian; same object when off
+scan.best_energy_spectra             # the same rung best_spectra picks
 scan.energy_contrast                 # Jacobian NEVER applied — it cancels in a ratio
-scan.best_energy_spectra             # _bg if available, else energy_spectra
 
 # — instrument state —
 scan.parameters, scan["V_A"], scan.get_parameter("V_A", scale)
 scan.varying_parameters()
-scan.power, scan.Ich1, scan.Ich2, scan.scanner_x, scan.scanner_y
+scan.power, scan.scanner_x, scan.scanner_y
 
 # — device —
 scan.gates, scan.is_dual_gated, scan.gate_mode
 scan.v_top, scan.v_bot, scan.v_channel, scan.ef, scan.carrier_density
+scan.i_top, scan.i_bot, scan.i_channel        # role-backed, need gates=
 
 # — axis for plotting —
 scan.sweep_type, scan.sweep_axis, scan.sweep_axis_label, scan.signal_label
 scan.sweep_grid()
 ```
 
-## `best_energy_spectra` — the "just give me the right array" accessor
+## `best_spectra` / `best_energy_spectra` — the "just give me the right array" pair
 
-Returns `energy_spectra_bg` if a background was supplied, else `energy_spectra`, so
-downstream code need not know which. It **never returns the contrast**, even when a
-reference was given: contrast is a *different quantity*, not a better-corrected one,
-and it is negative-going — a peak fit whose model decays to zero in the wings would
-give quietly meaningless numbers, and a PL colour bar would silently start meaning
-ΔR/R₀. Ask for `energy_contrast` explicitly.
+One accessor per axis, so a caller choosing on `x_axis` names a property on both sides:
 
-`loaders._resolve_spectra` mirrors this with `spectra_source=` — the `source=` of
-`get_spectrum_at`, and what `plotting` imports — and `"best"` there
-follows the same rule.
+| Accessor | Returns |
+|---|---|
+| `best_spectra` | `spectra_bg` → `spectra_cr` → `spectra`, first one present |
+| `best_energy_spectra` | `energy_spectra_bg` → `energy_spectra_cr` → `energy_spectra`, first one present |
+
+The two pick the **same rung** — that is the invariant, and a test asserts both in one
+place so they cannot drift apart.
+
+Neither **ever returns the contrast**, even when a reference was given: contrast is a
+*different quantity*, not a better-corrected one, and it is negative-going — a peak fit
+whose model decays to zero in the wings would give quietly meaningless numbers, and a PL
+colour bar would silently start meaning ΔR/R₀. Ask for `energy_contrast` explicitly.
+
+**Both halves of the pair have to exist, or callers hand-roll the missing one.** While
+only the energy accessor existed, four sites spelt the wavelength half as raw `spectra`
+and so dropped a declared repair on that axis (A16). `SingleSpectrum` has carried both
+names all along, and its callers were the ones that were right.
+
+`loaders._resolve_spectra` answers the same question for `spectra_source=` — the
+`source=` of `get_spectrum_at`, and what `plotting` imports — with `"best"` delegating to
+whichever of the pair the axis names, so each class decides what its own best is.
+`fitting` uses the two properties directly instead: it must not import from `loaders`,
+which would put the algorithm layer above the I/O layer.
+
+**A source names a correction state, `x_axis` names the axis.** `"raw"` / `"cr"` / `"bg"`
+/ `"contrast"` each exist on both axes, so no combination of the two arguments can be a
+mismatch — which is why there is no longer a warning for one. The single exception is
+`"pre_jacobian"`, which is energy-only because the Jacobian belongs to that
+representation rather than to the counts; asked for on the wavelength axis it **raises**,
+naming the three states that do live there. An absent source distinguishes *the class
+does not offer this correction* (a `SingleSpectrum` has no cosmic-ray repair, and no
+argument would give it one) from *the correction was not requested*, which names the
+argument that would.
 
 ## The three properties that must never raise
 
@@ -845,22 +922,28 @@ This is the part most likely to be broken by a well-meaning edit, because the or
 is physics.
 
 ```
-   file counts  ──►  spectra                          (never mutated, ever)
-        │
+   file counts  ──►  spectra  ─────────────────►  energy_spectra
+        │                                     = jacobian?(spectra), argsorted
+        │                                        energy_spectra_pre_jacobian
         ▼  cosmic_rays=          FIRST — a spike biases everything downstream
-   spectra_cr / cosmic_ray_mask
+   spectra_cr / cosmic_ray_mask ─────────────►  energy_spectra_cr
         │
         │   signal = spectra_cr if repaired else spectra
-        ├──────────────────────────────────────────────┐
-        ▼  (wavelength space)                          ▼  (no bg)
-   bg_region_nm  → subtract_background            energy_spectra
-   bg_spectrum   → subtract_spectrum         = jacobian?(signal), argsorted
+        ▼  (wavelength space)
+   bg_region_nm  → subtract_background
+   bg_spectrum   → subtract_spectrum
         │
-        ├──► energy_spectra_bg  = jacobian?(corrected), argsorted
+        ├──► spectra_bg  ──────────────────────►  energy_spectra_bg
         │
         └──► reference= → spectral_contrast(corrected, reference)
                  └──► contrast, energy_contrast   (Jacobian NEVER applied)
 ```
+
+Every rung is stored on both axes, and each energy rung is its wavelength rung
+argsorted onto ascending energy, times `λ²/hc` iff `apply_jacobian`. So the right-hand
+column is a *representation* of the left, not a second chain — which is why there is
+one `_pre_jacobian` array (of the first rung) rather than one per rung: the
+wavelength-space rungs already hold those values.
 
 The four rules encoded in that diagram:
 
@@ -882,12 +965,20 @@ The four rules encoded in that diagram:
    `(S·λ²/hc)/(R·λ²/hc) = S/R` exactly — it cancels identically, and applying it to
    the numerator alone would be an error.
 
-**Sentinels.** `energy_spectra_bg` is `None` when no background was supplied, and the
-test for that is `corrected is not signal` — comparing against `signal`, not
-`spectra`, so a cosmic-ray repair on its own does not masquerade as a background
-subtraction. `energy_spectra_pre_jacobian` is the *same object* as `energy_spectra`
-when the Jacobian is off, and a separate array when it is on, so both representations
-are always reachable.
+**Sentinels.** A rung is `None` when its correction was not requested, so the `None`
+pattern *is* the record of what ran. `spectra_bg` / `energy_spectra_bg` test
+`corrected is not signal` — comparing against `signal`, not `spectra`, so a cosmic-ray
+repair on its own does not masquerade as a background subtraction and both stay `None`.
+`energy_spectra_pre_jacobian` is the *same object* as `energy_spectra` when the Jacobian
+is off, and a separate array when it is on, so both representations are always reachable.
+
+**A suffix names the last correction, not the only one.** The ladder is cumulative, so
+`spectra_bg` carries the cosmic-ray repair too when one was declared — meaning
+`spectra - spectra_bg` is the pedestal alone only if no repair ran. Provenance lives in
+the declarations (`cosmic_rays`, `bg_region_nm`, `bg_spectrum`), in `cosmic_ray_mask`,
+and in the HDF5 attributes; encoding it in the attribute name instead (`spectra_cr_bg`)
+would make the *name* depend on which corrections were requested, which is the branch
+`best_*` exists to remove.
 
 **Grid mismatch on an auxiliary spectrum raises rather than interpolating.**
 Resampling changes the numbers and smooths the data, so it is a correction and cannot
@@ -921,7 +1012,11 @@ Two consequences the assembly code exists for:
   so classification is by content, not filename.** `_read_block_layout` reads one
   header line per file and sorts them.
 - **Order by the integer in `_iter_N`**, via `_order_by_iter`. Lexicographic order
-  puts `iter_10` before `iter_2`.
+  puts `iter_10` before `iter_2`. The helper is module-level and shared with
+  `AttoCubePLScanRealSpace`, which has the same problem over image frames; it takes a
+  plain `list[Path]`, so this call site re-attaches each file's layout by dict lookup
+  after the sort. It warns on a missing suffix, a gap, and an index claimed by more
+  than one file, and repairs none of them.
 
 The per-file time axes are not bit-identical (bin width varies in its seventh
 figure), so `_assemble` compares them with `time_rtol`, never for equality.
@@ -982,15 +1077,25 @@ auxiliary spectra out of `/metadata`, which an old reader would silently drop).
 
 ## `processing` — arrays in, arrays out
 
-No objects, no files, no matplotlib. Everything takes an `axis=` and respects the
-`(n_points, n_sweeps)` convention.
+No objects, no files. Everything takes an `axis=` and respects the
+`(n_points, n_sweeps)` convention. The one exception to "no matplotlib" is
+`_draw_region_box`, which lives here so that `loaders` and `diffusion` share one
+drawer instead of forking it (D1).
 
 ```
 normalise_peak / normalise_area      subtract_background / subtract_spectrum
-smooth_median / smooth_savgol        crop
+smooth_median / smooth_savgol        crop / _window_slice
 wavelength_to_energy / energy_to_wavelength / jacobian_correction_wvl2E
 spectral_contrast                    remove_cosmic_rays
 ```
+
+`_window_slice` turns a `(lo, hi)` window on a measured axis into a `slice`, so the
+axis and the signal are cut by one object and both stay views. It is what
+`AttoCubeSpectralSweep.pixel_slice` and `fitting.fit_scan_peak` are both built on, and
+it refuses an empty window and warns on a clipped bound — which is why it sits next to
+`crop`, the remaining spelling of the same window that does neither. (The third is
+`plot_power_series`'s inline mask.) Unifying `crop` on it would make it raise where it
+now returns an empty array, so that is its own change.
 
 `spectral_contrast` returns `(contrast, reference_guarded)` — the second is the
 reference actually used, so the caller can see what it divided by. That is the
@@ -1018,7 +1123,20 @@ documenting*, that is deletion material, not documentation material.
 
 ## `plotting` — returns handles, takes few parameters
 
-Every function returns `(fig, ax, <artist>)` and never calls `plt.show()`.
+Most functions return `(fig, ax, <artist>)` and none calls `plt.show()`.
+
+Four draw more than a single artist, and return a `NamedTuple` instead. It is still a
+tuple, so `fig, ax, cb, lines, ax_twin = plot_spectral_series(...)` unpacks as it
+always did; the names exist so a caller reaching for one member does not count
+positions. An artist that was not drawn is a `None` member — the shape never varies
+with the arguments.
+
+| Function | Return | Members that can be `None` |
+|---|---|---|
+| `plot_spectrum` | `SpectrumPlot` | `ax_twin` |
+| `plot_current` | `CurrentPlot` | — |
+| `plot_image` | `ImagePlot` | `circle`, `cb` |
+| `plot_spectral_series` | `SpectralSeriesPlot` | `cb`, `ax_twin` |
 
 **The return contract *is* the styling API.** `line.set_color("k")`,
 `mesh.set_clim(0, 1)`, `ax.set_xlim(...)` are one line each at the call site, which
@@ -1043,7 +1161,8 @@ rule. Don't copy it.
 The animation system is the shape to aim for: `animate_panels(panels, …)` takes a
 list of `AnimationPanel` objects, so any subset, order, or combination works with no
 special-casing. `animate_wl_pl_spectra` is a public function that builds its panels
-and *delegates* — a new entry point, no new engine.
+and *delegates* — a new entry point, no new engine. It returns those panels as a third
+element, so the artists a panel owns stay reachable from the convenience path.
 
 ---
 
@@ -1089,9 +1208,10 @@ A change that breaks one of these is a bug even if the tests pass.
 | reshape a raster, or pick a spectrum out of one | declare `fast_sweep=`/`slow_sweep=`, then `as_grid()` / `get_spectrum_at()`; §`sweep_grid()` above |
 | add a new input format | write a decoder returning the §2.1 payload; add a suffix to the dispatch in `_decode` |
 | add a curated parameter | one row in `_AttoCubeSweep._CURATED`, plus a property |
-| understand a gate refusal | `dev/E7b-E7c-gates.md`, Part 8 (the refusal matrix) |
-| know why a number is what it is | `.claude/CLAUDE.md`, *Physics conventions* |
-| know whether a bug is known | `.claude/CLAUDE.md`, *Known issues* → `dev/audit-2026-07.md` |
+| understand a gate refusal | the refusal matrix in §2.2 above |
+| know why a number is what it is | `dev/physics-conventions.md` |
+| know why the code is shaped this way | `dev/decisions/`, index in its README |
+| know whether a bug is known | `dev/defects.md` |
 | add a plotting option | first ask whether the returned artist already does it (§10) |
 | run the tests | `conda run --no-capture-output -n viz-sci-plot python -m pytest -q` |
 
@@ -1127,7 +1247,7 @@ skeleton of the whole design:
 | `constants.SIGNAL_LABELS` | code → (axis name, unit) | its axis label |
 | `hdf5._AXIS_KIND_FOR_LAYOUT` | layout kind → dataset name/units/group | a new axis kind |
 | `hdf5._JSON_ATTRS` | which metadata keys are JSON-encoded | a new dict-valued metadata key |
-| `loaders._SPECTRA_SOURCES` | `spectra_source=` / `source=` → attribute name | a new plottable array |
+| `loaders._SPECTRA_SOURCES` | correction state → `(wavelength attr, energy attr)` | a new correction state |
 
 The four derived gate names all come from `_GATE_ROLE_CURATED` on the lines below it,
 so they cannot drift. (`_GATE_CURATED` and `_ROLE_FOR_CURATED` currently hold the

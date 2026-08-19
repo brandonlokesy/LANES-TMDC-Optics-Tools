@@ -73,12 +73,14 @@ def test_time_axis_is_ns_ascending():
 def test_energy_machinery_absent():
     # hc/t is meaningless and divides by zero at t=0, so none of it should exist.
     d = AttoCubeTRPLSweep(ONE_DECAY)
-    for attr in ("energy", "energy_spectra", "energy_spectra_bg",
-                 "apply_jacobian", "bg_region_nm", "wavelength"):
+    for attr in ("energy", "energy_spectra", "energy_spectra_cr",
+                 "energy_spectra_bg", "apply_jacobian", "bg_region_nm",
+                 "wavelength"):
         assert not hasattr(d, attr), attr
-    # Nor `spectra`: a TRPL sweep handed to a spectral plot must raise, not draw
-    # time as though it were wavelength.
+    # Nor `spectra` and its rungs: a TRPL sweep handed to a spectral plot must
+    # raise, not draw time as though it were wavelength.
     assert not hasattr(d, "spectra")
+    assert not hasattr(d, "spectra_bg")
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +224,17 @@ def test_gap_in_iteration_sequence_warns(tmp_path):
         _synth_decay(tmp_path / f"TRPL_iter_{i}.csv",
                      params={"V_A": float(i), "Excitation Power": 1e-4})
     with pytest.warns(UserWarning, match=r"missing iteration\(s\) \[1\]"):
+        s = AttoCubeTRPLSweep(tmp_path)
+    assert s.n_sweeps == 2
+
+
+def test_duplicate_iteration_index_warns(tmp_path):
+    # Two decays claiming iter_0. Both carry a temporal header, so classification
+    # keeps them and the collision reaches the sort — unlike the real companion,
+    # which is a spectral file and is separated out before it.
+    _synth_decay(tmp_path / "TRPL_iter_0.csv", params={"V_A": 0.0})
+    _synth_decay(tmp_path / "TRPL_rerun_iter_0.csv", params={"V_A": 5.0})
+    with pytest.warns(UserWarning, match="claimed by more than one file"):
         s = AttoCubeTRPLSweep(tmp_path)
     assert s.n_sweeps == 2
 

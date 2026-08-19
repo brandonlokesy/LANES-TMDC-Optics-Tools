@@ -13,9 +13,12 @@ from __future__ import annotations
 import warnings
 from pathlib import Path
 
+from typing import NamedTuple, Union
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+import matplotlib.colors as mcolors
 import matplotlib.patches as patches
 import matplotlib.patheffects as path_effects
 from matplotlib.cm import ScalarMappable
@@ -24,19 +27,26 @@ from skimage.exposure import rescale_intensity
 
 from . import fitting, processing
 from . import diffusion as _diffusion
-# The spectra-source registry names attributes on the loader classes, so it lives
-# with them; imported here under its own name because this is where callers of
-# ``spectra_source=`` are.
-from .loaders import (
-    _SPECTRA_SOURCES, _SPECTRA_SOURCE_LABELS, _resolve_spectra,
-)
+from .constants import HC_EV_NM, _x_axis_name_unit
+# The spectra- and frame-source registries name attributes on the loader classes,
+# so they live with them; the resolvers are imported here because this is where
+# callers of ``spectra_source=`` and ``frame_source=`` are.
+from .loaders import _SPECTRA_SOURCES, _resolve_spectra, _resolve_frame
 
-# Optional: cmcrameri diverging colormaps (pip install cmcrameri)
+# Optional colormap packages (pip install "tmdc_optics_tools[colormaps]").
+# Imported for their side effect alone: each registers its colormaps into
+# Matplotlib's registry under a prefix — "cmc.vik", "cmo.thermal" — which is how
+# get_cmap reaches them.  Nothing below refers to either package by name, so the
+# import is the whole point and must not be tidied away as unused.
 try:
-    from cmcrameri import cm as cmc
-    _HAS_CRAMERI = True
+    import cmcrameri            # noqa: F401  — registers the "cmc.*" names
 except ImportError:
-    _HAS_CRAMERI = False
+    pass
+
+try:
+    import cmocean              # noqa: F401  — registers the "cmo.*" names
+except ImportError:
+    pass
 
 # ---------------------------------------------------------------------------
 # Style
@@ -82,23 +92,210 @@ def set_style(context: str = "paper") -> None:
 # Colormaps
 # ---------------------------------------------------------------------------
 
-def get_cmap(name: str = "vik"):
+#: Anything accepted wherever this module takes a ``cmap``: a colormap name, a
+#: Matplotlib colormap, or a sequence of colours.  Resolved by :func:`get_cmap`.
+ColormapLike = Union[str, mcolors.Colormap, list, tuple, np.ndarray]
+
+
+def get_cmap(cmap: ColormapLike = "magma") -> mcolors.Colormap:
     """
-    Return a colormap by name, preferring cmcrameri if available.
+    Resolve a colormap specification to a Matplotlib colormap.
 
     Parameters
     ----------
-    name : str
-        Any cmcrameri map (e.g. ``"vik"``, ``"roma"``) or standard
-        Matplotlib map.
+    cmap : str, matplotlib.colors.Colormap, or sequence of colours
+        A **name** is resolved through Matplotlib's colormap registry, so any
+        Matplotlib name works (``"magma"``, ``"gray"``, …).  cmcrameri and
+        cmocean register into that same registry under a **prefix**, so their
+        names carry it: ``"cmc.vik"``, ``"cmo.thermal"``.  Bare ``"vik"`` and
+        ``"thermal"`` are not registered by either package and will not
+        resolve.
+
+        A **colormap** is returned unchanged, so anything producing one can be
+        passed directly — ``seaborn.color_palette(..., as_cmap=True)``,
+        ``cmocean.cm.thermal``, ``cmcrameri.cm.vik``, a hand-built
+        :class:`~matplotlib.colors.LinearSegmentedColormap`.
+
+        A **sequence of colours** — hex strings, named colours, RGB(A) tuples,
+        or an ``(n, 3)`` / ``(n, 4)`` array, as returned by
+        ``seaborn.color_palette(...)`` without ``as_cmap=True`` — is wrapped in
+        a :class:`~matplotlib.colors.ListedColormap`.
 
     Returns
     -------
     matplotlib.colors.Colormap
+
+    Raises
+    ------
+    TypeError
+        If *cmap* is neither a name, a colormap, nor a sequence of colours.
+    ValueError
+        If *cmap* names an unknown colormap, or is an empty sequence.
+
+    Notes
+    -----
+    A sequence of *n* colours becomes *n* discrete bands, not a continuous
+    ramp — the colours are used as given rather than interpolated between.  For
+    a smooth colormap from a seaborn palette, ask the palette for one with
+    ``as_cmap=True``.
+
+    A prefixed name only resolves once the package that owns it has been
+    imported, since registration is an import side effect.  Importing this
+    module imports cmcrameri and cmocean when they are installed, so the
+    prefixed names are available without importing them yourself.  Passing the
+    colormap object depends on no such ordering.
+
+    Examples
+    --------
+    >>> get_cmap("magma")                                    # doctest: +SKIP
+    >>> get_cmap("cmo.thermal")                              # doctest: +SKIP
+    >>> get_cmap(cmocean.cm.thermal)                         # doctest: +SKIP
+    >>> get_cmap(sns.color_palette("rocket", as_cmap=True))  # doctest: +SKIP
+    >>> get_cmap(sns.color_palette("rocket", 8))           # 8 bands  # doctest: +SKIP
+    >>> get_cmap(["#1b9e77", "#d95f02", "#7570b3"])        # 3 bands  # doctest: +SKIP
     """
-    if _HAS_CRAMERI and hasattr(cmc, name):
-        return getattr(cmc, name)
-    return plt.get_cmap(name)
+    if isinstance(cmap, mcolors.Colormap):
+        return cmap
+
+    if isinstance(cmap, str):
+        # One registry, so there is no precedence rule to get wrong.  Looking
+        # bare third-party names up here instead would silently shadow
+        # Matplotlib: cmocean and Matplotlib both define "gray", and cmcrameri
+        # and Matplotlib both define "berlin", "managua" and "vanimo".
+        return plt.get_cmap(cmap)
+
+    # Everything else is read as a sequence of colours.  to_rgba_array is the
+    # validator as well as the converter: it takes hex strings, named colours,
+    # RGB(A) tuples and (n, 3)/(n, 4) arrays alike, and rejects anything that is
+    # not one of those.
+    try:
+        colours = mcolors.to_rgba_array(cmap)
+    except (ValueError, TypeError) as exc:
+        raise TypeError(
+            f"cmap must be a colormap name, a matplotlib Colormap, or a sequence "
+            f"of colours.  Could not read {type(cmap).__name__} as a sequence of "
+            f"colours: {exc}"
+        ) from exc
+
+    if len(colours) == 0:
+        raise ValueError("cmap is an empty sequence of colours.")
+
+    return mcolors.ListedColormap(colours)
+
+
+# ---------------------------------------------------------------------------
+# Return types
+# ---------------------------------------------------------------------------
+# A plot that draws more than a single artist returns them as a NamedTuple: it is
+# still a tuple, so ``fig, ax, cb, lines, ax_twin = ...`` unpacks exactly as it
+# always did, and the members can also be reached by name.  Field order is part
+# of the contract, because positional unpacking depends on it.
+
+
+class SpectrumPlot(NamedTuple):
+    """
+    What :func:`plot_spectrum` drew.
+
+    A tuple, so ``fig, ax, line, ax_twin = plot_spectrum(...)`` unpacks, with names
+    for reaching one member without counting positions.
+
+    Attributes
+    ----------
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+        Primary axes.
+    line : matplotlib.lines.Line2D
+        The spectrum trace.
+    ax_twin : matplotlib.axis.SecondaryAxis or None
+        The conjugate top axis, ``None`` when the plot was drawn with
+        ``twin_axis=False``.  Carried so its ticks and label can be restyled
+        without a parameter per property.
+    """
+    fig     : object
+    ax      : object
+    line    : object
+    ax_twin : object
+
+
+class CurrentPlot(NamedTuple):
+    """
+    What :func:`plot_current` drew.
+
+    A tuple, so ``fig, ax_left, ax_right, lines = plot_current(...)`` unpacks, with
+    names for reaching one member without counting positions.
+
+    Attributes
+    ----------
+    fig : matplotlib.figure.Figure
+    ax_left : matplotlib.axes.Axes
+        Current axes, carrying the y-label in nA.
+    ax_right : matplotlib.axes.Axes
+        Twin axes carrying the excitation power in µW.
+    lines : list of matplotlib.lines.Line2D
+        The current traces in role order — top gate, bottom gate, channel — omitting
+        any electrode with no recorded current.  The power trace is not among them;
+        it belongs to *ax_right*.
+    """
+    fig      : object
+    ax_left  : object
+    ax_right : object
+    lines    : list
+
+
+class ImagePlot(NamedTuple):
+    """
+    What :func:`plot_image` drew.
+
+    A tuple, so ``fig, ax, im, circle, cb = plot_image(...)`` unpacks, with names for
+    reaching one member without counting positions.
+
+    Attributes
+    ----------
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+    im : matplotlib.image.AxesImage
+        The image itself, for reading or changing its colour limits and colormap.
+    circle : matplotlib.patches.Circle or None
+        The laser-boundary overlay, ``None`` when none was drawn.  Carried so it can
+        be restyled without a parameter per property.
+    cb : matplotlib.colorbar.Colorbar or None
+        ``None`` when the plot was drawn with ``colorbar=False``.
+    """
+    fig    : object
+    ax     : object
+    im     : object
+    circle : object
+    cb     : object
+
+
+class SpectralSeriesPlot(NamedTuple):
+    """
+    What :func:`plot_spectral_series` drew.
+
+    A tuple, so ``fig, ax, cb, lines, ax_twin = plot_spectral_series(...)`` unpacks,
+    with names for reaching one member without counting positions.
+
+    Attributes
+    ----------
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+        Primary axes.
+    cb : matplotlib.colorbar.Colorbar or None
+        ``None`` when the plot was drawn with ``colorbar=False``.
+    lines : list of matplotlib.lines.Line2D
+        One Line2D per *drawn* point, in series order — so ``lines[j]`` is the
+        spectrum taken at the *j*-th coordinate that survived the series selection
+        and thinning.  Their y data includes any ``spectrum_offset``.
+    ax_twin : matplotlib.axis.SecondaryAxis or None
+        The conjugate top axis, ``None`` when the plot was drawn with
+        ``twin_axis=False``.  Carried so its ticks and label can be restyled
+        without a parameter per property.
+    """
+    fig     : object
+    ax      : object
+    cb      : object
+    lines   : list
+    ax_twin : object
 
 
 # ---------------------------------------------------------------------------
@@ -112,14 +309,51 @@ def _resolve_x_axis(scan, x_axis: str) -> tuple:
     Centralises the repeated ``"energy"`` / ``"wavelength"`` branching so
     every plotting function can call this instead of duplicating the logic.
     """
-    if x_axis == "energy":
-        return scan.energy, "Energy (eV)"
-    elif x_axis == "wavelength":
-        return scan.wavelength, "Wavelength (nm)"
-    else:
-        raise ValueError(
-            f"x_axis must be 'energy' or 'wavelength', got '{x_axis}'."
-        )
+    name, unit = _x_axis_name_unit(x_axis)
+    values     = scan.energy if x_axis == "energy" else scan.wavelength
+    return values, f"{name} ({unit})"
+
+
+#: The conjugate of each spectral x-axis: what a top axis shows, and its label.
+_CONJUGATE_AXIS = {"energy": "wavelength", "wavelength": "energy"}
+
+
+def _conjugate_x_axis(ax, x_axis: str):
+    """
+    Add a top x-axis showing the other spectral unit, and return it.
+
+    Energy and wavelength are reciprocal through ``HC_EV_NM``, and ``HC_EV_NM / x``
+    is its own inverse, so one function serves both directions of the transform.
+
+    Built with ``secondary_xaxis`` rather than ``twiny`` plus relabelled ticks.
+    Matplotlib then chooses the ticks in the *displayed* unit, so the nm labels come
+    out at round wavelengths instead of wherever the eV ticks happened to fall, and
+    the axis follows any later change to the primary limits instead of freezing at
+    the ticks that existed when it was built.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Its x-axis must already be in *x_axis* units.
+    x_axis : {"energy", "wavelength"}
+        The **primary** axis' quantity.  The secondary axis shows the other one.
+
+    Returns
+    -------
+    matplotlib.axis.SecondaryAxis
+    """
+    name, unit = _x_axis_name_unit(_CONJUGATE_AXIS[x_axis])
+
+    def _convert(values):
+        # Matplotlib evaluates the transform across the whole axis, including 0,
+        # where the reciprocal is undefined; without this the first draw emits a
+        # divide-by-zero RuntimeWarning that a -W error run would fail on.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return HC_EV_NM / np.asarray(values, dtype=float)
+
+    secondary = ax.secondary_xaxis("top", functions=(_convert, _convert))
+    secondary.set_xlabel(f"{name} ({unit})")
+    return secondary
 
 
 def _signal_name_unit(obj, source: str = None) -> tuple:
@@ -134,7 +368,7 @@ def _signal_name_unit(obj, source: str = None) -> tuple:
     "Intensity" / "counts" — a :class:`~tmdc_optics_tools.loaders.SingleSpectrum`
     is a 2-row CSV as likely to be a bare-substrate reflectance reference as PL.
     """
-    if source is not None and source.startswith("contrast"):
+    if source == "contrast":
         return getattr(obj, "contrast_label", r"$\Delta R/R_0$"), ""
     return (getattr(obj, "signal_name", "Intensity"),
             getattr(obj, "signal_unit", "counts"))
@@ -166,7 +400,7 @@ def plot_spectral_map(
     figsize        : tuple = (6, 4),
     dpi            : int   = None,
     x_axis         : str   = "energy",
-    cmap           : str   = "vik",
+    cmap           : ColormapLike = "magma",
     median_kernel  : int   = 3,
     clim           : tuple = None,
     colorbar       : bool  = True,
@@ -184,12 +418,12 @@ def plot_spectral_map(
     :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.sweep_axis_label`,
     so whatever was declared as ``sweep=`` at load time is what is plotted.
 
-    Background subtraction and Jacobian correction are configured at
-    load time on the scan object (via ``bg_region_nm``, ``bg_region_eV``,
-    and ``apply_jacobian``).  This function always uses
-    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`,
-    which automatically returns the background-corrected array when one
-    is available, and falls back to the uncorrected array otherwise.
+    Corrections are configured at load time on the scan object (via
+    ``bg_region_nm``, ``bg_region_eV``, ``apply_jacobian`` and ``cosmic_rays``).
+    This function plots the most-corrected array the scan has for the chosen axis
+    — :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`
+    or :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_spectra` — so
+    a declared background or cosmic-ray repair reaches the map on either axis.
 
     Parameters
     ----------
@@ -197,8 +431,8 @@ def plot_spectral_map(
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
     x_axis : {"energy", "wavelength"}
-    cmap : str
-        Colormap name passed to :func:`get_cmap`.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.
     median_kernel : int
         2-D median filter size. Set to 1 to disable.
     clim : tuple of (vmin, vmax), optional
@@ -227,9 +461,8 @@ def plot_spectral_map(
     x_m = np.tile(x[:, np.newaxis], (1, scan.n_sweeps))
     y_m = np.tile(y[np.newaxis, :], (scan.n_pixels, 1))
 
-    # Use best_energy_spectra (BG-corrected if available) for energy axis;
-    # raw spectra for wavelength axis (BG correction is a loader concern).
-    data = scan.best_energy_spectra.copy() if x_axis == "energy" else scan.spectra.copy()
+    # Copied because the filters below build on it; the resolver itself does not.
+    data = _resolve_spectra(scan, "best", x_axis).copy()
 
     if median_kernel > 1:
         data = processing.smooth_median(data, kernel=median_kernel)
@@ -281,81 +514,310 @@ def plot_pl_map_Vab_scan(*args, **kwargs) -> tuple:
 # Spectrum plots
 # ---------------------------------------------------------------------------
 
+def _coordinate_text(label: str, value: float, unit: str) -> str:
+    """
+    ``"Top gate (V) = 1.5"`` — one coordinate named, with its unit when known.
+
+    The same composition ``sweep_axis_label`` uses, so every legend this module
+    writes reads the same whichever axis the point was addressed on.
+    """
+    named = f"{label} ({unit})" if unit else label
+    return f"{named} = {float(value):.4g}"
+
+
+# The coordinate each position keyword pairs with, for messages that offer the
+# other spelling.
+_COORDINATE_FOR_POSITION = {
+    "index":      "value=",
+    "index_fast": "fast=",
+    "index_slow": "slow=",
+}
+
+
+def _select_sweep_point(scan, value, axis, index, fast, slow,
+                        index_fast, index_slow, what: str,
+                        passthrough: dict = None) -> int:
+    """
+    Resolve one point request into a single integer sweep position.
+
+    Mirrors the loader's two accessors: *value* / *fast* / *slow* are
+    coordinates and *index* / *index_fast* / *index_slow* are integer positions,
+    so the two spellings never share a keyword and a request cannot be half of
+    each.  The lookup itself is the scan's, so an ambiguous coordinate is refused
+    and a distant one warns exactly as they do for ``get_spectrum_at``.
+
+    *passthrough* is the caller's unmatched keyword dict, named in the no-point
+    error.  A selector spelled wrongly is absorbed there rather than rejected, so
+    without this the caller is told they named no point while looking at the one
+    they thought they had named.
+    """
+    # None is the unspecified default, not a quantity to look up. Without this it
+    # would reach the scan, which reads an undeclared axis as the flat index — so
+    # a coordinate would be silently searched against 0, 1, 2, … instead.
+    if axis is None:
+        axis = "sweep"
+
+    named_by_value = [n for n, v in (("value", value), ("fast", fast),
+                                     ("slow", slow)) if v is not None]
+    named_by_index = [(n, v) for n, v in (("index", index),
+                                          ("index_fast", index_fast),
+                                          ("index_slow", index_slow))
+                      if v is not None]
+    index_names = [n for n, _ in named_by_index]
+
+    if named_by_value and named_by_index:
+        raise ValueError(
+            f"{what}: name the point by value ({', '.join(named_by_value)}) or "
+            f"by position ({', '.join(index_names)}), not both."
+        )
+    if not named_by_value and not named_by_index:
+        # Every selector is keyword-only, so a misspelt or renamed one lands in
+        # the style passthrough instead of raising. Name what arrived: the usual
+        # cause of "no point" is a point named under a keyword that is not one.
+        stray = ""
+        if passthrough:
+            listed = ", ".join(f"{k}={v!r}" for k, v in passthrough.items())
+            stray = (f" Received {listed}, which names no point — forwarded to "
+                     f"ax.plot as a line property.")
+        raise ValueError(
+            f"{what} needs a point: value= for a coordinate on the sweep axis, "
+            f"or index= for a position. For a declared nest give fast= and "
+            f"slow= (coordinates) or index_fast= and index_slow= (positions)."
+            f"{stray}"
+        )
+    if named_by_index and axis != "sweep":
+        raise ValueError(
+            f"{what}: axis={axis!r} names the quantity a *coordinate* is read "
+            f"against, so it does not apply to {', '.join(index_names)}. "
+            f"Give the point as a value, or drop axis=."
+        )
+
+    for name, given in named_by_index:
+        # A position must be exact. The scan would take int(1.9) and plot point 1
+        # without comment, and a fractional position is far more likely to be a
+        # coordinate that reached the wrong keyword.
+        if not isinstance(given, (int, np.integer)):
+            raise TypeError(
+                f"{what}: {name}={given!r} selects by position, which needs an "
+                f"integer. {given!r} looks like a coordinate — pass it as "
+                f"{_COORDINATE_FOR_POSITION[name]} to look it up by value, or "
+                f"round it if you did mean a position."
+            )
+
+    # The scan's own refusals for these two are written for its accessors, where
+    # fast=/slow= are whichever spelling that method takes. Here they are always
+    # coordinates, so its advice would name the wrong keyword — and following it
+    # succeeds, selecting a different point in silence. Refuse first, in this
+    # function's vocabulary.
+    if index is not None and scan.is_nested:
+        raise ValueError(
+            f"{what}: this sweep is a declared nest ({scan.nesting}), so a "
+            f"single position does not locate a point. Name both axes with "
+            f"index_fast= and index_slow=, or address it by coordinate with "
+            f"fast= and slow=."
+        )
+    if (index_fast is not None or index_slow is not None) and not scan.is_nested:
+        raise ValueError(
+            f"{what}: index_fast= and index_slow= need a declared nest, and this "
+            f"sweep is flat ({scan.n_sweeps} points). Use index= for a position "
+            f"on the sweep axis, or declare the nest with fast_sweep= and "
+            f"slow_sweep= at load time."
+        )
+
+    if named_by_value:
+        selector = scan._sweep_selector(value, axis=axis, fast=fast, slow=slow,
+                                        by_value=True, what=what)
+    else:
+        selector = scan._sweep_selector(index, fast=index_fast, slow=index_slow,
+                                        by_value=False, what=what)
+
+    # A slice means one nest axis was left free, so the accessor would hand back
+    # (n_pixels, n) — a line per point along it, which this function has no
+    # return contract for.  Naming both axes pins the single spectrum it draws.
+    if not isinstance(selector, (int, np.integer)):
+        raise ValueError(
+            f"{what}: leaving one nest axis free selects every point along the "
+            f"other, which is more than one spectrum. Name both axes to pin "
+            f"one, or take the block from scan.get_spectrum_at() and plot its "
+            f"columns."
+        )
+    return int(selector)
+
+
+def _sweep_point_label(scan, idx: int, axis: str) -> str:
+    """
+    Legend text naming the coordinate a point was addressed on.
+
+    A point on a nest is named by both its coordinates and one reached through
+    *axis* by that quantity, so the legend states what was asked for.  On a nest
+    the declared sweep axis is normally the flat index, which would say nothing.
+    """
+    if scan.is_nested:
+        nest = scan.nesting
+        # Points run n_fast inside n_slow, so the flat position divides back onto
+        # the grid — the same arithmetic the selector used to build it.
+        i_slow, i_fast = divmod(idx, nest.n_fast)
+        return (f"{_coordinate_text(nest.fast_label, nest.fast_axis[i_fast], nest.fast_unit)}, "
+                f"{_coordinate_text(nest.slow_label, nest.slow_axis[i_slow], nest.slow_unit)}")
+
+    if axis != "sweep":
+        values, lbl, unit = scan._lookup_axis(axis)
+        return _coordinate_text(lbl, values[idx], unit)
+
+    # Fall back to whatever the scan says it swept rather than to a gate
+    # voltage: a gate role needs a declared wiring, and the sweep axis is
+    # already the scan's own answer to "what varied", labelled and in its own
+    # units.  A field needs a geometry and two declared gates, so check the
+    # device first — reading scan.ef without them raises.
+    if scan.is_dual_gated and scan.ef is not None:
+        return f"$E_F$ = {scan.ef[idx]:.1f} mV/nm"
+    return _coordinate_text(scan.sweep_label, scan.sweep_axis[idx],
+                            scan.sweep_unit)
+
+
 def plot_spectrum(
     scan,
-    sweep_index  : int,
-    ax           = None,
-    figsize      : tuple = (5, 3),
-    dpi          : int   = None,
-    x_axis       : str  = "energy",
-    normalize    : bool = False,
-    smooth_window       = None,
-    smooth_poly  : int  = 3,
-    label        : str  = None,
-    ylabel       : str  = None,
+    *,
+    value      : float = None,
+    axis       : str   = "sweep",
+    index      : int   = None,
+    fast       : float = None,
+    slow       : float = None,
+    index_fast : int   = None,
+    index_slow : int   = None,
+    ax         = None,
+    figsize    : tuple = (5, 3),
+    dpi        : int   = None,
+    x_axis     : str   = "energy",
+    normalize  : bool  = False,
+    label      : str   = None,
+    ylabel     : str   = None,
+    twin_axis  : bool  = False,
     **line_kwargs,
-) -> tuple:
+) -> SpectrumPlot:
     """
-    Plot one spectrum from a sweep.
+    Plot one spectrum from a sweep, chosen by coordinate or by position.
+
+    The point is named the way the measurement was:
+    ``plot_spectrum(scan, value=2.5)`` takes the sweep point nearest 2.5 in the
+    sweep axis's own units.  Integer positions remain available through *index*.
+
+    Every selector is keyword-only, so a call always states which kind it means.
+    A bare number could be either, and on a sweep whose coordinates span the same
+    range as its positions — a power sweep in µW, say — neither the value nor a
+    warning would reveal which was taken.
 
     Parameters
     ----------
     scan : AttoCubeSpectralSweep
-    sweep_index : int
-        Index of the sweep point to plot.
+    value : float, optional
+        Coordinate on the sweep axis, in that axis's units.  For a flat sweep;
+        a nest is addressed with *fast* and *slow*.
+    axis : str
+        Which quantity *value* is read against, spelled as ``sweep=`` spells it:
+        a registry key such as ``"top_voltage"`` or a raw row label such as
+        ``"V_A"``.  The default searches the declared sweep axis.  Use it when a
+        sweep is declared in one coordinate and you want a point in another — a
+        field sweep driven by both gates at a fixed ratio can be addressed by
+        ``axis="top_voltage"``.  Applies to coordinates only; ``None`` means the
+        default.
+    index : int, optional
+        Position on the sweep axis.  Negative counts from the end.  For a flat
+        sweep; a nest is addressed with *index_fast* and *index_slow*.
+    fast, slow : float, optional
+        Coordinates on the nest axes.  Give both — one spectrum is drawn, so
+        leaving an axis free is refused.
+    index_fast, index_slow : int, optional
+        Positions on the nest axes, the integer spelling of *fast* / *slow*.
+        A position must be a whole number; a fractional one is refused rather
+        than truncated, since it is more likely a coordinate that reached the
+        wrong keyword.
     ax : matplotlib.axes.Axes, optional
     x_axis : {"energy", "wavelength"}
     normalize : bool
         Normalise spectrum to its own [0, 1] range.
-    smooth_window, smooth_poly : int, optional
-        Forwarded to :func:`~tmdc_optics_tools.processing.smooth_savgol`, run
-        before *normalize* so both reflect the same smoothed data.
-        ``smooth_window=None`` (default) skips smoothing.
     label : str, optional
-        Legend label. Defaults to the gate voltage / field value.
+        Legend label.  Defaults to the coordinate the point was addressed on,
+        with its unit; both coordinates for a nest.
     ylabel : str, optional
         Y-axis label.  Derived from the scan's measurement type when ``None``,
         so a reflectance sweep is not labelled as PL.  A string is used
         **verbatim**, so include the unit.
+    twin_axis : bool
+        Add a top x-axis in the other spectral unit — wavelength above an energy
+        axis, energy above a wavelength one.  Default ``False``.
     **line_kwargs
-        Passed directly to ``ax.plot``.
+        Passed directly to ``ax.plot``.  A keyword that is not a selector lands
+        here, so the no-point error names whatever arrived.
 
     Returns
     -------
-    fig, ax, line
+    SpectrumPlot
+        Named 4-tuple of the figure, axes, line and conjugate top axis.
+
+    Raises
+    ------
+    ValueError
+        If the point is named both ways at once, or not at all; if a position
+        spelling does not match the sweep's shape; if a coordinate names more
+        than one sweep point, since drawing one of them would drop the rest
+        without saying so; or if one nest axis is left free, which selects more
+        than one spectrum.
+    TypeError
+        If a position is not a whole number, or if the point is given
+        positionally rather than as ``value=`` or ``index=``.
+
+    Warns
+    -----
+    UserWarning
+        When a requested coordinate is further than half a step from any real
+        point.  A nearest-value lookup cannot fail, so it returns a real
+        spectrum from somewhere else; the warning names what was used.
+
+    See Also
+    --------
+    tmdc_optics_tools.loaders.AttoCubeSpectralSweep.get_spectrum_at :
+        the same selection, returning the array instead of drawing it.
+    plot_single_spectrum : plot a spectrum that is not part of a sweep.
+
+    Examples
+    --------
+    >>> plot_spectrum(scan, value=2.5)                     # doctest: +SKIP
+    >>> plot_spectrum(scan, value=15.0, axis="top_voltage")  # doctest: +SKIP
+    >>> plot_spectrum(scan, index=-1)                      # doctest: +SKIP
+    >>> plot_spectrum(scan, fast=2.5, slow=100.0)          # doctest: +SKIP
     """
+    # Resolved before the label is built as well as before the lookup: an
+    # unresolved None reads as the flat index there too, and would name the
+    # legend after an axis that was never searched.
+    if axis is None:
+        axis = "sweep"
+
+    sweep_index = _select_sweep_point(
+        scan, value, axis, index, fast, slow, index_fast, index_slow,
+        what="plot_spectrum()", passthrough=line_kwargs)
+
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     else:
         fig = ax.get_figure()
 
     x, xlabel = _resolve_x_axis(scan, x_axis)
-    if x_axis == "energy":
-        y = scan.best_energy_spectra[:, sweep_index].astype(float)
-    else:
-        y = scan.spectra[:, sweep_index].astype(float)
-    y = processing.maybe_smooth(y, smooth_window, smooth_poly)
+    y         = _resolve_spectra(scan, "best", x_axis)[:, sweep_index]
     if normalize:
         y = processing.normalise_minmax(y)
 
     if label is None:
-        # Fall back to whatever the scan says it swept rather than to a gate
-        # voltage: a gate role needs a declared wiring, and the sweep axis is
-        # already the scan's own answer to "what varied", labelled and in its own
-        # units.  A field needs a geometry and two declared gates, so check the
-        # device first — reading scan.ef without them raises.
-        if scan.is_dual_gated and scan.ef is not None:
-            label = f"$E_F$ = {scan.ef[sweep_index]:.1f} mV/nm"
-        else:
-            label = (f"{scan.sweep_axis_label} = "
-                     f"{scan.sweep_axis[sweep_index]:.4g}")
+        label = _sweep_point_label(scan, sweep_index, axis)
 
     line, = ax.plot(x, y, label=label, **line_kwargs)
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel if ylabel is not None
                   else _signal_label(scan, normalized=normalize))
 
-    return fig, ax, line
+    ax_twin = _conjugate_x_axis(ax, x_axis) if twin_axis else None
+
+    return SpectrumPlot(fig, ax, line, ax_twin)
 
 
 def plot_single_spectrum(
@@ -377,8 +839,8 @@ def plot_single_spectrum(
     ----------
     spectrum : SingleSpectrum
         Any object exposing ``wavelength``, ``energy``, ``best_spectra`` and
-        ``best_energy_spectra`` attributes. Background-corrected arrays are
-        used automatically when a background region was set at load time.
+        ``best_energy_spectra`` attributes. The most-corrected array available is
+        used automatically, on whichever axis is plotted.
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
     x_axis : {"wavelength", "energy"}
@@ -405,8 +867,7 @@ def plot_single_spectrum(
         fig = ax.get_figure()
 
     x, xlabel = _resolve_x_axis(spectrum, x_axis)
-    y = (spectrum.best_energy_spectra if x_axis == "energy"
-         else spectrum.best_spectra).astype(float)
+    y = _resolve_spectra(spectrum, "best", x_axis)
     if normalize:
         y = processing.normalise_minmax(y)
 
@@ -531,13 +992,16 @@ def plot_current(
     figsize     : tuple = (6, 3.5),
     dpi         : int   = None,
     ef_axis     : bool = True,
-    color_ich1  : str  = "C0",
-    color_ich2  : str  = "C1",
     color_power : str  = "C2",
-) -> tuple:
+) -> CurrentPlot:
     """
-    Plot leakage currents and excitation power vs. electric field (or gate
+    Plot electrode currents and excitation power vs. electric field (or gate
     voltage) to check for dielectric breakdown.
+
+    One trace per electrode the scan declared and for which a current was
+    recorded, labelled by role: a dual-gated device gives the two gate leakage
+    currents, a contacted single-gated one gives its gate leakage and the
+    transport current into the TMDC.
 
     Parameters
     ----------
@@ -548,12 +1012,21 @@ def plot_current(
         Use displacement field on the x-axis when the scan can supply one — it
         needs both a :class:`DeviceGeometry` and a declared channel-to-gate
         mapping.  Otherwise the scan's declared sweep axis is used.
-    color_ich1, color_ich2, color_power : str
-        Matplotlib colours for the respective traces.
+    color_power : str
+        Matplotlib colour for the power trace.
 
     Returns
     -------
-    fig, ax_left, ax_right
+    CurrentPlot
+        Named 4-tuple of the figure, current axes, power axes and current
+        traces.
+
+    Raises
+    ------
+    ValueError
+        If the scan declared no electrode mapping, or none of its electrodes has
+        a recorded current.  Which electrode a current row belongs to is
+        per-session wiring; pass ``gates=`` at load time.
     """
     if ax is None:
         fig, ax_left = plt.subplots(figsize=figsize, dpi=dpi)
@@ -570,20 +1043,44 @@ def plot_current(
     else:
         x, xlabel = scan.sweep_axis, scan.sweep_axis_label
 
-    l1, = ax_left.plot(x, scan.Ich1, color=color_ich1, label=r"$I_\mathrm{ch1}$")
-    l2, = ax_left.plot(x, scan.Ich2, color=color_ich2, label=r"$I_\mathrm{ch2}$")
+    # A declared electrode need not have a recorded current: it may be grounded
+    # with no row, or driven by something that is not a source-meter channel.  The
+    # scan already encodes those rules, so ask it and skip what it refuses rather
+    # than restating the conditions here.
+    lines = []
+    for attr, label in (("i_top",     r"$I_\mathrm{top}$"),
+                        ("i_bot",     r"$I_\mathrm{bot}$"),
+                        ("i_channel", r"$I_\mathrm{ch}$")):
+        try:
+            current = getattr(scan, attr)
+        except ValueError:
+            continue
+        line, = ax_left.plot(x, current, label=label)
+        lines.append(line)
+
+    if not lines:
+        raise ValueError(
+            f"plot_current has nothing to plot for '{scan.path}': no declared "
+            f"electrode has a recorded current. Which acquisition channel reached "
+            f"which electrode is per-session wiring, so pass it at load time — "
+            f"gates={{'top': '<row>', 'bottom': '<row>'}}. A gate declared on a "
+            f"row that is not a source-meter channel, or an electrode declared "
+            f"grounded with no row, records no current either."
+        )
+
     ax_left.axhline(0, color="k", linewidth=0.6, linestyle="--", alpha=0.4)
     ax_left.set_xlabel(xlabel)
     ax_left.set_ylabel("Current (nA)")
 
     ax_right = ax_left.twinx()
     ax_right.spines["right"].set_visible(True)
-    l3, = ax_right.plot(x, scan.power, color=color_power, linestyle="--", label="Power")
+    l_power, = ax_right.plot(x, scan.power, color=color_power, linestyle="--",
+                             label="Power")
     ax_right.set_ylabel("Power (µW)")
 
-    ax_left.legend(handles=[l1, l2, l3], loc="best", frameon=False)
+    ax_left.legend(handles=lines + [l_power], loc="best", frameon=False)
     fig.tight_layout()
-    return fig, ax_left, ax_right
+    return CurrentPlot(fig, ax_left, ax_right, lines)
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +1151,8 @@ def plot_real_space_PL_map(
     idx    : int = 0,
     xlabel : str = "x-axis (pixels)",
     ylabel : str = "y-axis (pixels)",
-    cmap   : str = "cork"
+    cmap   : ColormapLike = "magma",
+    frame_source : str = "best",
 ) -> tuple:
     """
     Plot a single real-space PL map from an
@@ -668,6 +1166,13 @@ def plot_real_space_PL_map(
         Frame index to display.
     xlabel, ylabel : str
         Axis labels.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.
+    frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+        Which version of the frame to draw.  ``"best"`` is background-corrected
+        when the scan was loaded with a *bg_region* and raw otherwise; ``"raw"``
+        is always the file's counts; ``"bg"`` requires a *bg_region* and raises
+        without one.
 
     Returns
     -------
@@ -678,7 +1183,7 @@ def plot_real_space_PL_map(
     else:
         fig = ax.get_figure()
 
-    ax.imshow(scan.load_frame(idx), cmap=get_cmap(cmap))
+    ax.imshow(_resolve_frame(scan, idx, frame_source), cmap=get_cmap(cmap))
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     return fig, ax
@@ -689,7 +1194,7 @@ def plot_image(
     ax             = None,
     figsize        : tuple = (6, 5),
     dpi            : int   = None,
-    cmap           : str   = "vik",
+    cmap           : ColormapLike = "magma",
     colorbar       : bool  = True,
     colorbar_label : str   = None,
     rescale_img    : bool  = False,
@@ -699,7 +1204,9 @@ def plot_image(
     show_axes      : bool  = True,
     extent         : tuple = None,
     origin         : str   = "upper",
-) -> tuple:
+    laser_annotation : bool = False,
+    laser_ref             = None,
+) -> ImagePlot:
     """
     Plot a single 2-D image with a colormap and an optional colorbar.
 
@@ -716,10 +1223,11 @@ def plot_image(
         of the grid.
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
-    cmap : str
-        Colormap name passed to :func:`get_cmap`.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.
     colorbar : bool
-        Show a colorbar alongside the image.
+        Show a colorbar alongside the image.  ``False`` leaves the returned ``cb``
+        member ``None``.
     colorbar_label : str, optional
         Colour-bar label.  Defaults to "Intensity (counts)", or
         "Intensity (norm.)" when *rescale_img*; a plain 2-D array carries no
@@ -734,19 +1242,35 @@ def plot_image(
     show_axes : bool
         Show axis ticks/labels. Set ``False`` to hide them entirely.
     extent : tuple of (left, right, bottom, top), optional
-        Physical-coordinate extent for the array's edges, e.g.
-        ``(x.min(), x.max(), y.min(), y.max())`` for a real-space map in µm
-        — the array itself carries no unit, only pixel indices, so this is
-        the caller's to supply. ``None`` (default) leaves the axes in
-        pixel-index units, unchanged from before this parameter existed.
-    origin : {"upper", "lower"}
-        Row 0's position: "upper" (default, unchanged prior behaviour) for
-        a camera/CCD frame read top row first; "lower" for a physical map
-        whose Y should increase upward, matching a normal Cartesian axis.
+        Data coordinates of the image's outer edges, e.g.
+        ``(x.min(), x.max(), y.min(), y.max())`` for a map in µm.  ``None``
+        (default) leaves the axes in pixel-index units — the array carries no
+        unit, only row and column numbers, so this is the caller's to supply.
+    origin : {``"upper"``, ``"lower"``}
+        Which end of the array's row axis is drawn at the top.  ``"upper"``
+        (default) puts row 0 at the top, the read-out order of a camera frame;
+        ``"lower"`` puts row 0 at the bottom, so a higher row index is higher
+        up.  With an explicit *extent* the axis numbers increase upward either
+        way, so this flips the data rather than the axis: a map whose row 0
+        holds its smallest Y — as
+        :class:`~tmdc_optics_tools.loaders.RamanMap` builds — needs
+        ``"lower"``, or it is drawn mirrored against correct axis labels.
+    laser_annotation : bool
+        Overlay the 1/e² laser-spot boundary.  This is the only switch: with
+        ``False`` no circle is drawn even when *laser_ref* is supplied.
+    laser_ref : object, optional
+        Which laser reference to draw, as anything exposing ``center_x``,
+        ``center_y`` and ``radius``.  ``None`` (default) falls back to
+        *image*'s own ``laser_ref`` attribute.  Selects the reference but does
+        not enable the overlay — *laser_annotation* must also be ``True``.  A
+        plain 2-D array has no such attribute, so ``laser_annotation=True``
+        alone draws nothing for a bare array.
 
     Returns
     -------
-    fig, ax, im
+    ImagePlot
+        Named 5-tuple of the figure, axes, image, laser-boundary circle and
+        colorbar.
     """
     img = image.img if hasattr(image, "img") else np.asarray(image, dtype=float)
 
@@ -755,10 +1279,15 @@ def plot_image(
     else:
         fig = ax.get_figure()
 
+    # Masking precedes the rescale.  rescale_intensity(in_range="image") takes
+    # its limits from the array's own min and max, and a single NaN makes both
+    # of them NaN, so every pixel comes back NaN and the panel draws blank.  A
+    # masked array's min and max skip the masked entries, and the mask survives
+    # the arithmetic.
+    img = np.ma.masked_invalid(img)
+
     if rescale_img:
         img = rescale_intensity(img, in_range="image", out_range=(0, 1))
-
-    img = np.ma.masked_invalid(img)
     vmin, vmax = clim if clim is not None else (None, None)
     im = ax.imshow(img, cmap=get_cmap(cmap), vmin=vmin, vmax=vmax,
                     extent=extent, origin=origin)
@@ -769,13 +1298,20 @@ def plot_image(
     else:
         ax.axis("off")
 
+    # Explicit arg wins, then the image's own reference.  A bare ndarray has
+    # neither, so getattr keeps that documented input working.
+    _lr = laser_ref if laser_ref is not None else getattr(image, "laser_ref", None)
+    circle = (_draw_laser_circle(ax, _lr, ls="--")
+              if laser_annotation and _lr is not None else None)
+
+    cb = None
     if colorbar:
         cb = fig.colorbar(im, ax=ax, pad=0.02)
         cb.set_label(colorbar_label if colorbar_label is not None
                      else ("Intensity (norm.)" if rescale_img
                            else "Intensity (counts)"))
 
-    return fig, ax, im
+    return ImagePlot(fig, ax, im, circle, cb)
 
 
 _VOIGT_PARAM_KEYS = ["center", "amp", "fwhm_g", "fwhm_l"]
@@ -985,7 +1521,8 @@ def animate_real_space_PL_map(
     xlabel           : str  = "x-axis (um)",
     ylabel           : str  = "y-axis (um)",
     laser_annotation : bool = True,
-    cmap             : str  = "cork",
+    cmap             : ColormapLike = "magma",
+    frame_source     : str  = "best",
 ) -> tuple:
     """
     Animate a sequence of real-space PL maps from an
@@ -1020,6 +1557,13 @@ def animate_real_space_PL_map(
         Axis labels.
     laser_annotation : bool
         Overlay the laser spot circle if ``scan.laser_ref`` is set.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.
+    frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+        Which version of each frame to draw.  ``"best"`` is background-corrected
+        when the scan was loaded with a *bg_region* and raw otherwise, so
+        animating the same scan twice as ``"raw"`` and ``"bg"`` shows what the
+        subtraction removed.
 
     Returns
     -------
@@ -1045,8 +1589,11 @@ def animate_real_space_PL_map(
     ...     title     = "Power-dependent PL",
     ... )
     """
-    fig, ax = plot_real_space_PL_map(scan, ax, idx=0, xlabel=xlabel, ylabel=ylabel, cmap=(cmap))
-    im = ax.images[0] if ax.images else ax.imshow(scan.load_frame(0), cmap=get_cmap(cmap))
+    fig, ax = plot_real_space_PL_map(scan, ax, idx=0, xlabel=xlabel, ylabel=ylabel,
+                                     cmap=(cmap), frame_source=frame_source)
+    im = ax.images[0] if ax.images else ax.imshow(
+        _resolve_frame(scan, 0, frame_source), cmap=get_cmap(cmap)
+    )
 
     # Static overall title (suptitle so it doesn't clash with the per-frame subtitle)
     if title is not None:
@@ -1062,7 +1609,7 @@ def animate_real_space_PL_map(
         _draw_laser_circle(ax, scan.laser_ref, ls="--")
 
     def update(frame):
-        im.set_data(scan.load_frame(frame))
+        im.set_data(_resolve_frame(scan, frame, frame_source))
         updated = [im]
         if var_array is not None and frame_title is not None:
             frame_title.set_text(
@@ -1235,23 +1782,37 @@ class AnimationPanel:
 
     Subclasses implement the two halves of an animated panel:
 
-    * :meth:`init_artists` — draw frame 0 onto a given axes and stash the
-      dynamic artists.  It receives the engine-resolved ``n_frames`` so the
-      panel can truncate its data and fix its axes limits once (preventing the
-      autoscale "jump" you would otherwise get as frames advance).
+    * :meth:`init_artists` — draw the animation's first frame onto a given axes
+      and stash the dynamic artists.  It receives *frames*, the sequence of
+      frame indices the animation will show, so the panel can fix its axes
+      limits over exactly those frames (preventing the autoscale "jump" you
+      would otherwise get as frames advance).  The first frame to draw is
+      ``frames[0]``, which is not necessarily ``0``.
     * :meth:`update` — mutate the stored artists for ``frame`` and return the
-      ones that changed, so the engine can blit efficiently.
+      ones that changed.  The engine redraws in full rather than blitting, so the
+      returned artists are not what makes the animation work; they are what lets
+      a caller drive the panels itself, and what documents which artists a panel
+      owns.
 
-    The :attr:`n_frames` property reports the panel's *native* number of frames;
-    the engine takes the minimum across all panels (unless overridden) so panels
-    of differing length stay in sync.
+    **Frame indices are always the panel's own.** ``frames`` may be any subset,
+    in any order — a window, a stride, a single frame — but every value in it
+    indexes the panel's data directly, and :meth:`update` is handed those same
+    values.  A panel therefore never tracks where a window started, and never
+    offsets an index; it keeps its full arrays and reads them at ``frame``.
+    Getting that wrong is silent — the animation plays real frames in a
+    plausible order while the shared title names different ones — which is why
+    the engine passes native indices rather than positions within the window.
+
+    The :attr:`n_frames` property reports the panel's number of frames.  Every
+    panel in one figure must report the same count; the engine refuses a
+    mismatch rather than quietly animating the shortest.
     """
 
     @property
     def n_frames(self) -> int:
         raise NotImplementedError
 
-    def init_artists(self, ax, n_frames: int) -> None:
+    def init_artists(self, ax, frames) -> None:
         raise NotImplementedError
 
     def update(self, frame: int) -> tuple:
@@ -1286,8 +1847,8 @@ class ImageSequencePanel(AnimationPanel):
     scan : AttoCubePLScanRealSpace
     title : str
         Per-panel heading.
-    cmap : str
-        Colormap name passed to :func:`get_cmap` via :func:`plot_real_space_PL_map`.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap` via :func:`plot_real_space_PL_map`.
     laser_annotation : bool
         Overlay the laser-spot circle when ``scan.laser_ref`` is set.
     laser_color : str
@@ -1305,13 +1866,23 @@ class ImageSequencePanel(AnimationPanel):
         Colour of the halo stroke.
     xlabel, ylabel : str
         Axis labels forwarded to :func:`plot_real_space_PL_map`.
+    frame_source : {``"best"``, ``"raw"``, ``"bg"``}
+        Which version of each frame to draw.  ``"best"`` is background-corrected
+        when the scan was loaded with a *bg_region* and raw otherwise.
+
+    Attributes
+    ----------
+    laser_circle : matplotlib.patches.Circle
+        The 1/e² boundary drawn on the first frame; ``None`` until
+        :meth:`init_artists` has run, and when no circle was drawn.  Restyle it
+        through this rather than through more constructor arguments.
     """
 
     def __init__(
         self,
         scan,
         title            : str   = "",
-        cmap             : str   = "vik",
+        cmap             : ColormapLike = "magma",
         laser_annotation : bool  = True,
         laser_color      : str   = "red",
         laser_linewidth  : float = 1.5,
@@ -1320,10 +1891,12 @@ class ImageSequencePanel(AnimationPanel):
         laser_halo_color : str   = "white",
         xlabel           : str   = "x-axis (pixels)",
         ylabel           : str   = "y-axis (pixels)",
+        frame_source     : str   = "best",
     ):
         self.scan             = scan
         self.title            = title
         self.cmap             = cmap
+        self.frame_source     = frame_source
         self.laser_annotation = laser_annotation
         self.laser_color      = laser_color
         self.laser_linewidth  = laser_linewidth
@@ -1333,40 +1906,33 @@ class ImageSequencePanel(AnimationPanel):
         self.xlabel           = xlabel
         self.ylabel           = ylabel
         self._im              = None
+        self.laser_circle     = None
 
     @property
     def n_frames(self) -> int:
         return self.scan.n_frames
 
-    def init_artists(self, ax, n_frames: int) -> None:
+    def init_artists(self, ax, frames) -> None:
         plot_real_space_PL_map(
-            self.scan, ax=ax, idx=0, cmap=self.cmap,
+            self.scan, ax=ax, idx=frames[0], cmap=self.cmap,
             xlabel=self.xlabel, ylabel=self.ylabel,
+            frame_source=self.frame_source,
         )
         ax.set_title(self.title)
         self._im = ax.images[0]
 
         if self.laser_annotation and getattr(self.scan, "laser_ref", None) is not None:
-            lr = self.scan.laser_ref
-            circle = patches.Circle(
-                (lr.center_x, lr.center_y), radius=lr.radius,
-                edgecolor=self.laser_color, facecolor="none",
-                linewidth=self.laser_linewidth, linestyle=self.laser_linestyle,
-                zorder=3,
+            self.laser_circle = _draw_laser_circle(
+                ax, self.scan.laser_ref,
+                color      = self.laser_color,
+                lw         = self.laser_linewidth,
+                ls         = self.laser_linestyle,
+                halo       = self.laser_halo,
+                halo_color = self.laser_halo_color,
             )
-            if self.laser_halo:
-                # Draw a thicker contrasting stroke behind the coloured line so
-                # it stays legible over bright hot spots after GIF quantization.
-                circle.set_path_effects([
-                    path_effects.withStroke(
-                        linewidth=self.laser_linewidth + 2.0,
-                        foreground=self.laser_halo_color,
-                    ),
-                ])
-            ax.add_patch(circle)
 
     def update(self, frame: int) -> tuple:
-        self._im.set_data(self.scan.load_frame(frame))
+        self._im.set_data(_resolve_frame(self.scan, frame, self.frame_source))
         return (self._im,)
 
 
@@ -1375,12 +1941,12 @@ class SpectrumLinePanel(AnimationPanel):
     A panel that animates one PL spectrum per frame.
 
     Wraps an :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` (or any object
-    exposing ``energy``/``wavelength`` plus ``best_energy_spectra``/``spectra``
+    exposing ``energy``/``wavelength`` plus ``best_energy_spectra``/``best_spectra``
     of shape ``(n_pixels, n_sweeps)``).  The x-axis is fixed; each frame swaps
     the y-values and updates a per-panel subtitle showing the swept value.
 
-    Both axes limits are fixed once over the *truncated* extent
-    (``[:, :n_frames]``) so the trace does not rescale or jump between frames.
+    Both axes limits are fixed once over the frames being animated, so the trace
+    does not rescale or jump between frames.
 
     Parameters
     ----------
@@ -1396,11 +1962,43 @@ class SpectrumLinePanel(AnimationPanel):
     title_fmt : str
         Format string with ``{label}``, ``{value}`` and ``{unit}`` fields.
     color : str, optional
-        Line colour.  Matplotlib default when ``None``.
+        Line colour.  Matplotlib default when ``None``.  Cannot be combined with
+        *cmap*, which sets the colour itself every frame.
+    cmap : ColormapLike, optional
+        Encode each frame's **peak** value as the trace's colour, and draw a
+        colour bar for it.  ``None`` (default) leaves the line one colour, adds
+        no colour bar, and takes no axes space — an encoding is a claim about the
+        data, so it is asked for rather than assumed.
+        The scale spans the peaks of the **whole scan**, not of the frames being
+        animated, so the colour means "this frame's brightness" and two clips of
+        one scan can be compared.  Values are read through the same corrected
+        arrays the trace is drawn from.
     ylabel : str, optional
         Y-axis label.  Derived from the scan's measurement type when ``None``,
         so a reflectance sweep is not labelled as PL.  A string is used
         **verbatim**, so include the unit.
+    colorbar_label : str, optional
+        Colour-bar label.  Derived as ``"Peak <signal>"`` when ``None``; a string
+        is used **verbatim**.  It is deliberately not the y-axis label: the y-axis
+        spans the full data range while the bar spans the range of per-frame
+        peaks, so one label on both would put the same words on two scales that
+        disagree.
+    twin_axis : bool
+        Add a top x-axis in the other spectral unit — wavelength above an energy
+        axis, energy above a wavelength one.  Default ``False``.
+
+    Attributes
+    ----------
+    line : matplotlib.lines.Line2D
+        The animated trace.  ``None`` until :meth:`init_artists` has run.
+    mappable : matplotlib.cm.ScalarMappable
+        Carries the colour scale; ``None`` unless *cmap* was given.  Restyle the
+        encoding through this — e.g. ``panel.mappable.set_clim(...)`` before
+        rendering — rather than through more constructor arguments.
+    colorbar : matplotlib.colorbar.Colorbar
+        ``None`` unless *cmap* was given.
+    ax_twin : matplotlib.axis.SecondaryAxis
+        The conjugate top axis; ``None`` unless *twin_axis* was set.
     """
 
     def __init__(
@@ -1413,8 +2011,18 @@ class SpectrumLinePanel(AnimationPanel):
         title_fmt        : str  = "{label} = {value:.3g} {unit}",
         show_sweep_title : bool = True,
         color            : str  = None,
+        cmap             : ColormapLike = None,
         ylabel           : str  = None,
+        colorbar_label   : str  = None,
+        twin_axis        : bool = False,
     ):
+        if cmap is not None and color is not None:
+            raise ValueError(
+                "pass either color= or cmap=, not both: cmap sets the line colour "
+                "from each frame's peak, so color= would be overwritten on the "
+                "first frame and silently ignored thereafter."
+            )
+
         self.scan             = scan
         self.x_axis           = x_axis
         self.sweep_attr       = sweep_attr
@@ -1423,8 +2031,14 @@ class SpectrumLinePanel(AnimationPanel):
         self.title_fmt        = title_fmt
         self.show_sweep_title = show_sweep_title
         self.color            = color
+        self.cmap             = cmap
         self.ylabel           = ylabel
-        self._line            = None
+        self.colorbar_label   = colorbar_label
+        self.twin_axis        = twin_axis
+        self.line             = None
+        self.mappable         = None
+        self.colorbar         = None
+        self.ax_twin          = None
         self._title           = None
         self._y               = None
         self._sweep_vals      = None
@@ -1433,28 +2047,70 @@ class SpectrumLinePanel(AnimationPanel):
     def n_frames(self) -> int:
         return self.scan.n_sweeps
 
-    def init_artists(self, ax, n_frames: int) -> None:
+    def init_artists(self, ax, frames) -> None:
         x, xlabel = _resolve_x_axis(self.scan, self.x_axis)
-        y_full = (self.scan.best_energy_spectra if self.x_axis == "energy"
-                  else self.scan.spectra)
-        self._y          = np.asarray(y_full[:, :n_frames], dtype=float)
-        self._sweep_vals = np.asarray(getattr(self.scan, self.sweep_attr))[:n_frames]
+        # Both arrays stay full length and are read at the frame's own index, so
+        # the panel never has to know where the animated selection began.
+        self._y          = np.asarray(_resolve_spectra(self.scan, "best", self.x_axis),
+                                      dtype=float)
+        self._sweep_vals = np.asarray(getattr(self.scan, self.sweep_attr))
 
-        # Fix both axes over the truncated extent so the trace doesn't jump.
+        # (n_pixels, n_shown): only the columns actually animated, so the y-limits
+        # frame the traces on screen rather than the whole scan's dynamic range.
+        shown = self._y[:, list(frames)]
+
         ax.set_xlim(x.min(), x.max())
-        ax.set_ylim(self._y.min(), self._y.max())
+        ax.set_ylim(shown.min(), shown.max())
         ax.set_xlabel(xlabel)
         ax.set_ylabel(self.ylabel if self.ylabel is not None
                       else _signal_label(self.scan))
 
-        (self._line,) = ax.plot(x, self._y[:, 0], color=self.color)
+        # After set_xlim, so the secondary axis inherits the finished limits.
+        if self.twin_axis:
+            self.ax_twin = _conjugate_x_axis(ax, self.x_axis)
+
+        color = self.color
+        if self.cmap is not None:
+            # Max down the pixel axis of every column, so the scale spans the whole
+            # scan's peaks rather than the animated frames'.  A window-dependent
+            # scale would give one frame different colours in different clips.
+            peaks = self._y.max(axis=0)
+            self.mappable = ScalarMappable(
+                cmap=get_cmap(self.cmap),
+                norm=Normalize(vmin=peaks.min(), vmax=peaks.max()),
+            )
+            self.mappable.set_array([])
+
+            # Re-initialising a panel onto the same figure would otherwise add a
+            # second bar beside the first, shrinking the axes again each time.
+            if self.colorbar is not None:
+                self.colorbar.remove()
+            self.colorbar = ax.figure.colorbar(self.mappable, ax=ax, pad=0.02)
+            self.colorbar.set_label(self._colorbar_label())
+            color = self.mappable.to_rgba(peaks[frames[0]])
+
+        (self.line,) = ax.plot(x, self._y[:, frames[0]], color=color)
         # show_sweep_title=True keeps the swept value in ax.set_title (useful
         # when this panel is used standalone).  Set to False when animate_panels
         # is already showing it in the suptitle to avoid duplication.
         if self.show_sweep_title:
-            self._title = ax.set_title(self._frame_title(0))
+            self._title = ax.set_title(self._frame_title(frames[0]))
         else:
             self._title = None
+
+    def _colorbar_label(self) -> str:
+        """
+        Label the colour bar, deriving ``"Peak <signal>"`` when none was given.
+
+        Composed from the name and unit rather than by prefixing
+        :func:`_signal_label`'s output, so the unit stays inside the brackets:
+        "Peak PL intensity (counts)", not "Peak PL intensity (counts)" built by
+        string surgery that would break on a signal with no unit.
+        """
+        if self.colorbar_label is not None:
+            return self.colorbar_label
+        name, unit = _signal_name_unit(self.scan)
+        return f"Peak {name} ({unit})" if unit else f"Peak {name}"
 
     def _frame_title(self, frame: int) -> str:
         return self.title_fmt.format(
@@ -1470,8 +2126,11 @@ class SpectrumLinePanel(AnimationPanel):
         return self._frame_title(frame)
 
     def update(self, frame: int) -> tuple:
-        self._line.set_ydata(self._y[:, frame])
-        updated = [self._line]
+        y = self._y[:, frame]
+        self.line.set_ydata(y)
+        if self.mappable is not None:
+            self.line.set_color(self.mappable.to_rgba(y.max()))
+        updated = [self.line]
         if self._title is not None:
             self._title.set_text(self._frame_title(frame))
             updated.append(self._title)
@@ -1797,9 +2456,155 @@ def _writer_for_path(path: str) -> str:
     return _WRITER_BY_EXT.get(Path(path).suffix.lower(), "pillow")
 
 
+def _panel_frame_count(panels) -> int:
+    """
+    The frame count every panel agrees on, or a ``ValueError`` naming the disagreement.
+
+    Refusing is the point.  Taking the minimum instead animates the shortest panel's
+    worth of frames and says nothing, so a figure built from a scan and an image
+    sequence that do not correspond renders happily and looks right.
+    """
+    counts = [p.n_frames for p in panels]
+    if len(set(counts)) == 1:
+        return counts[0]
+
+    listing = ", ".join(
+        f"{type(p).__name__} has {c}" for p, c in zip(panels, counts)
+    )
+    raise ValueError(
+        f"the panels disagree on how many frames they have: {listing}. Every panel "
+        f"in one figure must cover the same measurements, so there is no safe way to "
+        f"pick. The AttoCube exports one extra white-light frame by default, which is "
+        f"the usual cause of an off-by-one; drop the trailing frame(s) before "
+        f"animating. If the panels really do cover different measurements, animate "
+        f"them separately."
+    )
+
+
+def _resolve_frames(frames, n_frames: int):
+    """
+    Validate a caller's frame selection against the panels' frame count.
+
+    Returns a list of native frame indices.  Every refusal here is a case that would
+    otherwise fail deep inside a writer, halfway through a render, with an
+    ``IndexError`` naming neither the panel nor the offending index.
+    """
+    try:
+        selected = list(frames)
+    except TypeError as exc:
+        raise TypeError(
+            f"frames must be a sequence of frame indices, e.g. range(10, 20); "
+            f"got {type(frames).__name__}."
+        ) from exc
+
+    if not selected:
+        raise ValueError("frames is empty; an animation needs at least one frame.")
+
+    for value in selected:
+        # bool is an int subclass, and True would silently mean frame 1.
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise TypeError(
+                f"frames must contain whole frame indices; got {value!r}. To select "
+                f"by a physical coordinate rather than by index, resolve it against "
+                f"the scan first."
+            )
+        if value < 0:
+            raise ValueError(
+                f"frames contains {value}, but frame indices are counted from 0. "
+                f"For the last few frames write range(n - 10, n), not negatives — "
+                f"a negative mixed with positives would silently reorder the "
+                f"animation."
+            )
+        if value >= n_frames:
+            raise ValueError(
+                f"frames contains {value}, but the panels have {n_frames} frames "
+                f"(0 to {n_frames - 1})."
+            )
+
+    return [int(v) for v in selected]
+
+
+def frame_window(scan, start=None, end=None, *, axis=None) -> range:
+    """
+    Frame indices between two coordinates on a scan, for :func:`animate_panels`.
+
+    ``animate_panels`` takes frame *indices*, which is the only thing every panel
+    understands — an image sequence has no coordinates at all.  This turns a pair of
+    physical coordinates into such a selection, naming the scan they belong to at the
+    call site, so the assumption that one scan's coordinates describe every panel in
+    the figure is written down rather than inferred.
+
+    Both endpoints are **inclusive**: a caller who names two points is asking to see
+    both of them.
+
+    Parameters
+    ----------
+    scan : AttoCubeSpectralSweep
+        The scan whose coordinates *start* and *end* refer to.
+    start, end : float, optional
+        Coordinates on *axis*.  Each resolves to its nearest sweep point, with the
+        scan's own policy: an ambiguous coordinate is refused and a distant one
+        warns, exactly as for ``get_spectrum_at``.  ``None`` means the first / last
+        frame.
+    axis : str, optional
+        Which coordinate *start* and *end* are on — ``"piezo_y"``,
+        ``"top_voltage"``, a raw row label, or anything else ``sweep=`` accepts.
+        Defaults to the scan's declared sweep axis.
+
+    Returns
+    -------
+    range
+        Frame indices, ascending, for ``animate_panels(panels, frames=…)``.
+
+    Raises
+    ------
+    ValueError
+        If *end* resolves before *start*.  Reversed endpoints are far more often a
+        typo than a request to play backwards, and playing backwards is still one
+        slice away — see below — so the reversal is made explicit rather than
+        guessed at.  Silently swapping them would make the typo invisible.
+
+    Examples
+    --------
+    >>> window = frame_window(sweep, 3.2, 4.8, axis="piezo_y")   # doctest: +SKIP
+    >>> fig, anim = animate_panels(panels, frames=window)        # doctest: +SKIP
+
+    Backwards, and every third frame — ``frames=`` takes any sequence, so slicing the
+    window is all either needs:
+
+    >>> animate_panels(panels, frames=window[::-1])              # doctest: +SKIP
+    >>> animate_panels(panels, frames=window[::3])               # doctest: +SKIP
+    """
+    n_frames = scan.n_sweeps
+
+    def _endpoint(value, default, what):
+        if value is None:
+            return default
+        return _select_sweep_point(
+            scan, value=value, axis=axis, index=None, fast=None, slow=None,
+            index_fast=None, index_slow=None, what=what,
+        )
+
+    first = _endpoint(start, 0,            "frame_window(start=…)")
+    last  = _endpoint(end,   n_frames - 1, "frame_window(end=…)")
+
+    if last < first:
+        raise ValueError(
+            f"frame_window does not do reverse playback: start must not come after "
+            f"end. start={start!r} resolves to frame {first}, end={end!r} to frame "
+            f"{last}. Swap them if they are the wrong way round. For reverse "
+            f"playback, reverse the window itself — "
+            f"frame_window(scan, {end!r}, {start!r})[::-1] — which says so, where a "
+            f"reversed pair would just read as a typo."
+        )
+
+    return range(first, last + 1)
+
+
 def animate_panels(
     panels,
-    n_frames           : int   = None,
+    *,
+    frames                     = None,
     panel_width        : float = 5.0,
     panel_height       : float = 4.0,
     figsize            : tuple = None,
@@ -1833,10 +2638,17 @@ def animate_panels(
     Parameters
     ----------
     panels : sequence of AnimationPanel
-        One panel per subplot, left to right.
-    n_frames : int, optional
-        Number of frames to animate.  Defaults to the minimum native
-        ``n_frames`` across all panels.
+        One panel per subplot, left to right.  All panels must report the same
+        ``n_frames``; a mismatch is refused rather than silently truncated.
+    frames : sequence of int, optional
+        Which frames to animate, in order.  Defaults to every frame.  Any
+        sequence of indices works, so one parameter covers a window
+        (``range(500, 520)``), a stride (``range(0, 2091, 10)``), a single
+        frame (``[7]``) or an arbitrary order — which is what makes a
+        thousand-frame scan quick to render and to embed.  Keyword-only,
+        because the parameter that used to sit in this position took a *count*
+        rather than indices and a stale positional call would otherwise be
+        read as a different window.
     panel_width, panel_height : float
         Per-panel figure size in inches (used when *figsize* is ``None``).
     figsize : tuple, optional
@@ -1848,8 +2660,14 @@ def animate_panels(
         Set to ``False`` to show only the swept-variable labels.
     frame_count_fmt : str
         Format string for the frame counter.  Available fields:
-        ``{frame}`` (0-based current frame) and ``{n_frames}`` (total).
-        Default ``"Frame {frame}/{n_frames}"``.
+        ``{frame}`` (the frame's own index in the scan) and ``{n_frames}``
+        (the panels' total), plus ``{position}`` (0-based place within the
+        animated selection) and ``{n_shown}`` (how many frames are shown).
+        Default ``"Frame {frame}/{n_frames}"``, so a windowed animation
+        captions its frames with the indices they have in the scan —
+        ``"Frame 203/2091"``, not ``"Frame 3/40"`` — and a still lifted from
+        one can be traced back to a file.  Use
+        ``"Frame {position}/{n_shown}"`` for the other reading.
     suptitle_sep : str
         Separator inserted between suptitle segments.
         Default ``"  |  "``.
@@ -1875,19 +2693,40 @@ def animate_panels(
     --------
     >>> panels = [
     ...     ImageSequencePanel(white_light_map, title="White light", cmap="gray"),
-    ...     ImageSequencePanel(real_space_PL_map, title="Real-space PL", cmap="lipari"),
+    ...     ImageSequencePanel(real_space_PL_map, title="Real-space PL", cmap="magma"),
     ...     SpectrumLinePanel(spectra_linescan, x_axis="energy"),
     ... ]
     >>> # suptitle shows e.g. "Frame 3/78  |  Power: 1.23 uW"
     >>> fig, anim = animate_panels(panels, save="three_panel_scan.gif")
+
+    Animate one interval of a long scan, then every tenth frame of it:
+
+    >>> fig, anim = animate_panels(panels, frames=range(500, 520))     # doctest: +SKIP
+    >>> fig, anim = animate_panels(panels, frames=range(0, 2091, 10))  # doctest: +SKIP
     """
     panels = list(panels)
     n = len(panels)
     if n == 0:
         raise ValueError("animate_panels requires at least one panel.")
 
-    if n_frames is None:
-        n_frames = min(p.n_frames for p in panels)
+    # With no selection the panels must agree, because picking for them is what
+    # hides a mismatch.  With an explicit selection there is nothing to guess: the
+    # caller named the frames, so they only have to be valid for every panel.
+    counts = [p.n_frames for p in panels]
+    if frames is None:
+        n_frames = _panel_frame_count(panels)
+        selected = list(range(n_frames))
+    else:
+        n_frames = min(counts)
+        selected = _resolve_frames(frames, n_frames)
+    n_shown = len(selected)
+    # Where each frame sits in the animation, for {position} in the counter.  A
+    # frame may legitimately appear twice (a caller can repeat one to hold on it);
+    # the first occurrence is the one the counter names.
+    position_of = {}
+    for i, f in enumerate(selected):
+        position_of.setdefault(f, i)
+
     if figsize is None:
         figsize = (panel_width * n, panel_height)
 
@@ -1898,7 +2737,7 @@ def animate_panels(
     axes = axes[0]
 
     for panel, ax in zip(panels, axes):
-        panel.init_artists(ax, n_frames)
+        panel.init_artists(ax, selected)
 
     # _build_suptitle and _has_suptitle must be evaluated AFTER init_artists
     # has run on every panel.  DiffusionCloudPanel (and any other panel that
@@ -1909,7 +2748,10 @@ def animate_panels(
     def _build_suptitle(frame: int) -> str:
         parts = []
         if show_frame_count:
-            parts.append(frame_count_fmt.format(frame=frame, n_frames=n_frames))
+            parts.append(frame_count_fmt.format(
+                frame=frame, n_frames=n_frames,
+                position=position_of.get(frame, 0), n_shown=n_shown,
+            ))
         for panel in panels:
             lbl = panel.frame_label(frame)
             if lbl:
@@ -1917,49 +2759,18 @@ def animate_panels(
         return suptitle_sep.join(parts)
 
     _has_suptitle = show_frame_count or any(
-        panel.frame_label(0) is not None for panel in panels
+        panel.frame_label(selected[0]) is not None for panel in panels
     )
 
-    # fig.suptitle() is a Figure-level artist.  With blit=True, matplotlib
-    # only redraws Axes-level artists, so the suptitle text updates correctly
-    # in memory but is never repainted on screen — it appears frozen on the
-    # frame-0 string for the entire animation.
-    #
-    # Fix: place the shared title as a centred text artist on the top axes
-    # (the leftmost one when there are several panels).  It is an Axes artist
-    # so blit picks it up, yet with transform=fig.transFigure it sits at the
-    # same visual position as a suptitle would.
-    if _has_suptitle:
-        title_ax = axes[len(axes) // 2]   # centre panel (or only panel)
-
-        # Check whether any panel has set a non-empty axes title.
-        # If so, we need to stack the suptitle above the axes title rather
-        # than overlapping it.  We do this by:
-        #   - moving the suptitle text higher (y=1.12 instead of 1.04), and
-        #   - nudging each panel's axes title downward (pad=-4) so there is
-        #     clear vertical separation between the two lines.
-        any_panel_title = any(
-            ax.get_title() for ax in axes
-        )
-        if any_panel_title:
-            suptitle_y = 1.12
-            for ax in axes:
-                if ax.get_title():
-                    ax.set_title(ax.get_title(), pad=-4)
-        else:
-            suptitle_y = 1.04
-
-        suptitle = title_ax.text(
-            0.5, suptitle_y,
-            _build_suptitle(0),
-            transform      = title_ax.transAxes,
-            ha             = "center",
-            va             = "bottom",
-            fontsize       = plt.rcParams.get("figure.titlesize", "large"),
-            fontweight     = plt.rcParams.get("figure.titleweight", "normal"),
-        )
-    else:
-        suptitle = None
+    # A real fig.suptitle, because it is the only shared title the layout engine
+    # reserves vertical space for.  Anything placed in a panel's own coordinates
+    # instead — the obvious way to get a title blit can repaint — collides as soon
+    # as a panel gains furniture on top: constrained_layout does not grow the
+    # figure to fit a secondary axis, it *shrinks the panel*, so a position given
+    # as a fraction of the panel slides down while the panel's own title stays at
+    # the top.  Measured 20 px of overlap once a panel draws a secondary x-axis,
+    # against 8.3 px of clearance here for every panel count and figure size tried.
+    suptitle = fig.suptitle(_build_suptitle(selected[0])) if _has_suptitle else None
 
     def update(frame):
         artists = []
@@ -1970,8 +2781,19 @@ def animate_panels(
             artists.append(suptitle)
         return tuple(artists)
 
+    # blit=False because the shared title is a Figure artist and blitting only
+    # repaints Axes ones, so with blit=True the title freezes on its frame-0 text.
+    # Verified across all three output paths: frozen in the notebook slider
+    # (to_jshtml) and in MP4, and updating only in GIF — a Pillow-writer accident,
+    # not a guarantee.  Nothing is given up: both save paths draw full frames
+    # regardless (measured slightly *faster* without blit), and the notebook slider
+    # steps through frames rendered in advance, which blitting cannot speed up.
+    # Only live playback in a desktop window or %matplotlib widget redraws more.
+    # frames=<sequence> rather than a count, so FuncAnimation hands update() the
+    # frame's own index.  Every panel then reads its data at that index directly,
+    # with no window offset to carry and get wrong.
     anim = animation.FuncAnimation(
-        fig, update, frames=n_frames, blit=True, interval=interval_ms,
+        fig, update, frames=selected, blit=False, interval=interval_ms,
     )
 
     if save is not None:
@@ -1990,14 +2812,15 @@ def animate_wl_pl_spectra(
     spectra          = None,
     laser_ref        = None,
     x_axis           : str = "energy",
-    wl_cmap          : str = "gray",
-    pl_cmap          : str = "lipari",
+    wl_cmap          : ColormapLike = "gray",
+    pl_cmap          : ColormapLike = "magma",
     wl_title         : str = "White light",
     pl_title         : str = "Real-space PL",
     sweep_attr       : str = "scanner_y",
     sweep_unit       : str = "V",
     laser_ref_kwargs : dict = None,
     laser_style      : dict = None,
+    spectrum_style   : dict = None,
     save             : str  = None,
     **engine_kwargs,
 ) -> tuple:
@@ -2027,8 +2850,8 @@ def animate_wl_pl_spectra(
         (with *laser_ref_kwargs*).
     x_axis : {"energy", "wavelength"}
         Spectrum panel x-axis.
-    wl_cmap, pl_cmap : str
-        Colormaps for the two image panels.
+    wl_cmap, pl_cmap : str, Colormap, or sequence of colours
+        Colormaps for the two image panels, passed to :func:`get_cmap`.
     wl_title, pl_title : str
         Titles for the two image panels.
     sweep_attr, sweep_unit : str
@@ -2042,32 +2865,58 @@ def animate_wl_pl_spectra(
         :class:`ImageSequencePanel` panels, e.g.
         ``{"laser_color": "red", "laser_linewidth": 1.5, "laser_linestyle": "-",
         "laser_halo": True, "laser_halo_color": "white", "laser_annotation": True}``.
+    spectrum_style : dict, optional
+        Extra keyword arguments for the spectrum :class:`SpectrumLinePanel`, e.g.
+        ``{"twin_axis": True, "cmap": "viridis", "ylabel": "Counts / s"}``.  This
+        is the only route to that panel's remaining options; an unknown key
+        raises from its constructor, which names it.
     save : str, optional
         Output path for the animation.  Format is chosen from the extension
         (``.gif`` by default; ``.mp4`` etc. via FFmpeg) — see
         :func:`animate_panels`.
     **engine_kwargs
         Forwarded to :func:`animate_panels` (e.g. ``interval_ms``,
-        ``suptitle_fmt``, ``n_frames``, ``writer``).
+        ``frame_count_fmt``, ``suptitle_sep``, ``frames``, ``writer``).
+        Pass ``frames=range(a, b)`` to animate only part of a long scan.
+
+    Notes
+    -----
+    The AttoCube exports **one more white-light frame than PL frames** by default;
+    the extra one has no PL frame to pair with.  When *wl* is exactly one frame
+    longer than the shortest other panel, that trailing frame is dropped and a
+    warning names the counts.  Any other disagreement is left to
+    :func:`animate_panels` to refuse, because only this function knows which of
+    its arguments is the white light, and so only here is the off-by-one
+    identifiable rather than guessed at.
 
     Returns
     -------
-    fig, anim
+    fig, anim, panels
+        *panels* is the list built here, in white-light / real-space-PL /
+        spectrum order with omitted ones absent — so its length follows which
+        arguments were given, and the spectrum panel is ``panels[-1]`` whenever
+        *spectra* was passed.  Returned because a panel's artists are how it is
+        restyled: ``panels[-1].ax_twin``, ``.line``, ``.mappable``, and
+        :attr:`ImageSequencePanel.laser_circle` are reachable no other way from
+        here.
 
     Examples
     --------
     >>> # All three panels
-    >>> fig, anim = animate_wl_pl_spectra(
+    >>> fig, anim, panels = animate_wl_pl_spectra(
     ...     wl=("./wl/", "wl_"), pl=("./PL/", "PL_"),
     ...     spectra="./PL/PL_..iter_0.csv",
     ...     laser_ref="laser_ref.csv", save="three_panel_scan.gif",
     ... )
 
-    >>> # PL map + spectra only
-    >>> fig, anim = animate_wl_pl_spectra(
+    >>> # PL map + spectra only, with a wavelength scale on top of the spectrum,
+    >>> # then that scale restyled through the panel it belongs to
+    >>> fig, anim, panels = animate_wl_pl_spectra(
     ...     pl=("./PL/", "PL_"), spectra="./PL/PL_..iter_0.csv",
     ...     laser_ref="laser_ref.csv",
+    ...     spectrum_style={"twin_axis": True},
     ... )
+    >>> panels[-1].ax_twin.tick_params(labelsize=6)     # doctest: +SKIP
     """
     from .loaders import (
         AttoCubePLScanRealSpace,
@@ -2100,7 +2949,8 @@ def animate_wl_pl_spectra(
         # letting the loader guess.  Pass a pre-built sweep for anything else.
         return AttoCubeSpectralSweep(path=str(spec), spectra_type="PL")
 
-    laser_style = laser_style or {}
+    laser_style    = laser_style or {}
+    spectrum_style = spectrum_style or {}
 
     panels = []
     wl_scan = _image_scan(wl)
@@ -2118,6 +2968,7 @@ def animate_wl_pl_spectra(
         panels.append(SpectrumLinePanel(
             spec_scan, x_axis=x_axis,
             sweep_attr=sweep_attr, sweep_unit=sweep_unit,
+            **spectrum_style,
         ))
 
     if not panels:
@@ -2125,7 +2976,27 @@ def animate_wl_pl_spectra(
             "animate_wl_pl_spectra needs at least one of wl, pl, or spectra."
         )
 
-    return animate_panels(panels, save=save, **engine_kwargs)
+    # The AttoCube's trailing white-light frame.  This is the only place the
+    # off-by-one can be *identified* rather than guessed at, because only here is
+    # one panel known to be the white light — animate_panels sees a row of
+    # ImageSequencePanels and rightly refuses to pick among them.  Exactly one
+    # extra frame is the documented export quirk; anything else falls through to
+    # the engine's refusal.
+    if wl_scan is not None and len(panels) > 1 and "frames" not in engine_kwargs:
+        wl_count    = panels[0].n_frames          # wl is appended first
+        other_count = min(p.n_frames for p in panels[1:])
+        if wl_count == other_count + 1:
+            warnings.warn(
+                f"takes {other_count} images out of a possible {wl_count}: the "
+                f"AttoCube exports one more white-light frame than PL frames by "
+                f"default, and the last one has no PL frame to pair with. Pass "
+                f"frames= explicitly to override.",
+                UserWarning, stacklevel=2,
+            )
+            engine_kwargs["frames"] = range(other_count)
+
+    fig, anim = animate_panels(panels, save=save, **engine_kwargs)
+    return fig, anim, panels
 
 
 def trim_to_sweep_count(image_scan, n_sweeps: int, auto_trim: bool = True):
@@ -2133,9 +3004,9 @@ def trim_to_sweep_count(image_scan, n_sweeps: int, auto_trim: bool = True):
     Drop trailing frames beyond *n_sweeps*, warning when it happens.
 
     The AttoCube acquisition can leave one extra frame (e.g. white light) at
-    the end of an image sequence relative to a paired spectral sweep — a
-    known export quirk, not a corrupted sequence (see CLAUDE.md's AttoCube
-    export record). :meth:`~.AttoCubeSpectralSweep.as_image_grid` and
+    the end of an image sequence relative to a paired spectral sweep. That is
+    what the exporter does, not a corrupted sequence.
+    :meth:`~.AttoCubeSpectralSweep.as_image_grid` and
     :func:`animate_wl_pl_spectra_grid` both need an exact frame-count match,
     so this is where that quirk gets handled, once, rather than at every call
     site that runs into it.
@@ -2182,8 +3053,8 @@ def animate_wl_pl_spectra_grid(
     reverse_fast     : bool = False,
     reverse_slow     : bool = False,
     x_axis           : str  = "energy",
-    wl_cmap          : str  = "gray",
-    pl_cmap          : str  = "lipari",
+    wl_cmap          : ColormapLike = "gray",
+    pl_cmap          : ColormapLike = "magma",
     wl_title         : str  = "White light",
     pl_title         : str  = "Real-space PL",
     sweep_attrs             = ("scanner_x", "scanner_y"),
@@ -2240,8 +3111,8 @@ def animate_wl_pl_spectra_grid(
         :func:`animate_wl_pl_spectra`'s own *laser_style*.
     auto_trim : bool
         An image sequence with more frames than ``scan.n_sweeps`` is trimmed
-        to the first ``scan.n_sweeps`` (a known AttoCube acquisition quirk —
-        see CLAUDE.md's AttoCube export record), with a ``UserWarning``
+        to the first ``scan.n_sweeps`` — the AttoCube exporter can write one
+        frame more than its paired sweep — with a ``UserWarning``
         naming how many frames were dropped. ``False`` raises instead, via
         :meth:`~.AttoCubeSpectralSweep.as_image_grid`'s own error.
     save : str, optional
@@ -2310,8 +3181,8 @@ def _draw_laser_circle(
     """
     Draw the 1/e² laser-spot boundary on *ax* and return the Circle artist.
 
-    Mirrors the implementation used in :class:`ImageSequencePanel` so both
-    static single-frame plots and animations get identical laser annotations.
+    The one implementation, so a static single-frame plot and an animation of the
+    same scan carry identical laser annotations.
 
     Parameters
     ----------
@@ -2362,7 +3233,7 @@ def plot_diffusion_cloud(
     ax                 = None,
     figsize            : tuple = (4, 4),
     dpi                : int   = None,
-    cmap               : str   = "inferno",
+    cmap               : ColormapLike = "inferno",
     contour_color      : str   = "green",
     contour_lw         : float = 0.9,
     contour_ls         : str   = "--",
@@ -2417,8 +3288,8 @@ def plot_diffusion_cloud(
         When ``None`` the analysis is run here with the remaining kwargs.
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
-    cmap : str
-        Colormap for the image.
+    cmap : str, Colormap, or sequence of colours
+        Colormap for the image, passed to :func:`get_cmap`.
     contour_color, contour_lw, contour_ls : str / float / str
         Style of the boundary contour.
     centroid_color, centroid_marker, centroid_ms : str / str / float
@@ -2634,8 +3505,8 @@ class DiffusionCloudPanel(AnimationPanel):
         that point).
     title : str
         Panel heading.
-    cmap : str
-        Colormap for the image.
+    cmap : str, Colormap, or sequence of colours
+        Colormap for the image, passed to :func:`get_cmap`.
     contour_color, contour_lw, contour_ls : str / float / str
         Style of the per-frame boundary contour.
     centroid_color, centroid_marker, centroid_ms : str / str / float
@@ -2675,7 +3546,7 @@ class DiffusionCloudPanel(AnimationPanel):
         scan,
         seq_result        = None,
         title             : str   = "",
-        cmap              : str   = "inferno",
+        cmap              : ColormapLike = "inferno",
         contour_color     : str   = "cyan",
         contour_lw        : float = 0.9,
         contour_ls        : str   = "--",
@@ -2783,7 +3654,7 @@ class DiffusionCloudPanel(AnimationPanel):
             )
         return self._seq_result
 
-    def _resolve_var(self, seq, n_frames: int) -> None:
+    def _resolve_var(self, seq) -> None:
         """
         Resolve the swept-variable array and labels.
 
@@ -2793,12 +3664,15 @@ class DiffusionCloudPanel(AnimationPanel):
         2. ``seq_result.var_array`` / ``.var_label`` / ``.var_units`` — the
            values that were forwarded from ``analyse_diffusion_sequence``.
         3. ``None`` — no per-frame subtitle is shown.
+
+        The array is kept at full length and read at each frame's own index, so a
+        window shows the values belonging to the frames it displays.
         """
         arr = self._var_array_override
         if arr is None and seq.var_array is not None:
             arr = seq.var_array
         if arr is not None:
-            self._var_array = np.asarray(arr)[:n_frames]
+            self._var_array = np.asarray(arr)
         else:
             self._var_array = None
 
@@ -2824,13 +3698,13 @@ class DiffusionCloudPanel(AnimationPanel):
             return None
         return self._make_frame_title(frame)
 
-    def init_artists(self, ax, n_frames: int) -> None:
+    def init_artists(self, ax, frames) -> None:
         seq = self._get_seq_result()
-        self._resolve_var(seq, n_frames)
+        self._resolve_var(seq)
 
-        # Draw frame 0
-        frame0 = (self.scan.load_frame(0)
-                  if hasattr(self.scan, "load_frame") else self.scan[0])
+        first = frames[0]
+        frame0 = (self.scan.load_frame(first)
+                  if hasattr(self.scan, "load_frame") else self.scan[first])
         self._im = ax.imshow(
             np.asarray(frame0, float),
             cmap=get_cmap(self.cmap), origin="upper",
@@ -2854,8 +3728,8 @@ class DiffusionCloudPanel(AnimationPanel):
                 self.bg_region_color, label="bg region",
             )
 
-        r0 = seq.frames[0]
-        # Contour lines for frame 0
+        r0 = seq.frames[first]
+        # Contour lines for the first frame shown
         self._contour_lines = []
         for contour in r0.contours:
             (line,) = ax.plot(
@@ -2926,11 +3800,22 @@ class DiffusionCloudPanel(AnimationPanel):
 # Power-series spectrum plot
 # ---------------------------------------------------------------------------
 
-def plot_power_series(
+# Lazy imports for colour-norm helpers (avoid polluting the module namespace
+# with rarely-used names while keeping the import cost near zero).
+from matplotlib.colors import Normalize, LogNorm, BoundaryNorm
+from matplotlib.cm import ScalarMappable
+
+
+def plot_spectral_series(
     scan,
     ax               = None,
     figsize          : tuple  = (6, 4),
     dpi              : int    = None,
+    # --- nest pinning (nested scans only) ---
+    fast             : float  = None,
+    index_fast       : int    = None,
+    slow             : float  = None,
+    index_slow       : int    = None,
     # --- x-axis ---
     x_axis           : str    = "energy",
     x_range          : tuple  = None,
@@ -2939,21 +3824,23 @@ def plot_power_series(
     spectra_source   : str    = "best",
     # --- background subtraction (post-load, in addition to loader bg) ---
     bg_region        : tuple  = None,
-    # --- sweep selection and stacking ---
+    # --- series selection and stacking ---
+    series_axis      : str    = "sweep",
+    series_range     : tuple  = None,
     sweep_step       : int    = 1,
     spectrum_offset  : float  = 0.0,
     # --- colour mapping ---
-    cmap             : str    = "viridis",
-    power_scale      : str    = "linear",
-    power_range      : tuple  = None,
+    cmap             : ColormapLike = "magma",
+    color_scale      : str    = "linear",
+    color_range      : tuple  = None,
     # --- line style ---
     lw               : float  = 1.0,
     alpha            : float  = 1.0,
-    alpha_by_power   : bool   = False,
+    alpha_by_series  : bool   = False,
     alpha_min        : float  = 0.2,
     # --- colorbar ---
     colorbar         : bool   = True,
-    cb_label         : str    = "Power (µW)",
+    cb_label         : str    = None,
     cb_labelpad      : float  = 12.0,
     # --- peak marker ---
     peak_marker      : bool   = False,
@@ -2962,28 +3849,42 @@ def plot_power_series(
     peak_marker_ls   : str    = "--",
     # --- axes labels ---
     ylabel           : str    = None,
-) -> tuple:
+) -> SpectralSeriesPlot:
     """
-    Plot a power-series of PL spectra with each line coloured by optical power.
+    Plot a series of spectra, one line per sweep point, coloured by coordinate.
 
-    Each sweep in *scan* is drawn as a line whose colour is taken from *cmap*
-    mapped linearly (or logarithmically) onto the ``scan.power`` array.  A
-    colorbar indicates the optical power scale.
+    Every point of the series is drawn as a line whose colour is taken from
+    *cmap* mapped onto the series coordinate, with a colorbar naming that
+    coordinate.  A flat sweep is itself the series.  A declared nest is pinned
+    on one of its two axes, and the axis left free becomes the series.
 
     Parameters
     ----------
     scan : AttoCubeSpectralSweep
-        Must expose ``power`` (µW), ``energy``/``wavelength``, and the chosen
-        *spectra_source* attribute.
+        Must expose ``sweep_axis``, ``energy`` / ``wavelength``, and the chosen
+        *spectra_source* attribute.  A nested scan must have been loaded with
+        ``fast_sweep=`` and ``slow_sweep=``.
     ax : matplotlib.axes.Axes, optional
         Axes to draw into.  A new figure is created when ``None``.
     figsize : tuple
-        Figure size in inches (used when *ax* is ``None``).
+        Figure size, used only when *ax* is ``None``.
     dpi : int, optional
-        Figure DPI (used when *ax* is ``None``).
+        Figure resolution, used only when *ax* is ``None``.
 
-    x-axis
-    ------
+    Nest pinning
+    ------------
+    fast, slow : float, optional
+        Coordinate at which to hold that nest axis.  The other axis becomes the
+        series.  Nested scans only.
+    index_fast, index_slow : int, optional
+        The same, by integer position rather than by coordinate.
+
+        Name exactly one of these four on a nested scan and none of them on a
+        flat one.  Holding the fast axis returns one spectrum per slow point and
+        vice versa, so the series always runs along the axis *not* named.
+
+    Axes
+    ----
     x_axis : {"energy", "wavelength"}
         Primary x-axis.  Default ``"energy"``.
     x_range : tuple of (x_min, x_max), optional
@@ -2995,28 +3896,50 @@ def plot_power_series(
     Spectra
     -------
     spectra_source : str
-        Which array to use.  One of:
+        Which correction state to plot; *x_axis* decides the axis it is served on.
 
-        * ``"best"``  — :attr:`best_energy_spectra` (bg-corrected if
-          configured, otherwise raw energy spectra).  **Default.**
-        * ``"raw"``   — :attr:`spectra` (wavelength space, raw counts).
-        * ``"energy"``— :attr:`energy_spectra` (Jacobian applied if
-          configured; no background subtraction).
-        * ``"energy_bg"`` — :attr:`energy_spectra_bg` (background-
-          subtracted, Jacobian applied if configured).  Requires
-          ``bg_region`` at load time.
-        * ``"energy_pre_jacobian"`` — :attr:`energy_spectra_pre_jacobian`
-          (always without Jacobian correction).
+        * ``"best"``  — the most-corrected state the scan holds.  **Default.**
+        * ``"raw"``   — the file's own counts.
+        * ``"cr"``    — cosmic-ray repaired.  Requires ``cosmic_rays`` at load time.
+        * ``"bg"``    — background-subtracted.  Requires ``bg_region_nm`` /
+          ``bg_region_eV`` or ``bg_spectrum`` at load time.
+        * ``"contrast"`` — ΔR/R₀ against the reference.  Requires ``reference``.
+        * ``"pre_jacobian"`` — the raw counts on the energy axis with the Jacobian
+          left off, whatever ``apply_jacobian`` says.  Energy axis only.
 
     bg_region : tuple of (x_min, x_max), optional
         Additional background region subtracted *after* loading (same units
         as *x_axis*).  Applied on top of any background already baked into
         *spectra_source*.  ``None`` (default) skips this step.
+
+    Series
+    ------
+    series_axis : str
+        Which quantity the series is read against — the coordinate that colours
+        the lines, labels the colorbar, and *series_range* is measured in.
+        ``"sweep"`` (default) is the scan's declared sweep axis.  Anything else
+        is spelled as ``sweep=`` spells it: a registry key such as
+        ``"top_voltage"`` or ``"carrier_density"``, or a raw row label such as
+        ``"V_A"``.  Use it when a scan is declared in one coordinate and the
+        figure is wanted in another — a displacement-field sweep driven by both
+        gates, read in top-gate volts.
+
+        Flat sweeps only.  On a nest the free axis carries its own coordinate,
+        label and unit, and the colours follow it.
+    series_range : tuple of (low, high), optional
+        Draw only the points whose series coordinate falls within these bounds,
+        in the units of *series_axis*.  Inclusive at both ends.  ``None`` for
+        either end leaves it unbounded, ``None`` for the whole argument (default)
+        draws every point.
+
+        The endpoints are bounds on the coordinate, not a direction of travel, so
+        a descending sweep still takes them low-to-high; reversed endpoints
+        raise.  A non-finite coordinate never falls inside a bound, so a derived
+        axis with gaps drops those points.
     sweep_step : int
-        Plot every *sweep_step*-th sweep, starting from the first.  ``1``
-        (default) plots all of them, ``2`` every other one, and so on.  Must
-        be a positive integer.  Thinning the lines does not change the
-        colorbar, which always spans the whole scan's power range.
+        Plot every *sweep_step*-th point of what *series_range* kept, starting
+        from the first.  ``1`` (default) plots all of them, ``2`` every other
+        one, and so on.  Must be a positive integer.
     spectrum_offset : float
         Stack the plotted spectra by adding a cumulative vertical shift, in
         the units of the plotted array: the first drawn spectrum is shifted by
@@ -3035,32 +3958,37 @@ def plot_power_series(
 
     Colour mapping
     --------------
-    cmap : str
-        Matplotlib colormap name.  Default ``"viridis"``.
-    power_scale : {"linear", "log"}
-        Colormap normalisation.  Default ``"linear"``.
-    power_range : tuple of (p_min, p_max), optional
-        Clip the colormap to this power range (µW).  Defaults to
-        ``(scan.power.min(), scan.power.max())``.
+    cmap : str, Colormap, or sequence of colours
+        Passed to :func:`get_cmap`.  Default ``"viridis"``.
+    color_scale : {"linear", "log"}
+        Colormap normalisation.  Default ``"linear"``.  A log scale needs a
+        positive coordinate; on one that crosses zero the lower limit is clamped
+        and the colours no longer report the value.
+    color_range : tuple of (low, high), optional
+        Clip the colormap to this range, in the units of *series_axis*.
+        Defaults to the span of the points actually drawn, so *series_range*
+        shrinks it and the drawn lines always use the whole colormap.  Set it
+        explicitly to hold one scale across several figures.
 
     Line style
     ----------
     lw : float
         Line width.
     alpha : float
-        Global line opacity (0–1).  Ignored when *alpha_by_power* is ``True``.
-    alpha_by_power : bool
-        Scale each line's alpha linearly from *alpha_min* (lowest power) to
-        1.0 (highest power).  Overrides *alpha*.
+        Global line opacity (0–1).  Ignored when *alpha_by_series* is ``True``.
+    alpha_by_series : bool
+        Scale each line's alpha linearly from *alpha_min* at the low end of the
+        colour range to 1.0 at the high end.  Overrides *alpha*.
     alpha_min : float
-        Minimum alpha used when *alpha_by_power* is ``True``.
+        Minimum alpha used when *alpha_by_series* is ``True``.
 
     Colorbar
     --------
     colorbar : bool
         Show a colorbar.  Default ``True``.
-    cb_label : str
-        Colorbar axis label.  Default ``"Power (µW)"``.
+    cb_label : str, optional
+        Colorbar label.  ``None`` (default) takes it from *series_axis*, with
+        its unit.  A string is used **verbatim**, so include the unit.
     cb_labelpad : float
         Padding between colorbar tick labels and the axis label.
 
@@ -3073,8 +4001,8 @@ def plot_power_series(
     peak_marker_lw : float
     peak_marker_ls : str
 
-    Axes
-    ----
+    Signal axis
+    -----------
     ylabel : str, optional
         Y-axis label.  ``None`` (default) takes it from the scan's
         spectroscopy type, so a reflectance scan is not labelled as PL; a
@@ -3084,23 +4012,38 @@ def plot_power_series(
 
     Returns
     -------
-    fig : matplotlib.figure.Figure
-    ax : matplotlib.axes.Axes
-        Primary axes.
-    cb : matplotlib.colorbar.Colorbar or None
-        Colorbar object, or ``None`` when *colorbar* is ``False``.
-    lines : list of matplotlib.lines.Line2D
-        One Line2D per *drawn* sweep, in sweep order — so ``lines[j]`` is the
-        spectrum taken at ``scan.power[::sweep_step][j]``.  Their y data
-        includes any *spectrum_offset*.
+    SpectralSeriesPlot
+        Named 5-tuple of the figure, axes, colorbar, lines and conjugate top
+        axis.
 
     Raises
     ------
     ValueError
-        If *sweep_step* is not a positive integer.
-    """
-    from .constants import HC_EV_NM  # local import to avoid circular at module level
+        If *sweep_step* is not a positive integer; if the nest pinning does not
+        match the scan (none named on a nest, or any named on a flat sweep); if
+        *series_axis* is not ``"sweep"`` on a nested scan, or names no quantity
+        this scan holds; or if *series_range* runs backwards or selects no point.
 
+    See Also
+    --------
+    tmdc_optics_tools.loaders.AttoCubeSpectralSweep.get_spectrum_at :
+        one spectrum at a coordinate, rather than the series.
+    tmdc_optics_tools.loaders.AttoCubeSpectralSweep.as_grid :
+        a nested sweep reshaped onto its grid, rather than pinned to a line.
+
+    Examples
+    --------
+    >>> res = plot_spectral_series(power_scan)                  # doctest: +SKIP
+    >>> res.ax.set_xlim(1.60, 1.80)                            # doctest: +SKIP
+
+    A displacement-field sweep, read in top-gate volts instead:
+
+    >>> plot_spectral_series(field_scan, series_axis="top_voltage")  # doctest: +SKIP
+
+    A raster, holding the slow axis and drawing the fast line, over part of it:
+
+    >>> plot_spectral_series(raster, slow=2.0, series_range=(10.0, 20.0))  # doctest: +SKIP
+    """
     if not isinstance(sweep_step, (int, np.integer)) or sweep_step < 1:
         raise ValueError(
             f"sweep_step must be a positive integer, got {sweep_step!r}.  "
@@ -3115,8 +4058,105 @@ def plot_power_series(
     # --- x-axis array and label -------------------------------------------
     x, xlabel = _resolve_x_axis(scan, x_axis)
 
-    # --- spectra array (n_pixels, n_sweeps) --------------------------------
-    data = _resolve_spectra(scan, spectra_source, x_axis)
+    # --- which spectra become the series -----------------------------------
+    # A nest is pinned on one axis and the free axis becomes the series; a flat
+    # sweep is already the series.  Either way `data` ends up (n_pixels, n) and
+    # `series` is the matching (n,) coordinate that colours the lines.
+    pinned = [name for name, arg in (("fast", fast), ("index_fast", index_fast),
+                                     ("slow", slow), ("index_slow", index_slow))
+              if arg is not None]
+
+    if scan.is_nested:
+        if len(pinned) != 1:
+            raise ValueError(
+                f"plot_spectral_series(): this sweep is a declared nest "
+                f"({scan.nesting}), so name exactly one axis to hold: fast=, "
+                f"index_fast=, slow= or index_slow=. The axis left free becomes "
+                f"the series. Got {', '.join(pinned) if pinned else 'none'}. "
+                f"Naming two pins every axis and leaves a single spectrum, "
+                f"which is get_spectrum_at(); for the whole grid, use "
+                f"scan.as_grid()."
+            )
+        if series_axis != "sweep":
+            raise ValueError(
+                f"plot_spectral_series(): series_axis={series_axis!r} reads the "
+                f"series against another quantity, which applies to a flat "
+                f"sweep. This one is a declared nest ({scan.nesting}), where the "
+                f"free axis already carries its own coordinate, label and unit, "
+                f"so the colours follow it. To colour by a different quantity, "
+                f"declare the nest in it with fast_sweep= / slow_sweep= at load "
+                f"time."
+            )
+
+        held_fast = fast is not None or index_fast is not None
+
+        if index_fast is not None:
+            data = scan.get_spectrum_by_index(
+                fast=index_fast, source=spectra_source, x_axis=x_axis)
+        elif fast is not None:
+            data = scan.get_spectrum_at(
+                fast=fast, source=spectra_source, x_axis=x_axis)
+        elif index_slow is not None:
+            data = scan.get_spectrum_by_index(
+                slow=index_slow, source=spectra_source, x_axis=x_axis)
+        else:
+            data = scan.get_spectrum_at(
+                slow=slow, source=spectra_source, x_axis=x_axis)
+
+        # Holding the fast axis strides across the grid and returns one spectrum
+        # per *slow* point, so the free axis — the other one — is what varies
+        # along the columns of `data`, and therefore what the colours mean.
+        nest         = scan.nesting
+        series       = np.asarray(
+            nest.slow_axis if held_fast else nest.fast_axis, dtype=float)
+        series_label = nest.slow_axis_label if held_fast else nest.fast_axis_label
+    else:
+        if pinned:
+            raise ValueError(
+                f"plot_spectral_series(): {', '.join(pinned)} needs a declared "
+                f"nest, and this sweep is flat ({scan.n_sweeps} points). A flat "
+                f"sweep is already the series, so pass none of fast=, "
+                f"index_fast=, slow=, index_slow=. If these points are a grid, "
+                f"declare it with fast_sweep= and slow_sweep= at load time."
+            )
+        data = _resolve_spectra(scan, spectra_source, x_axis)
+        # param= so a bad name reports itself as series_axis=, not as the axis=
+        # of the loader accessors the resolver is shared with.
+        values, label, unit = scan._lookup_axis(series_axis, param="series_axis")
+        series       = np.asarray(values, dtype=float)
+        series_label = f"{label} ({unit})" if unit else label
+
+    # --- subset: which points of the series are drawn -----------------------
+    # Bounds are read on `series`, the same coordinate that colours the lines,
+    # so the selection and the colorbar can never disagree about units.  A
+    # nested scan needs no special case: `series` is already the free axis.
+    if series_range is not None:
+        low_given, high_given = series_range
+        low  = -np.inf if low_given  is None else float(low_given)
+        high =  np.inf if high_given is None else float(high_given)
+
+        if low > high:
+            raise ValueError(
+                f"plot_spectral_series(): series_range={series_range!r} runs "
+                f"backwards. Give it low-to-high in {series_label}. The "
+                f"endpoints are bounds on the coordinate, not a direction of "
+                f"travel, so a descending sweep still takes (low, high). Pass "
+                f"None for either end to leave it unbounded."
+            )
+
+        keep = (series >= low) & (series <= high)   # inclusive, as x_range is
+        if not keep.any():
+            raise ValueError(
+                f"plot_spectral_series(): series_range={series_range!r} selects "
+                f"no sweep point. {series_label} runs {series.min():.4g} to "
+                f"{series.max():.4g} across {series.size} points."
+            )
+
+        # Boolean indexing copies, unlike the selection above, which returned a
+        # view: the kept columns are an arbitrary subset, so no slice expresses
+        # them.  The copy is the plotted subset, not the whole scan.
+        data   = data[:, keep]
+        series = series[keep]
 
     # --- optional post-load background subtraction -------------------------
     if bg_region is not None:
@@ -3128,31 +4168,34 @@ def plot_power_series(
         x      = x[mask]
         data   = data[mask, :]
 
-    # --- colour norm ----------------------------------------------------------
-    power   = np.asarray(scan.power, dtype=float)
-    p_min, p_max = power_range if power_range is not None else (power.min(), power.max())
+    # --- colour norm --------------------------------------------------------
+    # Defaults to the span of what survived series_range, so the drawn lines use
+    # the whole colormap.  sweep_step does not shrink it further: thinning
+    # samples the kept span evenly and its endpoints stay in the figure.
+    c_min, c_max = color_range if color_range is not None \
+        else (series.min(), series.max())
 
-    if power_scale == "log":
-        norm = LogNorm(vmin=max(p_min, 1e-12), vmax=p_max)
+    if color_scale == "log":
+        norm = LogNorm(vmin=max(c_min, 1e-12), vmax=c_max)
     else:
-        norm = Normalize(vmin=p_min, vmax=p_max)
+        norm = Normalize(vmin=c_min, vmax=c_max)
 
     sm      = ScalarMappable(norm=norm, cmap=get_cmap(cmap))
     sm.set_array([])   # required for standalone colorbars
 
     # --- per-line alpha if requested ---------------------------------------
-    power_norm_linear = (power - p_min) / max(p_max - p_min, 1e-12)
+    series_norm_linear = (series - c_min) / max(c_max - c_min, 1e-12)
 
     # --- draw lines --------------------------------------------------------
-    # Two counters, and they differ once sweep_step > 1: i indexes the scan, so
-    # colour and alpha keep tracking each line's own power, while j counts drawn
-    # lines, so the offsets stack contiguously instead of leaving gaps where a
-    # skipped sweep would have been.
+    # Two counters, and they differ once sweep_step > 1: i indexes the series, so
+    # colour and alpha keep tracking each line's own coordinate, while j counts
+    # drawn lines, so the offsets stack contiguously instead of leaving gaps
+    # where a skipped point would have been.
     lines = []
-    for j, i in enumerate(range(0, len(power), sweep_step)):
-        colour = sm.to_rgba(power[i])
-        a = float(alpha_min + (1.0 - alpha_min) * power_norm_linear[i]) \
-            if alpha_by_power else float(alpha)
+    for j, i in enumerate(range(0, len(series), sweep_step)):
+        colour = sm.to_rgba(series[i])
+        a = float(alpha_min + (1.0 - alpha_min) * series_norm_linear[i]) \
+            if alpha_by_series else float(alpha)
         y = data[:, i] + j * spectrum_offset
         (line,) = ax.plot(x, y, color=colour, lw=lw, alpha=a)
         lines.append(line)
@@ -3183,33 +4226,13 @@ def plot_power_series(
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
 
-    # --- twin axis --------------------------------------------------------
-    ax_twin = None
-    if twin_axis:
-        ax_twin = ax.twiny()
-        if x_axis == "energy":
-            # top axis in nm; tick positions derived from bottom energy ticks
-            e_ticks = ax.get_xticks()
-            # keep only ticks in range to avoid division by zero / overflow
-            e_ticks = e_ticks[(e_ticks > 0) & (e_ticks >= x.min()) & (e_ticks <= x.max())]
-            wl_ticks = HC_EV_NM / e_ticks
-            ax_twin.set_xlim(ax.get_xlim())
-            ax_twin.set_xticks(e_ticks)
-            ax_twin.set_xticklabels([f"{w:.0f}" for w in wl_ticks])
-            ax_twin.set_xlabel("Wavelength (nm)")
-        else:
-            wl_ticks = ax.get_xticks()
-            wl_ticks = wl_ticks[(wl_ticks > 0) & (wl_ticks >= x.min()) & (wl_ticks <= x.max())]
-            e_ticks  = HC_EV_NM / wl_ticks
-            ax_twin.set_xlim(ax.get_xlim())
-            ax_twin.set_xticks(wl_ticks)
-            ax_twin.set_xticklabels([f"{e:.3f}" for e in e_ticks])
-            ax_twin.set_xlabel("Energy (eV)")
-
     # --- colorbar ---------------------------------------------------------
     cb = None
     if colorbar:
         cb = fig.colorbar(sm, ax=ax, pad=0.02)
-        cb.set_label(cb_label, labelpad=cb_labelpad)
+        cb.set_label(series_label if cb_label is None else cb_label,
+                     labelpad=cb_labelpad)
 
-    return fig, ax, cb, lines
+    ax_twin = _conjugate_x_axis(ax, x_axis) if twin_axis else None
+
+    return SpectralSeriesPlot(fig, ax, cb, lines, ax_twin)

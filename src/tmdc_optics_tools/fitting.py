@@ -22,6 +22,9 @@ from sklearn.linear_model import Lasso
 
 from . import constants, processing
 
+from . import processing
+from .constants import _x_axis_name_unit
+
 
 # ---------------------------------------------------------------------------
 # Result container
@@ -985,10 +988,12 @@ def fit_raman_modes(
     not seeded directly: the seeded ("known") modes are fit first (a
     discovery fit), the shoulder mode's true position is then found from
     that fit's own residual via :func:`locate_residual_peak`, and all modes
-    are refit together. See CLAUDE.md's "Raman" section for why this
-    residual-driven approach replaced literature-position seeding for
-    WSe₂'s 2LA(M) mode, and for the literature comparison
-    (Pan et al. 2022, doi:10.1088/2053-1583/ac83d4).
+    are refit together. A shoulder mode is located from the residual rather
+    than seeded because it is weak and its position is not fixed by its
+    name: WSe₂'s 2LA(M) sits near 258.7 cm⁻¹ in the bilayer and 260.4 cm⁻¹
+    in the monolayer. Mode assignments follow Pan et al., "Signature of
+    lattice dynamics in twisted 2D homo/hetero-bilayers", 2D Materials 9,
+    045018 (2022), doi:10.1088/2053-1583/ac83d4.
 
     Parameters
     ----------
@@ -1173,20 +1178,21 @@ def fit_scan_peak(
     Fit a single peak in every sweep of an
     :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep`.
 
-    Background subtraction and Jacobian correction are configured at load
-    time on the scan object (via ``bg_region_nm`` / ``bg_region_eV`` and
-    ``apply_jacobian``).  This function always uses
+    Corrections are configured at load time on the scan object (via
+    ``bg_region_nm`` / ``bg_region_eV``, ``apply_jacobian`` and ``cosmic_rays``).
+    This function fits the most-corrected array the scan has for *x_axis* —
     :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`
-    for the energy axis, which automatically returns the background-corrected
-    array when one is available.
+    or :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_spectra` — so
+    a declared background or cosmic-ray repair reaches the fit on either axis.
 
     Parameters
     ----------
     scan : AttoCubeSpectralSweep
     x_axis : {"energy", "wavelength"}
     x_range : tuple of (x_min, x_max), optional
-        Restrict the fit to this spectral window. Units match *x_axis*.
-        Fits the full range if ``None``.
+        Restrict the fit to this spectral window. Units match *x_axis*. Bounds
+        are inclusive, and their order carries no information: ``(1.42, 1.30)``
+        is the same window as ``(1.30, 1.42)``. Fits the full range if ``None``.
     model : {"lorentzian", "gaussian"}
         Peak shape to fit.
     sweep_mask : np.ndarray of bool, optional
@@ -1203,20 +1209,81 @@ def fit_scan_peak(
     Returns
     -------
     list of FitResult, length = scan.n_sweeps
+        Each result's ``x_fit`` is a **view** into the scan's own axis, so it
+        must not be modified in place.
+
+    Raises
+    ------
+    ValueError
+        If *x_axis* is not ``"energy"`` or ``"wavelength"``; if *x_range* selects
+        no point of that axis, the message giving the axis's span; or if it
+        selects fewer points than the model has free parameters.
+
+    Warns
+    -----
+    UserWarning
+        When a bound of *x_range* lies beyond the end of the axis by more than
+        half a pixel, so the window fitted is narrower than the one asked for.
     """
-    x       = scan.energy     if x_axis == "energy" else scan.wavelength
-    spectra = scan.best_energy_spectra if x_axis == "energy" else scan.spectra
+    return _fit_scan_peak(scan, x_axis, x_range, model, sweep_mask, baseline,
+                          stacklevel=4)
+
+
+def _fit_scan_peak(
+    scan,
+    x_axis     : str,
+    x_range    : tuple,
+    model      : str,
+    sweep_mask : np.ndarray,
+    baseline   : str,
+    *,
+    stacklevel : int,
+) -> list[FitResult]:
+    """
+    Implementation of :func:`fit_scan_peak`.
+
+    *stacklevel* is a required argument because the public entry points sit at
+    different depths — :func:`fit_scan_peak` one frame up,
+    :func:`extract_dipole_length` two — and a warning about a window is only
+    useful pointing at the line that chose the window.
+    """
+    # Ahead of the two ternaries, which would otherwise read an unrecognised axis
+    # as the wavelength one and fit it without complaint.
+    _, unit = _x_axis_name_unit(x_axis, what="fit_scan_peak()")
+
+    values  = scan.energy     if x_axis == "energy" else scan.wavelength
+    # The scan's own choice on each axis, so a declared cosmic-ray repair is
+    # fitted rather than the file's spikes.  loaders._resolve_spectra answers the
+    # same question, but importing it here would put fitting on top of the I/O
+    # layer; the two accessors are reachable without that.
+    spectra = (scan.best_energy_spectra if x_axis == "energy"
+               else scan.best_spectra)
     fit_fn  = fit_lorentzian if model == "lorentzian" else fit_gaussian
 
     key, base_names, _ = _resolve_baseline(baseline)
     label      = _model_label(model, key)
     nan_names  = _PEAK_PARAM_NAMES + base_names
 
-    if x_range is not None:
-        px_mask = (x >= x_range[0]) & (x <= x_range[1])
-        x       = x[px_mask]
-    else:
-        px_mask = np.ones(len(x), dtype=bool)
+    # A slice, so one window cuts the axis and every sweep's counts to the same
+    # length, and each cut is a view.  slice(None) is the whole axis, which keeps
+    # the windowed and un-windowed paths on one code path.
+    px = (processing._window_slice(values, x_range, axis=x_axis, unit=unit,
+                                  what="fit_scan_peak()", stacklevel=stacklevel)
+          if x_range is not None else slice(None))
+    x  = values[px]
+
+    # Fewer points than free parameters is not a fit, and curve_fit reports it as a
+    # TypeError, which _fit_single_peak's RuntimeError handler does not catch — so
+    # it escapes as neither a fit nor a non-converged result.  The minimum belongs
+    # to the model rather than to the axis, which is why it is checked here and not
+    # inside the window helper.
+    n_params = len(_PEAK_PARAM_NAMES) + len(base_names)
+    if x.size < n_params:
+        raise ValueError(
+            f"fit_scan_peak(): the {x_axis} window {x[0]:.6g}–{x[-1]:.6g} {unit} "
+            f"covers {x.size} point{'' if x.size == 1 else 's'}, fewer than the "
+            f"{n_params} free parameters of a {label} model. Widen x_range."
+        )
 
     if sweep_mask is None:
         sweep_mask = np.ones(scan.n_sweeps, dtype=bool)
@@ -1225,7 +1292,7 @@ def fit_scan_peak(
     results = []
     for i in range(scan.n_sweeps):
         if sweep_mask[i]:
-            results.append(fit_fn(x, spectra[px_mask, i].astype(float),
+            results.append(fit_fn(x, spectra[px, i].astype(float),
                                   baseline=baseline))
         else:
             # Placeholder so indices stay aligned with scan.ef.  Fresh dicts
@@ -1723,8 +1790,10 @@ def _prepare_dipole_data(
     if active_range is not None:
         sweep_mask = (scan.ef >= active_range[0]) & (scan.ef <= active_range[1])
 
-    fit_results   = fit_scan_peak(
-        scan, x_axis="energy", x_range=x_range, model=model,
+    # stacklevel=5: _window_slice, _fit_scan_peak, here, extract_dipole_length,
+    # the researcher's line.  Measured, not counted off the def lines.
+    fit_results   = _fit_scan_peak(
+        scan, x_axis="energy", x_range=x_range, model=model, stacklevel=5,
         sweep_mask=sweep_mask, baseline=baseline,
     )
     peak_energies = np.array([r.params["center"] for r in fit_results])
@@ -1963,11 +2032,11 @@ def extract_dipole_length(
     4. Derive the dipole length and propagate uncertainties.
 
     .. note::
-        Background subtraction is configured at load time on the scan
-        object via ``bg_region_nm`` or ``bg_region_eV``.
-        :func:`fit_scan_peak` automatically uses
+        Background subtraction and cosmic-ray repair are configured at load time
+        on the scan object, via ``bg_region_nm`` / ``bg_region_eV`` and
+        ``cosmic_rays``.  The per-point fits run on
         :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`,
-        which returns the background-corrected array when available.
+        which is the most-corrected energy-axis array available.
 
     Parameters
     ----------
@@ -2033,7 +2102,14 @@ def extract_dipole_length(
     ------
     ValueError
         If ``scan.ef`` is ``None``, fewer than 2 usable sweep points remain,
-        or *method* is not recognised.
+        *method* is not recognised, or *x_range* selects no point of the energy
+        axis.
+
+    Warns
+    -----
+    UserWarning
+        When a bound of *x_range* lies beyond the end of the energy axis, so the
+        window fitted is narrower than the one asked for.
 
     Examples
     --------

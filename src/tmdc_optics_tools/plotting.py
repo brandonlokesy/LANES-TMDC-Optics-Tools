@@ -13,7 +13,7 @@ from __future__ import annotations
 import warnings
 from pathlib import Path
 
-from typing import Union
+from typing import NamedTuple, Union
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -179,6 +179,121 @@ def get_cmap(cmap: ColormapLike = "magma") -> mcolors.Colormap:
         raise ValueError("cmap is an empty sequence of colours.")
 
     return mcolors.ListedColormap(colours)
+
+
+# ---------------------------------------------------------------------------
+# Return types
+# ---------------------------------------------------------------------------
+# A plot that draws more than a single artist returns them as a NamedTuple: it is
+# still a tuple, so ``fig, ax, cb, lines, ax_twin = ...`` unpacks exactly as it
+# always did, and the members can also be reached by name.  Field order is part
+# of the contract, because positional unpacking depends on it.
+
+
+class SpectrumPlot(NamedTuple):
+    """
+    What :func:`plot_spectrum` drew.
+
+    A tuple, so ``fig, ax, line, ax_twin = plot_spectrum(...)`` unpacks, with names
+    for reaching one member without counting positions.
+
+    Attributes
+    ----------
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+        Primary axes.
+    line : matplotlib.lines.Line2D
+        The spectrum trace.
+    ax_twin : matplotlib.axis.SecondaryAxis or None
+        The conjugate top axis, ``None`` when the plot was drawn with
+        ``twin_axis=False``.  Carried so its ticks and label can be restyled
+        without a parameter per property.
+    """
+    fig     : object
+    ax      : object
+    line    : object
+    ax_twin : object
+
+
+class CurrentPlot(NamedTuple):
+    """
+    What :func:`plot_current` drew.
+
+    A tuple, so ``fig, ax_left, ax_right, lines = plot_current(...)`` unpacks, with
+    names for reaching one member without counting positions.
+
+    Attributes
+    ----------
+    fig : matplotlib.figure.Figure
+    ax_left : matplotlib.axes.Axes
+        Current axes, carrying the y-label in nA.
+    ax_right : matplotlib.axes.Axes
+        Twin axes carrying the excitation power in µW.
+    lines : list of matplotlib.lines.Line2D
+        The current traces in role order — top gate, bottom gate, channel — omitting
+        any electrode with no recorded current.  The power trace is not among them;
+        it belongs to *ax_right*.
+    """
+    fig      : object
+    ax_left  : object
+    ax_right : object
+    lines    : list
+
+
+class ImagePlot(NamedTuple):
+    """
+    What :func:`plot_image` drew.
+
+    A tuple, so ``fig, ax, im, circle, cb = plot_image(...)`` unpacks, with names for
+    reaching one member without counting positions.
+
+    Attributes
+    ----------
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+    im : matplotlib.image.AxesImage
+        The image itself, for reading or changing its colour limits and colormap.
+    circle : matplotlib.patches.Circle or None
+        The laser-boundary overlay, ``None`` when none was drawn.  Carried so it can
+        be restyled without a parameter per property.
+    cb : matplotlib.colorbar.Colorbar or None
+        ``None`` when the plot was drawn with ``colorbar=False``.
+    """
+    fig    : object
+    ax     : object
+    im     : object
+    circle : object
+    cb     : object
+
+
+class SpectralSeriesPlot(NamedTuple):
+    """
+    What :func:`plot_spectral_series` drew.
+
+    A tuple, so ``fig, ax, cb, lines, ax_twin = plot_spectral_series(...)`` unpacks,
+    with names for reaching one member without counting positions.
+
+    Attributes
+    ----------
+    fig : matplotlib.figure.Figure
+    ax : matplotlib.axes.Axes
+        Primary axes.
+    cb : matplotlib.colorbar.Colorbar or None
+        ``None`` when the plot was drawn with ``colorbar=False``.
+    lines : list of matplotlib.lines.Line2D
+        One Line2D per *drawn* point, in series order — so ``lines[j]`` is the
+        spectrum taken at the *j*-th coordinate that survived the series selection
+        and thinning.  Their y data includes any ``spectrum_offset``.
+    ax_twin : matplotlib.axis.SecondaryAxis or None
+        The conjugate top axis, ``None`` when the plot was drawn with
+        ``twin_axis=False``.  Carried so its ticks and label can be restyled
+        without a parameter per property.
+    """
+    fig     : object
+    ax      : object
+    cb      : object
+    lines   : list
+    ax_twin : object
 
 
 # ---------------------------------------------------------------------------
@@ -577,7 +692,7 @@ def plot_spectrum(
     ylabel     : str   = None,
     twin_axis  : bool  = False,
     **line_kwargs,
-) -> tuple:
+) -> SpectrumPlot:
     """
     Plot one spectrum from a sweep, chosen by coordinate or by position.
 
@@ -635,10 +750,8 @@ def plot_spectrum(
 
     Returns
     -------
-    fig, ax, line, ax_twin
-        *ax_twin* is the conjugate top axis, or ``None`` when *twin_axis* is
-        ``False``.  Returned so its ticks and label can be restyled without a
-        parameter per property.
+    SpectrumPlot
+        Named 4-tuple of the figure, axes, line and conjugate top axis.
 
     Raises
     ------
@@ -702,7 +815,7 @@ def plot_spectrum(
 
     ax_twin = _conjugate_x_axis(ax, x_axis) if twin_axis else None
 
-    return fig, ax, line, ax_twin
+    return SpectrumPlot(fig, ax, line, ax_twin)
 
 
 def plot_single_spectrum(
@@ -777,7 +890,7 @@ def plot_current(
     dpi         : int   = None,
     ef_axis     : bool = True,
     color_power : str  = "C2",
-) -> tuple:
+) -> CurrentPlot:
     """
     Plot electrode currents and excitation power vs. electric field (or gate
     voltage) to check for dielectric breakdown.
@@ -801,8 +914,9 @@ def plot_current(
 
     Returns
     -------
-    fig, ax_left, ax_right, lines
-        *lines* holds the current traces in role order, for restyling.
+    CurrentPlot
+        Named 4-tuple of the figure, current axes, power axes and current
+        traces.
 
     Raises
     ------
@@ -863,7 +977,7 @@ def plot_current(
 
     ax_left.legend(handles=lines + [l_power], loc="best", frameon=False)
     fig.tight_layout()
-    return fig, ax_left, ax_right, lines
+    return CurrentPlot(fig, ax_left, ax_right, lines)
 
 
 # ---------------------------------------------------------------------------
@@ -987,7 +1101,7 @@ def plot_image(
     show_axes      : bool  = True,
     laser_annotation : bool = False,
     laser_ref             = None,
-) -> tuple:
+) -> ImagePlot:
     """
     Plot a single 2-D image with a colormap and an optional colorbar.
 
@@ -1002,7 +1116,8 @@ def plot_image(
     cmap : str, Colormap, or sequence of colours
         Passed to :func:`get_cmap`.
     colorbar : bool
-        Show a colorbar alongside the image.
+        Show a colorbar alongside the image.  ``False`` leaves the returned ``cb``
+        member ``None``.
     colorbar_label : str, optional
         Colour-bar label.  Defaults to "Intensity (counts)", or
         "Intensity (norm.)" when *rescale_img*; a plain 2-D array carries no
@@ -1029,11 +1144,9 @@ def plot_image(
 
     Returns
     -------
-    fig, ax, im, circle
-        *circle* is the laser-boundary
-        :class:`~matplotlib.patches.Circle`, or ``None`` when no overlay was
-        drawn.  Returned so it can be restyled without a parameter per
-        property.
+    ImagePlot
+        Named 5-tuple of the figure, axes, image, laser-boundary circle and
+        colorbar.
     """
     img = image.img if hasattr(image, "img") else np.asarray(image)
 
@@ -1060,13 +1173,14 @@ def plot_image(
     circle = (_draw_laser_circle(ax, _lr, ls="--")
               if laser_annotation and _lr is not None else None)
 
+    cb = None
     if colorbar:
         cb = fig.colorbar(im, ax=ax, pad=0.02)
         cb.set_label(colorbar_label if colorbar_label is not None
                      else ("Intensity (norm.)" if rescale_img
                            else "Intensity (counts)"))
 
-    return fig, ax, im, circle
+    return ImagePlot(fig, ax, im, circle, cb)
 
 
 def _format_frame_title(
@@ -2910,7 +3024,7 @@ def plot_spectral_series(
     peak_marker_ls   : str    = "--",
     # --- axes labels ---
     ylabel           : str    = None,
-) -> tuple:
+) -> SpectralSeriesPlot:
     """
     Plot a series of spectra, one line per sweep point, coloured by coordinate.
 
@@ -3073,19 +3187,9 @@ def plot_spectral_series(
 
     Returns
     -------
-    fig : matplotlib.figure.Figure
-    ax : matplotlib.axes.Axes
-        Primary axes.
-    cb : matplotlib.colorbar.Colorbar or None
-        Colorbar object, or ``None`` when *colorbar* is ``False``.
-    lines : list of matplotlib.lines.Line2D
-        One Line2D per *drawn* point, in series order — so ``lines[j]`` is the
-        spectrum taken at the *j*-th coordinate surviving *series_range* and
-        *sweep_step*.  Their y data includes any *spectrum_offset*.
-    ax_twin : matplotlib.axis.SecondaryAxis or None
-        The conjugate top axis, or ``None`` when *twin_axis* is ``False``.
-        Returned so its ticks and label can be restyled without a parameter per
-        property.
+    SpectralSeriesPlot
+        Named 5-tuple of the figure, axes, colorbar, lines and conjugate top
+        axis.
 
     Raises
     ------
@@ -3104,7 +3208,8 @@ def plot_spectral_series(
 
     Examples
     --------
-    >>> fig, ax, cb, lines = plot_spectral_series(power_scan)   # doctest: +SKIP
+    >>> res = plot_spectral_series(power_scan)                  # doctest: +SKIP
+    >>> res.ax.set_xlim(1.60, 1.80)                            # doctest: +SKIP
 
     A displacement-field sweep, read in top-gate volts instead:
 
@@ -3305,4 +3410,4 @@ def plot_spectral_series(
 
     ax_twin = _conjugate_x_axis(ax, x_axis) if twin_axis else None
 
-    return fig, ax, cb, lines, ax_twin
+    return SpectralSeriesPlot(fig, ax, cb, lines, ax_twin)

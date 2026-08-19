@@ -43,7 +43,8 @@ anything above it.
              │
              ├──► fitting.py     arrays → dataclasses (FitResult, DipoleResult)
              ├──► diffusion.py   image arrays → DiffusionResult
-             └──► plotting.py    objects/arrays → (fig, ax, artist)
+             └──► plotting.py    objects/arrays → (fig, ax, artist), or a
+                                 <Thing>Plot NamedTuple past that shape
 ```
 
 The contracts, in one line each:
@@ -57,7 +58,8 @@ The contracts, in one line each:
   `loaders._decode` so `h5py` is only needed if you actually touch an `.h5`.
 - **`fitting`** — curve fits, returning dataclasses that carry parameters,
   uncertainties, and diagnostics.
-- **`plotting`** — draws. Returns `(fig, ax, <artist>)`, never calls `plt.show()`.
+- **`plotting`** — draws. Returns `(fig, ax, <artist>)`, or a named tuple when it
+  draws more than that, and never calls `plt.show()`.
 - **`diffusion`** — real-space exciton cloud analysis (segment, centroid, area).
 
 Two rules that come up constantly and are easy to break by accident:
@@ -1121,7 +1123,20 @@ documenting*, that is deletion material, not documentation material.
 
 ## `plotting` — returns handles, takes few parameters
 
-Every function returns `(fig, ax, <artist>)` and never calls `plt.show()`.
+Most functions return `(fig, ax, <artist>)` and none calls `plt.show()`.
+
+Four draw more than a single artist, and return a `NamedTuple` instead. It is still a
+tuple, so `fig, ax, cb, lines, ax_twin = plot_spectral_series(...)` unpacks as it
+always did; the names exist so a caller reaching for one member does not count
+positions. An artist that was not drawn is a `None` member — the shape never varies
+with the arguments.
+
+| Function | Return | Members that can be `None` |
+|---|---|---|
+| `plot_spectrum` | `SpectrumPlot` | `ax_twin` |
+| `plot_current` | `CurrentPlot` | — |
+| `plot_image` | `ImagePlot` | `circle`, `cb` |
+| `plot_spectral_series` | `SpectralSeriesPlot` | `cb`, `ax_twin` |
 
 **The return contract *is* the styling API.** `line.set_color("k")`,
 `mesh.set_clim(0, 1)`, `ax.set_xlim(...)` are one line each at the call site, which

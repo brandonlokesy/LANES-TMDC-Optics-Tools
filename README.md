@@ -154,7 +154,7 @@ The y-axis is whatever was declared as `sweep=` at load time — displacement fi
 Name the point the way you took the measurement — a coordinate on the sweep axis, in its own units:
 
 ```python
-fig, ax, line, _ = plotting.plot_spectrum(
+fig, ax, line, ax_twin = plotting.plot_spectrum(
     scan,
     value     = 2.5,               # sweep axis units: V, mV/nm, µW, …
     x_axis    = "energy",
@@ -293,7 +293,8 @@ rs_scan = AttoCubePLScanRealSpace(..., laser_ref=laser_ref)
 Plot gate leakage currents and excitation power together to verify the device was not in breakdown during a sweep:
 
 ```python
-fig, ax_left, ax_right = plotting.plot_current(scan)
+plot = plotting.plot_current(scan)          # members: fig, ax_left, ax_right, lines
+plot.ax_left.set_ylim(-5, 5)                # current axis, in nA
 ```
 
 ---

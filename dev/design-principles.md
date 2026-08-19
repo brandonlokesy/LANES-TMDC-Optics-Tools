@@ -90,7 +90,8 @@ better places for it.
 ### The three better homes
 
 **The returned handles — the first thing to reach for.** `plotting` returns
-`(fig, ax, <artist>)`, and that return contract *is* the styling API:
+`(fig, ax, <artist>)` — or, once there are more members than that, a `NamedTuple`
+carrying the same values under names — and that return contract *is* the styling API:
 `line.set_color("k")`, `ax.set_xlim(1.6, 1.8)`, `mesh.set_clim(0, 1)` are one line each
 at the call site. Never add a parameter whose entire body is
 `artist.set_<thing>(value)`.
@@ -99,6 +100,16 @@ The corollary matters as much as the rule: **a function that draws several artis
 return them**, or callers have no route to restyle and the parameters grow back.
 Enumerated style arguments are a *symptom of a broken return contract* — fix the return
 first, and most of the parameters stop being wanted.
+
+Returning them all has a cost the rule has to answer for: a member that is often
+absent — a colorbar nobody asked for, a conjugate axis left off — still occupies its
+position, so the common call unpacks slots holding `None`. The answer is names, not a
+shorter tuple. A return whose *length* depends on an argument's value cannot be
+unpacked without knowing what was asked for, so the length stays fixed and the members
+get named. `NamedTuple` does both: it is still a tuple, so positional unpacking is
+untouched, and `res.ax_twin` needs no counting. This is where matplotlib landed for the
+same reason — `ax.bar` returns a `BarContainer` whose `.errorbar` is `None` when no
+error bars were drawn, with the same three members either way.
 
 **One `**kwargs` passthrough, where a single artist dominates.**
 `plot_spectrum(..., **line_kwargs)` forwards to `ax.plot` and therefore supports every

@@ -262,6 +262,10 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
   collapse a real axis. Don't gate sign 3 behind a minimum travel, and don't add
   `sweep_atol=` until a committed file needs it.
 - Don't reshape `spectra` when a nest is declared; don't extend `axis=` to nests.
+- Don't let `plot_spectral_map` or `plot_spectral_series` draw an unpinned nest, and
+  don't fork `_resolve_sweep_block` back into either of them. A flat-index map or
+  series puts consecutive rows at unrelated settings. Don't respell the map's
+  `y_axis=` as `series_axis=`, or give it `x_axis=`'s energy/wavelength vocabulary.
 - Don't make the accessors return one match for an ambiguous coordinate.
 - Don't give `plot_spectrum` a positional `value`, or truncate a fractional index.
 - Don't append to a caller's label string — `None` derives, a string is verbatim.

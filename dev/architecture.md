@@ -888,6 +888,14 @@ argument in **E14**.
 `spectra` keeps shape `(n_points, n_sweeps)` either way — a declaration must not
 change the rank of an attribute.
 
+Plotting reaches the nest through the accessors rather than through `as_grid`.
+`plot_spectral_map` and `plot_spectral_series` share one resolver,
+`plotting._resolve_sweep_block`, which holds one nest axis at `fast=`/`slow=` (or
+`index_fast=`/`index_slow=`) and returns the `(n_points, n)` block running along the
+other, with that axis's own coordinate and label. Both refuse an unpinned nest — the
+flat index would put consecutive rows or lines at unrelated settings. Argument and
+alternatives in **0028**.
+
 `axis=` is the fourth entry point onto the same resolver: it says which quantity a
 positional value is read against, so a sweep declared in one coordinate can be
 searched in another.

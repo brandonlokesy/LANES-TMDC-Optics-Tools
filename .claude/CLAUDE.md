@@ -232,6 +232,10 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
   class; don't add a row-by-row value check against the TRPL metadata companion.
 - Don't change the deprecation shim's `FutureWarning` to `DeprecationWarning`.
 - Don't apply the Jacobian before subtracting the background.
+- Don't forward `bg_region=`/`bg_stat=` to `AttoCubeSampleImage`, and don't delete its
+  `__init__` override — the override is what refuses them. A white-light frame's corner
+  is substrate, not dark, and a reflectance correction is a ratio against a reference
+  frame rather than a constant taken off the same frame.
 - Don't declare the gate mapping anywhere but `gates=`, and don't re-propose
   `gates={"bottom": "A"}`.
 - Don't rename `v_top`/`v_bot`/`i_top`/`i_bot` to channel names.

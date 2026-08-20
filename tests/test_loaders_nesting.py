@@ -632,6 +632,19 @@ def test_as_grid_refuses_a_mismatched_trailing_axis(nested):
         nested.as_grid(nested.wavelength)
 
 
+def test_as_grid_refuses_a_3d_array_even_with_the_right_trailing_axis(nested):
+    """
+    Only 1-D and 2-D, which is what ``as_image_grid`` flattens a stack for.
+
+    Pinned because that docstring rests on this refusal: if ``as_grid`` ever
+    took an image stack directly, the flatten-and-reshape-back step would be
+    dead code justified by a claim that had stopped being true.
+    """
+    stack = np.zeros((2, 3, N_SWEEPS))
+    with pytest.raises(ValueError, match="last axis"):
+        nested.as_grid(stack)
+
+
 # ---------------------------------------------------------------------------
 # as_image_grid
 # ---------------------------------------------------------------------------

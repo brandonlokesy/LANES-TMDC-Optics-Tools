@@ -1321,10 +1321,26 @@ is why it was never marked. Note that this entry's own suggested replacements
 (`AttoCubePLVabScan`, `plot_pl_map_Vab_scan`) had themselves been superseded by the time
 the fix landed — the first is deprecated, the second is a shim.
 
-**C2.** README §5 and §6 pass `bg_region=` to `fit_scan_peak` and
+**C2.** **[FIXED — 2026-08-20]** README §5 and §6 pass `bg_region=` to `fit_scan_peak` and
 `extract_dipole_length`; neither accepts it (background is a load-time concern).
 Both examples raise `TypeError` as written. Neither mentions the new `baseline`
 argument.
+
+*Fixed:* `bg_region=` is gone from both snippets and `baseline="constant"` is shown in
+both, with a sentence in §5 saying where a background is actually declared
+(`bg_region_nm=` / `bg_region_eV=` on the loader) and what `baseline` does that a
+subtraction does not — it is a model term fitted alongside the peak, which is why it
+defaults on. §6 points at §5 rather than repeating it.
+
+Every keyword the two snippets now name was checked against
+`inspect.signature`: `scan`, `x_axis`, `x_range`, `model`, `baseline` on
+`fit_scan_peak`; `scan`, `x_range`, `model`, `Efield_range`, `baseline` on
+`extract_dipole_length`. That is the check this entry is about — a keyword the function
+does not accept is a `TypeError` on the first line the reader runs.
+
+Not addressed here, and still open in **C4**: §2 loads with the deprecated
+`AttoCubePLVabScan` and its example output says `AttoCubePLScan`, a class that does not
+exist.
 
 **C3.** `AttoCubePLVabScan` docstring says the Jacobian is applied "if `True`
 (default)"; the signature default is `False`, and `False` is intended. README §2

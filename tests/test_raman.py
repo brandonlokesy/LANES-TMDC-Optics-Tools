@@ -13,7 +13,9 @@ import pytest
 
 from tmdc_optics_tools.loaders import RamanSpectrum
 
-RAMAN_DIR = "examples/data/Raman"
+from _paths import DATA
+
+RAMAN_DIR = str(DATA / "Raman")
 
 
 def _write_spectrum(path, n_header_lines=3, degree_sign=False):

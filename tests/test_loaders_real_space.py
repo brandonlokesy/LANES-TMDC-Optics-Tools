@@ -16,17 +16,20 @@ import pytest
 
 from tmdc_optics_tools.loaders import AttoCubePLScanRealSpace, _resolve_frame
 
+from _paths import DATA
+
 SHAPE = (4, 5)                      # (ny, nx) — small; no frame content is analysed
 
 # A committed 11-frame sequence, zero-padded iter_0000 … iter_0010, alongside a
 # timestamped spectral file whose name also ends "_iter_0".
-REAL_DIR     = "examples/data/stark-shift"
+REAL_DIR     = str(DATA / "stark-shift")
 REAL_PREFIX  = "PL-dual-gate-sweep_"
 REAL_FRAMES  = 11
 REAL_SPECTRAL = "PL-dual-gate-sweep_26_05_15_14_03_18_iter_0.csv"
 
 # The only committed two-row file, used as a real-width negative case.
-REAL_SPECTRUM = "examples/data/single-spectra/ref_single_spectrum_26_07_01_14_42_47.csv"
+REAL_SPECTRUM = str(DATA / "single-spectra"
+                         / "ref_single_spectrum_26_07_01_14_42_47.csv")
 
 
 def _frame(tmp_path, name, fill) -> None:

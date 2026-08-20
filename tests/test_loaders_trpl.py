@@ -20,10 +20,13 @@ from tmdc_optics_tools.loaders import (
     StackLayer,
 )
 
-TRPL_DIR   = "examples/data/TRPL"
+from _paths import DATA
+
+TRPL_DIR   = str(DATA / "TRPL")
 ONE_DECAY  = f"{TRPL_DIR}/TRPL_26_07_30_16_29_39_iter_0.csv"
 COMPANION  = f"{TRPL_DIR}/TRPL_26_07_30_16_30_11_iter_0.csv"
-SPECTRAL   = "examples/data/stark-shift/PL-dual-gate-sweep_26_05_15_14_03_18_iter_0.csv"
+SPECTRAL   = str(DATA / "stark-shift"
+                    / "PL-dual-gate-sweep_26_05_15_14_03_18_iter_0.csv")
 
 N_BINS   = 3205
 N_SWEEPS = 3

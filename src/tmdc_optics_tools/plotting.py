@@ -3326,8 +3326,6 @@ def plot_diffusion_cloud(
         The DiffusionResult is always returned so you can inspect the
         centroid and area without a separate call.
     """
-    from . import diffusion as _diffusion
-
     if result is None:
         # Pass the image object/path/array straight through -- _load_image
         # already knows to use an _AttoCubeImage's *raw* array so that the
@@ -3640,7 +3638,6 @@ class DiffusionCloudPanel(AnimationPanel):
     def _get_seq_result(self):
         """Run analysis lazily if not pre-supplied."""
         if self._seq_result is None:
-            from . import diffusion as _diffusion
             self._seq_result = _diffusion.analyse_diffusion_sequence(
                 self.scan,
                 threshold    = self._threshold,
@@ -3799,12 +3796,6 @@ class DiffusionCloudPanel(AnimationPanel):
 # ---------------------------------------------------------------------------
 # Power-series spectrum plot
 # ---------------------------------------------------------------------------
-
-# Lazy imports for colour-norm helpers (avoid polluting the module namespace
-# with rarely-used names while keeping the import cost near zero).
-from matplotlib.colors import Normalize, LogNorm, BoundaryNorm
-from matplotlib.cm import ScalarMappable
-
 
 def plot_spectral_series(
     scan,

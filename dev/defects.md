@@ -1470,10 +1470,29 @@ imported twice, and `import_module` is imported both at module level and inside 
 loop.
 *Fix:* keep only the explicit imports plus an `__all__`.
 
-**D7.** `plotting` imports `from . import diffusion as _diffusion` at module top and
+**D7.** **[FIXED — 2026-08-20]** `plotting` imports `from . import diffusion as _diffusion` at module top and
 then re-imports the same module inside `plot_diffusion_cloud` and
 `DiffusionCloudPanel._get_seq_result`. Similarly `plotting` has a block
 commented "Lazy imports" that is in fact executed at module import.
+
+*Fixed by deleting all three.* Both function-local `diffusion` imports go: there is no
+circularity to defend against — `diffusion` imports `processing` and `loaders`, and
+`loaders` imports no `plotting` — and the module-level import at the top of `plotting` is
+itself the proof, since it would fail at import time otherwise. The two functions now
+read `_diffusion` off the module namespace like every other call site.
+
+The "Lazy imports" block turned out to be **a duplicate as well as a mislabel**. It
+imports `Normalize`, `LogNorm`, `BoundaryNorm` and `ScalarMappable`, and the top of the
+file imports the same four names — the mid-file block is the older of the two
+(`ef1c3ed`, 2026-07-22) and the top-of-file imports arrived later (`35be4ab`,
+2026-08-10), which is what made it redundant. Deleted rather than re-commented; the names
+it claims to keep out of the module namespace have been in it since August either way.
+
+Nothing was left function-local by this change. The one deliberate function-local import
+in the package is `sklearn` inside `fit_sparse_lifetime`, whose reason is import cost and
+whose comment says so — see **E22**.
+
+Not touched: `plot_diffusion_cloud`'s remaining shape, which is **E11**.
 
 **D8.** Plotting bypasses `processing`: `plot_spectrum` / `plot_single_spectrum` do
 `y / y.max()` with no zero guard, while `processing.normalise_peak` exists and guards it.

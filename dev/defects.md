@@ -1391,10 +1391,32 @@ preserve the input. Either the sentence goes, or the function returns those colu
 unchanged — and which is right depends on whether a flat sweep should plot at 0 or at its
 own value, so it is a choice, not a typo.
 
-**C11. `as_image_grid`'s docstring misdescribes `as_grid`.**
+**C11. `as_image_grid`'s docstring misdescribes `as_grid`.** **[NOT A DEFECT — checked
+2026-08-20]** **[verified by running]**
 It says `as_grid` "only accepts a 1-D or 2-D array", and justifies a
 flatten-then-reshape-back step by it. `as_grid` reshapes any array whose trailing
 dimension is `n_sweeps`, so the claim is false and the step it justifies is unnecessary.
+
+*Wrong as filed — the docstring is accurate.* `as_grid` refuses anything outside
+`ndim in (1, 2)` before it looks at the trailing axis, and has since `558c2e7` on
+2026-08-06, which is nearly two weeks before this entry was written on 2026-08-19. A 3-D
+stack with the right trailing axis raises. So the flatten-and-reshape-back step in
+`as_image_grid` is doing real work, not standing on a false premise.
+
+Kept rather than deleted, because the entry names a question the code does not answer:
+**should `as_grid` accept an N-D array?** Its reshape is `array.shape[:-1] + nest.shape`,
+which is already dimension-agnostic — only the guard is not — so widening it is one line
+and would let `as_image_grid` hand its stack straight over. Two reasons not to do it
+unasked. The guard's message enumerates the two accepted shapes, and a wider rule needs a
+wider message. And an image stack is `(height, width, n_frames)` while a signal array is
+`(n_points, n_sweeps)`, so "the trailing axis is the sweep" is a claim about the *caller's*
+memory layout that only `as_image_grid` currently makes on the caller's behalf. Related:
+**E24**, which wants `as_image_grid` to stop building the whole stack at all — a decision
+that would change what, if anything, is handed to `as_grid` here.
+
+*Pinned* by `test_as_grid_refuses_a_3d_array_even_with_the_right_trailing_axis` in
+`tests/test_loaders_nesting.py`, so the docstring's premise cannot quietly stop being
+true.
 
 
 ## D. Duplication
@@ -2110,9 +2132,10 @@ deprecation cost — which is the argument for taking them now rather than later
    cheapest to change before anything depends on the current shapes. E21 also touches
    `examples/example_position_xy_scan.ipynb`.
 5. **A28** — needs a decision on what `normalize=` should mean before it can be a change.
-6. **C10**, **C11**, **E23**, **E24** — ride along with whatever next touches their
+6. **C10**, **E23**, **E24** — ride along with whatever next touches their
    function. **C10** and **A28** are the same question seen from two sides and should be
-   settled together.
+   settled together. (**C11** was checked on 2026-08-20 and is not a defect; the entry
+   now carries the open question it hides instead.)
 
 **E22 is worked around, not fixed.** scikit-learn was installed into `viz-sci-plot` on
 2026-08-19 so the suite could run; the module-level import is still there.

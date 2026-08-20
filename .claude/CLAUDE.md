@@ -305,10 +305,9 @@ bwarea semantics are wanted at all.
   opposite, in the same change.
 - `RamanMap` fills `counts` with `np.empty`, so a duplicated `(X, Y)` leaves a cell
   holding uninitialised memory that then plots as data (**A25**).
-- `plot_diffusion_cloud` double-subtracts the background when handed an image object
-  that already had `bg_region` applied at load. It also has ~30 parameters and returns
-  `result` instead of its artists — the standing counter-example to *parameters earn
-  their place*. New code must not copy it.
+- `plot_diffusion_cloud` has ~30 parameters and returns `result` instead of its artists
+  — the standing counter-example to *parameters earn their place*. New code must not
+  copy it. (Its double-subtraction of the background is fixed; see **A5**.)
 - README still names `AttoCubePLScan`, which does not exist — the class is
   `AttoCubeSpectralSweep`. (`plot_pl_map` and `bg_region=` on `fit_scan_peak` are no
   longer mentioned there; `__init__.py`'s quick start is fixed.)

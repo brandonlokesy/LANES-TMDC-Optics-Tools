@@ -25,6 +25,7 @@ from tmdc_optics_tools.loaders import (
 )
 
 from test_loaders import make_spectral_csv
+from _paths import DATA
 
 # 4 fast inside 3 slow.  Small and round: the arithmetic is meant to be obvious
 # at a glance, not to match any particular export.
@@ -594,8 +595,8 @@ def test_aborted_raster_raises_naming_the_sweep_total(tmp_path):
 
 def test_the_committed_truncated_raster_refuses():
     """The real export is 50 of 41 × 51 points, so it must not reshape."""
-    path = ("examples/data/reflectance-contrast/"
-            "sample_truncated_26_07_24_17_55_47_iter_0.csv")
+    path = str(DATA / "reflectance-contrast"
+                    / "sample_truncated_26_07_24_17_55_47_iter_0.csv")
     with pytest.raises(ValueError):
         AttoCubeSpectralSweep(path, spectra_type="R",
                               fast_sweep="Scanner X", slow_sweep="Scanner Y")

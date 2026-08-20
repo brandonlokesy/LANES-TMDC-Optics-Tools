@@ -12,7 +12,9 @@ import pytest
 
 from tmdc_optics_tools.loaders import RamanMap
 
-MAP_PATH = "examples/data/Raman/map2.txt"
+from _paths import DATA
+
+MAP_PATH = str(DATA / "Raman" / "map2.txt")
 
 
 def _write_map(path, xs, ys, shift, counts_fn, shuffle=False, drop_last=False):

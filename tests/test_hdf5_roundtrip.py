@@ -22,6 +22,9 @@ from tmdc_optics_tools.loaders import (
 )
 
 from test_loaders import GATES, N_SWEEPS, PARAMS, make_spectral_csv
+from _paths import DATA
+
+TRPL_DIR = str(DATA / "TRPL")
 
 
 @pytest.fixture
@@ -272,7 +275,7 @@ def test_unknown_suffix_names_the_supported_formats(tmp_path):
 
 def test_trpl_sweep_round_trips(tmp_path):
     # An assembled 4-file directory collapses to one self-describing archive.
-    trpl = AttoCubeTRPLSweep("examples/data/TRPL", bg_region_ns=(0.0, 1.0),
+    trpl = AttoCubeTRPLSweep(TRPL_DIR, bg_region_ns=(0.0, 1.0),
                              gates=GATES)
     out  = trpl.to_hdf5(tmp_path / "trpl.h5")
     back = AttoCubeTRPLSweep(out)
@@ -290,7 +293,7 @@ def test_trpl_sweep_round_trips(tmp_path):
 
 
 def test_trpl_source_files_recorded(tmp_path):
-    trpl = AttoCubeTRPLSweep("examples/data/TRPL")
+    trpl = AttoCubeTRPLSweep(TRPL_DIR)
     back = AttoCubeTRPLSweep(trpl.to_hdf5(tmp_path / "trpl.h5"))
     names = back.source_metadata["source_files"]
     assert len(names) == 3
@@ -304,7 +307,7 @@ def test_spectral_h5_rejected_by_the_trpl_class(scan, tmp_path):
 
 
 def test_trpl_h5_rejected_by_the_spectral_class(tmp_path):
-    trpl = AttoCubeTRPLSweep("examples/data/TRPL")
+    trpl = AttoCubeTRPLSweep(TRPL_DIR)
     out  = trpl.to_hdf5(tmp_path / "trpl.h5")
     with pytest.raises(ValueError, match="AttoCubeTRPLSweep"):
         AttoCubeSpectralSweep(out, spectra_type="TRPL")
@@ -312,7 +315,7 @@ def test_trpl_h5_rejected_by_the_spectral_class(tmp_path):
 
 def test_axis_dataset_named_for_its_quantity(scan, tmp_path):
     h5py = pytest.importorskip("h5py")
-    trpl = AttoCubeTRPLSweep("examples/data/TRPL")
+    trpl = AttoCubeTRPLSweep(TRPL_DIR)
     scan.to_hdf5(tmp_path / "spectral.h5")
     trpl.to_hdf5(tmp_path / "trpl.h5")
 

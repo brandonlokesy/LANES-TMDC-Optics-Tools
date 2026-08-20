@@ -16,6 +16,7 @@ from tmdc_optics_tools import processing
 from tmdc_optics_tools.loaders import AttoCubeSpectralSweep, SingleSpectrum
 
 from test_loaders import N_PIXELS, N_SWEEPS, WAVELENGTH, make_spectral_csv, _roi1
+from _paths import DATA
 
 
 def _write_reference(path, counts) -> None:
@@ -286,7 +287,7 @@ def test_real_substrate_reference_shares_the_sample_axis():
     # resampling question arises.  Reading the 22 KB reference is cheap; the
     # 314 MB sample sweep is deliberately not loaded here.
     ref = SingleSpectrum(
-        "examples/data/reflectance-contrast/substrate_26_07_24_18_20_15.csv")
+        str(DATA / "reflectance-contrast" / "substrate_26_07_24_18_20_15.csv"))
     assert ref.n_pixels == 1340
     assert ref.wavelength[0] == pytest.approx(656.906, abs=1e-3)
     assert ref.wavelength[-1] == pytest.approx(781.759, abs=1e-3)

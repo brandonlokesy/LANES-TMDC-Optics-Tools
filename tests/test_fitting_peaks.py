@@ -26,6 +26,10 @@ from tmdc_optics_tools.fitting import (
     voigt_approx,
 )
 
+from _paths import DATA
+
+RAMAN_DIR = str(DATA / "Raman")
+
 X = np.linspace(0.0, 100.0, 1000)
 
 
@@ -264,7 +268,7 @@ def test_fit_raman_modes_seed_override_follows_a_shifted_bilayer_e2g_a1g():
 def test_fit_raman_modes_bilayer_on_the_real_reference_spectra(fname, expected):
     from tmdc_optics_tools.loaders import RamanSpectrum
 
-    s = RamanSpectrum(f"examples/data/Raman/{fname}")
+    s = RamanSpectrum(f"{RAMAN_DIR}/{fname}")
     result = fit_raman_modes(s.shift, s.counts, material="WSe2", n_layers=2)
 
     assert result.converged
@@ -300,7 +304,7 @@ def test_fit_raman_modes_recovers_known_synthetic_monolayer_peaks():
 def test_fit_raman_modes_monolayer_on_the_real_reference_spectra(fname, expected):
     from tmdc_optics_tools.loaders import RamanSpectrum
 
-    s = RamanSpectrum(f"examples/data/Raman/{fname}")
+    s = RamanSpectrum(f"{RAMAN_DIR}/{fname}")
     result = fit_raman_modes(s.shift, s.counts, material="WSe2", n_layers=1)
 
     assert result.converged
@@ -358,14 +362,14 @@ def test_classify_raman_layer_uses_local_baseline_not_zero():
 def test_classify_raman_layer_on_the_real_reference_spectra(fname, expected):
     from tmdc_optics_tools.loaders import RamanSpectrum
 
-    s = RamanSpectrum(f"examples/data/Raman/{fname}")
+    s = RamanSpectrum(f"{RAMAN_DIR}/{fname}")
     assert classify_raman_layer(s.shift, s.counts, material="WSe2") == expected
 
 
 def test_classify_raman_layer_on_every_pixel_of_the_real_map():
     from tmdc_optics_tools.loaders import RamanMap
 
-    m = RamanMap("examples/data/Raman/map2.txt")
+    m = RamanMap(f"{RAMAN_DIR}/map2.txt")
     labels = {
         classify_raman_layer(m.shift, m.spectrum_at(ix, iy), material="WSe2")
         for ix in range(m.n_x) for iy in range(m.n_y)

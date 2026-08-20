@@ -69,7 +69,7 @@ Conda env `viz-sci-plot`. **Activate it before running anything that imports num
 ```
 conda activate viz-sci-plot
 
-Install     : pip install -e ".[docs]"
+Install     : pip install -e ".[docs,test,colormaps]"
 Docs        : python -m mkdocs build --strict
 Tests       : python -m pytest -q
 ```
@@ -94,13 +94,20 @@ exception: code 0xc06d007f`. That is a delay-load failure: a native crash, not a
 failure, so there is no traceback, and it lands on whichever test reaches BLAS first,
 i.e. a different one each run. Nothing is wrong with the environment when this happens.
 
-`pytest` **is installed** in `viz-sci-plot` and the whole suite runs, but it is **not
-declared** in `pyproject.toml`: there is no `test` extra, so the dependency exists only
-in this one environment. Tests are local-only by deliberate choice — do not add a test
-job to CI. CI (`.github/workflows/docs.yml`) builds and deploys docs only.
+`pytest` is declared in the `test` extra, so `pip install -e ".[test]"` provisions it in
+any environment. **CI runs the suite** — `.github/workflows/tests.yml`, on every pull
+request and every push to `main`, on `ubuntu-latest`, `windows-latest` and
+`macos-latest`, Python 3.12 only, installing `".[test,colormaps]"`. The `colormaps`
+extra is included because without it eight `tests/test_plotting_cmap.py` tests skip.
+`docs.yml` builds and deploys the docs and runs **only** on pushes to `main`, so a pull
+request cannot validate a change to it.
 
-`pyproject` says `requires-python = ">=3.9"` but the docs CI uses 3.12. Ask which is
-authoritative before relying on version-specific syntax.
+Three checks are **required** on `main`: `pytest (ubuntu-latest)`,
+`pytest (windows-latest)`, `pytest (macos-latest)`. Reasoning and rejected alternatives:
+`dev/decisions/0027-the-suite-runs-in-ci-on-three-systems.md`.
+
+`pyproject` says `requires-python = ">=3.9"` but both workflows use 3.12 and no 3.9 run
+has ever happened. Ask which is authoritative before relying on version-specific syntax.
 
 ## Code conventions
 
@@ -274,6 +281,10 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
   shorten a return when a member is `None`, and don't reach an artist off `ax` instead
   of returning it.
 - Don't drop `ImagePlot.cb` on the grounds that `im.colorbar` already reaches it.
+- Don't rename a matrix entry in `tests.yml`, or add a `paths:` filter to it, without
+  updating the required status checks on `main` in the same change. A required check is
+  matched **by name**, so one that never reports blocks every pull request on a check
+  that cannot arrive.
 
 ## Known issues — check before "helpfully" fixing
 

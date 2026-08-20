@@ -1529,6 +1529,13 @@ open — present, then absent, then present again after a manual install — so 
 test dependency has no way to announce itself when an env is rebuilt, and any docs
 describing it go stale silently, as they did in both directions.
 
+*Update, 2026-08-20 (`a65b6fa`).* `pytest` is declared:
+`[project.optional-dependencies] test = ["pytest"]`. The "no CI test job wanted"
+sentence above is **reversed** — `.github/workflows/tests.yml` runs the suite on every
+pull request and every push to `main`, on Linux, Windows and macOS. Reasoning and
+rejected alternatives: `dev/decisions/0027-the-suite-runs-in-ci-on-three-systems.md`.
+E4's coverage half stands unchanged: `diffusion` still has no tests.
+
 
 **E5. Packaging.** `pyproject` lists `ffmpeg` as a dependency: that PyPI package is
 an unmaintained wrapper, not the ffmpeg *binary* matplotlib needs. Use
@@ -2118,7 +2125,8 @@ nothing above depends on them, but every task touching data paths or notebooks d
 
 ## Possible future work
 
-**F1. A test job in CI — parked, not rejected.** Today CI (`.github/workflows/docs.yml`)
+**F1. A test job in CI — parked, not rejected.** **[FIXED — 2026-08-20, `a65b6fa`]**
+Today CI (`.github/workflows/docs.yml`)
 builds and deploys docs only, and CLAUDE.md records tests as local-only *by decision*;
 that decision stands until deliberately revisited. Noted here because the groundwork
 is already done rather than because it is owed.
@@ -2156,6 +2164,53 @@ else commits.
 > working workflow file in one move. The goal is that he can debug a red run himself
 > afterwards, not just that CI is green.
 
+*Done, 2026-08-20* — `a65b6fa` landed the test job, `37b9280` brought the `docs.yml`
+actions up with it. See `dev/decisions/0027-the-suite-runs-in-ci-on-three-systems.md`.
+Two claims in this entry were **wrong**, corrected here rather than edited above:
+
+- **Not every test is hermetic.** Eight files read `examples/data/` directly:
+  `test_raman.py`, `test_raman_map.py`, `test_loaders_trpl.py`, `test_hdf5_roundtrip.py`,
+  `test_loaders_real_space.py`, `test_contrast.py`, `test_fitting_peaks.py`,
+  `test_loaders_nesting.py`. CI works because that data is committed. The paths are
+  repo-relative, so pytest must start in the checkout root — every workflow step does by
+  default, and a `working-directory:` would break them.
+- **The suite is 862 tests and ~175 s locally, not 41 and 6 s.** In CI it is 862 on each
+  of three machines: about 1 min on Linux and macOS, 2 min on Windows.
+
+Two things this entry expected the job to settle, and what actually happened:
+
+- **E5 is not settled and CI will never flag it.** `ffmpeg` 1.4 — the unmaintained PyPI
+  wrapper — resolves and installs cleanly on all three systems. A clean-room install
+  cannot tell that it is the wrong package. E5 stands exactly as written.
+- **`requires-python` is untouched.** Both workflows pin 3.12 and no 3.9 run has ever
+  happened, so whether `>=3.9` is honest remains unverified.
+
+Branch protection was settled at the same time, as this entry asked: the three checks are
+required on `main`, `strict` (branches up to date) off, the admin bypass kept.
+
+**F2. `cmocean` breaks when matplotlib removes `N` from `ListedColormap`.** `cmocean`'s
+`cm.py` passes `N` to `ListedColormap`, which matplotlib deprecated in 3.11 and states it
+will remove in **3.13**. Until then it is a warning: CI reports 89 warnings per run
+against 1 locally, because CI installs matplotlib 3.11.1 while `viz-sci-plot` is on
+3.10.9, where the deprecation does not fire. 88 of the 89 are this.
+
+Nothing here is ours to fix, and there is no upgrade to take: `cmocean` 4.0.3 is the
+newest release on PyPI and is the version CI installs. `cmocean.__version__` reports
+`v3.0.3` regardless, so trust the distribution metadata rather than the attribute.
+
+**What breaks when 3.13 lands, if upstream has not moved:** `import cmocean` raises
+rather than warns. That takes out the `colormaps` extra, the CI install
+(`pip install -e ".[test,colormaps]"` — see
+`dev/decisions/0027-the-suite-runs-in-ci-on-three-systems.md`), and the three
+`cmocean`-gated tests in `tests/test_plotting_cmap.py`. The `cmcrameri` half is
+unaffected.
+
+Three ways out when it bites, none of them urgent now: drop `cmocean` from the
+`colormaps` extra, pin `matplotlib<3.13` for that extra, or wait for upstream. Recorded
+here so the trigger is known in advance rather than discovered by a group member whose
+install stopped working — which is precisely the class of problem CI was added to
+surface, and did on its first run with the extra installed.
+
 ## Verification
 
 - Add `pytest` to a `[project.optional-dependencies] dev` extra and install it —
@@ -2164,6 +2219,9 @@ else commits.
   runs 41 tests green. Still undeclared in `pyproject.toml`.)*
   *(Re-checked 2026-07-29: 41 passed, pytest 9.1.1; still undeclared. See the E4
   update for the file-by-file breakdown and why declaring it matters.)*
+  *(Done 2026-08-20, `a65b6fa`: declared as
+  `[project.optional-dependencies] test = ["pytest"]`. 862 passed locally, and 862 on
+  each of Linux, Windows and macOS in CI.)*
 - Per bug, a focused unit test: `remove_cosmic_rays` on a synthetic spike
   (done — `tests/test_processing_cosmic_rays.py`);
   `repr(DeviceGeometry.from_single("WS2", 53, 46))` not raising.

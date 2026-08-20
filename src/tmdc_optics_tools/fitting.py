@@ -18,11 +18,8 @@ import numpy as np
 from scipy.ndimage import convolve1d
 from scipy.optimize import curve_fit
 from scipy.signal import find_peaks
-from sklearn.linear_model import Lasso
 
 from . import constants, processing
-
-from . import processing
 from .constants import _x_axis_name_unit
 
 
@@ -1587,6 +1584,11 @@ def fit_sparse_lifetime(
         np.logspace(np.log10(tau_range[0]), np.log10(tau_range[1]), n_tau)
         if tau_grid is None else np.asarray(tau_grid, float)
     )
+
+    # Imported here, not at module level: scikit-learn is a heavy import and
+    # this is the only function in the package that needs it, so `import
+    # tmdc_optics_tools` should not pay for it.
+    from sklearn.linear_model import Lasso
 
     X = _build_lifetime_dictionary(t, tau_grid, irf_kernel)
     lasso = Lasso(alpha=alpha, max_iter=200_000, fit_intercept=False)

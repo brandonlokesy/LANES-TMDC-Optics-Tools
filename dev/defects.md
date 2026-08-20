@@ -2088,7 +2088,7 @@ caller unpacking positionally, so the cost rises with every caller added. Fixing
 `plot_spectra_overlay` also means editing that notebook, which unpacks
 `fig, (ax_raw, ax_norm) = plotting.plot_spectra_overlay(...)`.
 
-**E22. Importing the package imports scikit-learn.**
+**E22. Importing the package imports scikit-learn.** **[FIXED — 2026-08-20]**
 `plotting` imports `fitting` at module level, and `fitting` imports
 `sklearn.linear_model.Lasso` at module level, so `import tmdc_optics_tools` pulls in
 scikit-learn for anyone who only wants to plot. It is declared in `pyproject.toml`, so
@@ -2096,6 +2096,26 @@ this is not a missing dependency — but it arrived with `fit_sparse_lifetime`, 
 existing environment failed to import the package until scikit-learn was installed. A
 function-local import inside `fit_sparse_lifetime` would confine the cost to the one
 function that needs it.
+
+*Fixed as sketched* — the import moved into `fit_sparse_lifetime`, the only user. This is
+the one function-local import in the package that is *not* the stale-comment kind
+described in **D7**: there is no circularity here, the reason is cost, and the comment at
+the import says so.
+
+Removed in the same edit: `fitting` imported `from . import processing` **twice**, three
+lines apart. Only the line carrying `constants` alongside it survives.
+
+*Test:* `tests/test_import_cost.py`, 2 cases. The first runs `import tmdc_optics_tools`
+in a **fresh interpreter** and asserts no `sklearn` module is present afterwards — it has
+to be a subprocess, because by the time the suite reaches this file the session has
+imported scikit-learn for something else and `sys.modules` here would say nothing about
+the package. Confirmed by reverting: it fails against the pre-fix code.
+
+The second is the other half, and is the reason this is not simply a deletion: a lazy
+import that is never exercised is a `NameError` waiting to happen, and nothing else in the
+suite calls `fit_sparse_lifetime`. It is a smoke test only — that the call completes and
+returns a `SparseLifetimeResult` — and makes no claim about the lifetimes, which are
+fitted against a model misaligned with the data until **A24** is fixed.
 
 **E23. `fit_scan_lifetime`'s two defaults contradict each other.**
 `t_range=(-0.2, 1.3)` gives a 1.5 ns fit window while `tau_range=(1e-3, 5.0)` puts
@@ -2186,8 +2206,9 @@ deprecation cost — which is the argument for taking them now rather than later
    settled together. (**C11** was checked on 2026-08-20 and is not a defect; the entry
    now carries the open question it hides instead.)
 
-**E22 is worked around, not fixed.** scikit-learn was installed into `viz-sci-plot` on
-2026-08-19 so the suite could run; the module-level import is still there.
+**E22 was worked around before it was fixed.** scikit-learn was installed into
+`viz-sci-plot` on 2026-08-19 so the suite could run; the module-level import went on
+2026-08-20.
 
 Outside this order: **E9 is largely closed** — sample files arrived, and R/RC and
 TRPL support landed on 2026-07-30 along with the rename and arbitrary-sweep rewrite

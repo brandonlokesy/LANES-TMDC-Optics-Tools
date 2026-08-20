@@ -1479,6 +1479,13 @@ unreachable, so a regression check is the only check available. 420 tests green,
 `processing._draw_region_box`, so **that import is unused**. Left alone — a separate
 change, and it wants the whole line checked rather than one name pulled out of it.
 
+**[FIXED — 2026-08-20]** The whole line was checked, as this asked. `_draw_region_box`
+is imported and never used under the bare name: the one call site in `loaders` is
+`_AttoCubeImage.show_image`, which spells it `processing._draw_region_box`. The other two
+names on the line are used unqualified and stay — `jacobian_correction_wvl2E` at two
+sites, `subtract_background` at three. `loaders` also does `from . import processing`, so
+the qualified call site needs nothing added.
+
 **D2.** Two laser-circle drawers with different styling defaults:
 `loaders._AttoCubeImage._add_laser_circle` (dashed, no halo, `loaders.py:5088`) and
 `plotting._draw_laser_circle` (solid + halo), plus a third inline copy in

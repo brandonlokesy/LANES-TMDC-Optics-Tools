@@ -40,10 +40,11 @@ below tracks what is left.
 
 ## A. Broken — crashes or silently wrong numbers
 
-*(A1–A3 fixed; A4 deferred; A5 open; **A6 fixed 2026-07-30**; **A8 fixed 2026-08-06**
+*(A1–A3 fixed; A4 deferred; **A5 fixed 2026-08-07**, in the PR #19 merge rather than by a
+change aimed at it; **A6 fixed 2026-07-30**; **A8 fixed 2026-08-06**
 with E14; **A10 and A7 fixed 2026-08-07**; **A9 and B1 both fixed 2026-08-10**, which
 closes the `AttoCubePLScanRealSpace` pass; **A19–A21 fixed 2026-08-17/18** on
-`fix/nest-level-separation`; **A23 fixed 2026-08-18**. **A5**, **A18** and **A22** are the
+`fix/nest-level-separation`; **A23 fixed 2026-08-18**. **A18** and **A22** are the
 live bugs left in this section, joined by **A24–A29** from the PR #19 review.)*
 
 **A1. `processing.remove_cosmic_rays` cannot be called at all.** **[FIXED — 2026-07-28, e77fabf]**
@@ -176,6 +177,7 @@ cloud area is biased low, systematically.
 all, or a plain pixel count would do. Do not fix unprompted.
 
 **A5. `plot_diffusion_cloud` can subtract the background twice.**
+**[FIXED — 2026-08-07, `640a108`]** **[verified by running]**
 `plot_diffusion_cloud` pulls `image.img` — which is *already* background-subtracted when
 the loader was constructed with `bg_region` — and then passes `bg_region` on to
 `analyse_diffusion_cloud`, which subtracts again. The guard in
@@ -183,6 +185,31 @@ the loader was constructed with `bg_region` — and then passes `bg_region` on t
 bare ndarray is handed in, not the image object.
 *Fix:* pass the image *object* straight through to `analyse_diffusion_cloud` and let
 `_load_image` apply its existing rule; use the returned data for display.
+
+*Fixed exactly as sketched*, and it needed one addition to be usable: displaying "the
+returned data" requires the result to carry it, so `DiffusionResult` gained an `image`
+field holding the array that was actually analysed — background-subtracted where a region
+was given, before the ROI mask and the smoothing applied internally for thresholding.
+`plot_diffusion_cloud` passes `image` where it used to pass `img`, and draws
+`result.image` where it used to draw its own local copy. Both halves are needed: without
+the field, every caller re-derives the displayed array from whatever it passed in, which
+is the mechanism of this defect one level up.
+
+Landed inside the PR #19 merge (Raman loaders, PL peak fitting, TRPL lifetime fitting)
+rather than in a change aimed at this entry, which is why it went unmarked here until
+2026-08-20. That merge also carried **A7**, **A8** and **A9**, all three of which had
+already been fixed on `main`.
+
+*Test:* `tests/test_diffusion.py`, 5 cases — the repo's first `diffusion` tests. A
+second subtraction would drive the background patch to `-BG_LEVEL` instead of leaving it
+at ~0, which is asserted in both directions; a bare array still gets exactly one
+subtraction, so the fix cannot have been a blanket "never subtract"; and the plot's
+displayed array is read back **off the axes** and compared with `result.image`, for both
+the computed and the precomputed-`result` paths.
+
+Still open on the same function: **E11** — ~30 parameters and a `result` return instead
+of its artists. **A18** and **E19** are the two `DiffusionCloudPanel` items, and both now
+have a test file to grow into.
 
 **A6. Zero-filled blocks were loaded as real sweep points.** **[FIXED — 2026-07-30]**
 **[verified against the real file]** Found only once a reflectance export existed to
@@ -2062,14 +2089,17 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
 
 ## Suggested order
 
-1. **A5** — the last live bug in section A, and now best taken with **E11**, which
-   rewrites `plot_diffusion_cloud`'s signature and return anyway; fixing it alone means
-   two breaking changes to one function. It also wants the repo's first `diffusion`
-   tests, of which there are currently none.
-   (A1 fixed 2026-07-28; A2, A3 and A6 fixed 2026-07-30; A8 fixed 2026-08-06; A10 and
-   A7 fixed 2026-08-07; A9 and B1 fixed 2026-08-10; A4 deferred.) **A11** (warning
-   locations) and **A12** (duplicate iteration indices) were both opened by the A7
-   work; A12 is fixed, A11 is still owed and is its own deliberate pass over 15 sites.
+1. **A18** — the live bug left in section A once the Raman and TRPL entries are set
+   aside. It is cheaper than this list has assumed: the frame-window work removed
+   `_resolve_var`'s truncation, so the frames being drawn are known where they are
+   needed. (This item used to read **A5**, "the last live bug in section A", to be
+   taken with **E11**; A5 was fixed on 2026-08-07 and `tests/test_diffusion.py` exists
+   now, so E11 no longer has a bug riding on it.)
+   (A1 fixed 2026-07-28; A2, A3 and A6 fixed 2026-07-30; A5 fixed 2026-08-07; A8 fixed
+   2026-08-06; A10 and A7 fixed 2026-08-07; A9 and B1 fixed 2026-08-10; A4 deferred.)
+   **A11** (warning locations) and **A12** (duplicate iteration indices) were both
+   opened by the A7 work; A12 is fixed, A11 is still owed and is its own deliberate
+   pass over 15 sites.
 2. **A22** — a held gate that drifts reads as varying, which `gate_mode` then answers
    confidently on. Blocked on a file that needs a declared instrument resolution
    (`sweep_atol=`); until one appears the entry is the evidence, not the work.
@@ -2087,8 +2117,9 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
 turned up. **E18 and E20 are both fixed** — E18 gated the rest, because the engine could not
 be safely changed while it was untested, and E20 had to precede any panel that draws a top
 axis. The frame-window work is now unblocked. **A18** and **E19** are both
-`DiffusionCloudPanel` and both want `diffusion`'s first tests, so they go together, alongside
-**A5**/**E11**. **E16** and **E17** landed as one change, as planned. **C8** and
+`DiffusionCloudPanel` and both wanted `diffusion`'s first tests, which **A5** brought on
+2026-08-07 — so they no longer wait on **E11**, and go together. **E16** and **E17**
+landed as one change, as planned. **C8** and
 **C9** ride along with whatever touches their function.
 
 **Opened 2026-08-19 by the review of PR #19** (Raman loaders, PL peak fitting, TRPL

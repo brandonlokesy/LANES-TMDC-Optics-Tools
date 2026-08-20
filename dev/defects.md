@@ -1283,10 +1283,59 @@ Not done here: **A5**, and `animate_wl_pl_spectra` constructs its
 scans internally with no `bg_region` passthrough, so it is the one public path that
 cannot reach this.
 
-**B2.** `analyse_diffusion_cloud(scale_units=)` / `analyse_diffusion_sequence(scale_units=)`
+**B2.** **[FIXED — 2026-08-20]** `analyse_diffusion_cloud(scale_units=)` / `analyse_diffusion_sequence(scale_units=)`
 are forwarded but never stored; `DiffusionResult` has no such field, though its
 docstring says the unit is "used only in `__repr__`".
 *Fix:* add the field and use it in `__repr__`, or drop the parameter.
+
+*The field was added, and the deciding question was what the conversion is.*
+`pixel_scale` is **µm per pixel on a CCD frame** — pixels to a length, not volts to a
+length. The calibration in use is derived per session from the laser reference image;
+`examples/example-trpl.ipynb` computes
+`pixel_scale = laser_diameter_um / (2 * laser_ref.radius)`, a known spot diameter in µm
+over the fitted 1/e² radius in pixels. Because the scale is the caller's to calibrate,
+the unit is the caller's to name, so it cannot be hardcoded and something has to carry
+it. (Volts to µm is a different conversion the package deliberately does not do — the
+piezo rows are drive voltage and no µm/V calibration is in the file, settled under
+**E7**. A third case needs no conversion at all: `RamanMap`'s X/Y are already µm, from
+the file's own `#AxisUnit` fields.)
+
+Dropping the parameter was the other option in the sketch and was rejected, because
+**two readers were already waiting for the label**:
+
+- `DiffusionResult.__repr__` printed `Centroid (real)` and `Area (real)` — bare numbers
+  whose scale the reader cannot know, and an area that is in the unit *squared*.
+- `plotting.plot_centroid_trajectory` labelled its y-axis `Centroid (real)` and its lines
+  `x (real)` / `y (real)`: the literal word *real* standing where a unit belongs, because
+  the unit could not be reached from the result.
+
+The shape is not new here. `DiffusionSequenceResult` already carries `var_label` /
+`var_units` for the external axis, and `loaders._CURATED` stores `(row, scale, unit)` as
+one entry — pairing a scale with its unit is the established pattern.
+
+Three details worth recording:
+
+- **The field is appended, not placed beside `pixel_scale`.** A dataclass can be
+  constructed positionally, so inserting a field silently changes what such a call means
+  — the hazard CLAUDE.md names for `<Thing>Plot` returns. One site constructs
+  `DiffusionResult` and it uses keywords, so this is cheap insurance rather than a fix.
+- **`__repr__` now aligns its colons on the widest label** instead of a hardcoded width,
+  because a caller-supplied unit has no fixed length.
+- **The unit prints only beside a number that was converted.** With no `pixel_scale`
+  neither real-space row appears, so a unit can never be shown against a pixel value.
+
+`DiffusionSequenceResult.scale_units` reads off `frames[0]`, matching its sibling
+accessors: one call analyses the whole sequence, so every frame carries the same unit.
+
+Not touched: `plot_diffusion_cloud` and `DiffusionCloudPanel` forward `pixel_scale` but
+not `scale_units`, and neither displays a real-space unit — the first draws the image in
+pixels. Adding a parameter to the standing counter-example to *parameters earn their
+place* (**E11**) would buy nothing.
+
+*Test:* `tests/test_diffusion.py`, 6 new cases (5 → 11). Four fail against the pre-fix
+code — the unit on both repr lines, the µm default, the unit reaching every frame of a
+sequence, and the axis label read back off the axes — and the two that pass either way
+are the negative ones, which pin that no unit is printed when nothing was converted.
 
 **B3.** **[NOT A DEFECT — checked 2026-08-20]** `AttoCubeSampleImage.__init__`
 (`AttoCubeSampleImage.__init__`) doesn't forward
@@ -1428,6 +1477,29 @@ did-not-regress ones.
 *Adjacent, not fixed:* `AttoCubeLaserReferenceImage.show_image` sets `self.laser_ref =
 self`, calls the base, then resets it to `None`. If the base call raises, the object is
 left pointing at itself permanently.
+
+**B6. A curated row's scale can be overridden and its unit cannot.**
+Found 2026-08-20 while fixing **B2**; the same fault one module over, and worse.
+`loaders._CURATED` stores each entry as `(row label, scale, unit)`, and the override loop
+in `_decode_and_describe` says so in its own comment: *"Only label (index 0) and scale
+(index 1) can be overwritten."* There is no `curated_units`.
+
+So a caller who follows `scanner_x`'s own docstring — *"Converting to µm needs a
+per-stage µm/V calibration that is not in the file; supply one through
+`curated_scales`"* — converts the numbers to µm and gets every axis label, `__repr__`
+line and legend entry still reading **V**. B2 dropped a label that was offered; this
+keeps a label that has become wrong, which is the more dangerous of the two, and it
+happens on the one path the documentation actively recommends.
+
+*Not fixed here* — it needs a decision rather than an edit. Two shapes: a
+`curated_units=` override alongside `curated_scales`, symmetrical with the existing
+mechanism; or refusing a scale override that arrives without a unit, on the grounds that
+a rescaled quantity whose unit is unstated is not something the package should serve.
+The first is more usable, the second is harder to misuse. Either way `hdf5` carries the
+curated config, so whichever lands has to round-trip, and `_SWEEP_TYPES` holds its own
+copy of the unit for the sweep axes — which is a second place the same string lives, and
+should be checked before adding a third.
+
 
 ## C. Documentation that contradicts the code
 
@@ -2323,13 +2395,15 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
    (`sweep_atol=`); until one appears the entry is the evidence, not the work.
 3. **C1–C3** — the doc corrections, since they actively mislead. **C8** and **C9** join
    them, and both are cheapest taken by whatever next edits their function.
-4. **B2, D2–D6, D8, D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
+4. **B6, D2–D6, D8, D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
    2026-08-10, and was not mechanical: the sketched fix would have introduced a second
    instance of A5. **B3** was checked on 2026-08-20 and is not a defect. **B4** was half
    wrong and half fixed the same day, as were **D1** and **D7** — none of the four was as
    mechanical as this line assumed, because three of them were entries the code had
    already overtaken. **B5** was opened and fixed the same day too, found while settling
-   B3: the same class of fault as B1, a parameter accepted and then not acted on.)
+   B3: the same class of fault as B1, a parameter accepted and then not acted on.
+   **B2** was fixed on 2026-08-20 by adding the field, and opened **B6** — the same
+   fault in `loaders._CURATED`, where a scale can be overridden and its unit cannot.)
 5. **E2, E3, E5** — the remaining design calls, one at a time.
 6. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
    because it is the only breaking change on the list and touches `examples/`.

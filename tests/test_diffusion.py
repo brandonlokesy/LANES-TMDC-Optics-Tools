@@ -18,7 +18,10 @@ matplotlib.use("Agg")
 import numpy as np
 
 from tmdc_optics_tools import plotting
-from tmdc_optics_tools.diffusion import analyse_diffusion_cloud
+from tmdc_optics_tools.diffusion import (
+    analyse_diffusion_cloud,
+    analyse_diffusion_sequence,
+)
 from tmdc_optics_tools.loaders import AttoCubePLImage
 
 BG_LEVEL  = 50.0
@@ -87,4 +90,81 @@ def test_plot_diffusion_cloud_with_precomputed_result_uses_its_image(tmp_path):
     assert result_out is result
     displayed = np.asarray(ax.images[0].get_array())
     assert np.array_equal(displayed, result.image)
+    matplotlib.pyplot.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# scale_units — the unit pixel_scale was calibrated in (B2)
+# ---------------------------------------------------------------------------
+#
+# pixel_scale converts pixels to a real-space length, and the scale is typically
+# calibrated per session against a known laser-spot size, so the unit is the
+# caller's choice.  It therefore has to travel with the result: nothing
+# downstream can infer it, and before B2 it was accepted and dropped.
+
+
+def _plain_cloud():
+    """A bright square on a dark field — no loader, no background involved."""
+    img = np.zeros((20, 20))
+    img[8:12, 8:12] = 100.0
+    return img
+
+
+def test_the_real_space_lines_carry_the_unit():
+    text = repr(analyse_diffusion_cloud(_plain_cloud(),
+                                        pixel_scale=65.0, scale_units="nm"))
+
+    assert "Centroid (nm)" in text
+    assert "Area (nm²)" in text          # an area is in the unit squared
+    assert "(real)" not in text          # the placeholder this replaced
+
+
+def test_the_default_unit_is_micrometres():
+    text = repr(analyse_diffusion_cloud(_plain_cloud(), pixel_scale=0.065))
+
+    assert "Centroid (µm)" in text
+    assert "Area (µm²)" in text
+
+
+def test_no_scale_means_no_unit_is_printed():
+    # The unit must never appear beside a number that is still in pixels.
+    text = repr(analyse_diffusion_cloud(_plain_cloud()))
+
+    assert "Centroid (px)" in text
+    assert "µm" not in text
+    assert "Centroid (" in text and text.count("Centroid") == 1
+
+
+def test_the_unit_reaches_every_frame_of_a_sequence():
+    frames = [_plain_cloud() for _ in range(3)]
+
+    seq = analyse_diffusion_sequence(frames, pixel_scale=65.0, scale_units="nm",
+                                     smooth_sigma=0.0)
+
+    assert seq.scale_units == "nm"
+    assert all(f.scale_units == "nm" for f in seq.frames)
+
+
+def test_the_trajectory_plot_labels_its_axis_with_the_unit():
+    # The assertion that fails before B2: the label read "Centroid (real)",
+    # the word "real" standing where a unit belongs.
+    frames = [_plain_cloud() for _ in range(3)]
+    seq = analyse_diffusion_sequence(frames, pixel_scale=65.0, scale_units="nm",
+                                     smooth_sigma=0.0)
+
+    fig, ax = plotting.plot_centroid_trajectory(seq, use_real=True)
+
+    assert ax.get_ylabel() == "Centroid (nm)"
+    assert [line.get_label() for line in ax.lines] == ["x (nm)", "y (nm)"]
+    matplotlib.pyplot.close(fig)
+
+
+def test_the_trajectory_plot_still_says_px_without_a_scale():
+    frames = [_plain_cloud() for _ in range(3)]
+    seq = analyse_diffusion_sequence(frames, smooth_sigma=0.0)
+
+    fig, ax = plotting.plot_centroid_trajectory(seq, use_real=True)
+
+    # use_real=True but nothing was converted, so the pixel branch holds.
+    assert ax.get_ylabel() == "Centroid (px)"
     matplotlib.pyplot.close(fig)

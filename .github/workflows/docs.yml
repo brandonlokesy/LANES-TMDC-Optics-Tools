@@ -9,8 +9,8 @@ on:
 permissions:
   contents: read
 
-# Allow one concurrent deployment, cancelling in-progress runs.
-concurrency:
+# One run per branch: a new push cancels that branch's earlier run. Deliberately
+# not one group repo-wide — a pull request build must never cancel a main deploy.concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: true
 

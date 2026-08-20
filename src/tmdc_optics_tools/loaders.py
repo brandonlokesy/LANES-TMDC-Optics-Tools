@@ -5981,11 +5981,12 @@ class _AttoCubeImage:
         ax,
         laser_ref : "AttoCubeLaserReferenceImage",
         linewidth : float = 1,
-        legend    : bool  = False,
     ) -> patches.Circle:
         """
-        Draw the 1/e² laser boundary circle on *ax* and optionally add a legend.
-        Returns the Circle artist.
+        Draw the 1/e² laser boundary circle on *ax*, and return the Circle artist.
+
+        Draws only. The legend is the caller's, because an axes can carry more than
+        one labelled artist and a legend built here could only ever list this one.
         """
         circle = patches.Circle(
             (laser_ref.center_x, laser_ref.center_y),
@@ -5997,8 +5998,6 @@ class _AttoCubeImage:
             label     = f"$1/e^2$ Radius ({laser_ref.radius:.1f} px)",
         )
         ax.add_patch(circle)
-        if legend:
-            ax.legend(handles=[circle], loc="upper right")
         return circle
 
     def __array__(self, dtype=None):
@@ -6038,13 +6037,27 @@ class _AttoCubeImage:
         laser_annotation : bool
             Overlay the 1/e² laser spot boundary if a ``laser_ref`` is set.
         legend : bool
-            Show a legend for the laser circle.
+            Label whatever was drawn on top of the image — the laser circle, the
+            background-region box, or both. Nothing else switches it on: asking
+            for an annotation does not imply a legend.
         normalise : bool
             Rescale intensity to [0, 1] before display.
+        show_bg_region : bool
+            Outline the region whose statistic was subtracted at construction.
+            Warns and draws nothing if this image was built without a
+            *bg_region* — some classes take none at all, e.g.
+            :class:`AttoCubeSampleImage`.
+        bg_region_color : str
+            Edge colour of that outline.
 
         Returns
         -------
         fig, ax
+
+        Warns
+        -----
+        UserWarning
+            If *show_bg_region* is asked for and there is no region to draw.
         """
         display = self.img if img is None else img
         if normalise:
@@ -6054,11 +6067,25 @@ class _AttoCubeImage:
         ax.imshow(display, cmap="gray")
         ax.axis("off")
 
+        # One legend, built here from what was actually drawn.  Neither drawer can
+        # build it: `ax.legend(handles=[...])` takes an explicit list, so a legend
+        # raised by either one would silently omit the other's artist.
+        handles = []
         if show_bg_region:
-            processing._draw_region_box(ax, self.bg_region, bg_region_color, label="bg region")
-            legend = True
+            if self.bg_region is None:
+                warnings.warn(
+                    f"show_bg_region=True, but this {type(self).__name__} was "
+                    f"constructed without a bg_region, so no box was drawn.",
+                    UserWarning, stacklevel=2,
+                )
+            box = processing._draw_region_box(ax, self.bg_region, bg_region_color,
+                                             label="bg region")
+            if box is not None:
+                handles.append(box)
         if laser_annotation and self.laser_ref is not None:
-            self._add_laser_circle(ax, self.laser_ref, legend=legend)
+            handles.append(self._add_laser_circle(ax, self.laser_ref))
+        if legend and handles:
+            ax.legend(handles=handles, loc="upper right")
 
         return fig, ax
 

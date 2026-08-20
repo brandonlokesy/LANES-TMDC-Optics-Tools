@@ -1345,7 +1345,9 @@ override is load-bearing because of that refusal — deleting it would inherit t
 parameters — and now says so in a comment.
 
 *Loose end, not fixed here:* `show_image(show_bg_region=True)` on an image with no region
-draws no box and still sets `legend=True`. Harmless, and its own small change.
+draws no box and still sets `legend=True`. Harmless, and its own small change. — Filed as
+**B5** and fixed there the same day. "Harmless" understated it: the `legend=True` was
+inert, and the box's own label had never been reachable in any case.
 
 **B4.** `fitting.voigt_approx` is implemented but not reachable from any `fit_*`
 entry point; `constants.py` imports `hbar` unused.
@@ -1360,6 +1362,72 @@ The `hbar` half stood, and is fixed here: `scipy.constants.hbar` was imported by
 `constants.py` and read by nothing in the package. `h`, `c`, `e` and `epsilon_0` on the
 same line are all used — `h`/`c`/`e` build `HC_EV_NM`, and `e`/`epsilon_0` are
 re-exported as `E_CHARGE`/`EPS_0` — so only the one name went.
+
+**B5. `show_image`'s background-region box could never be labelled, and an absent
+region was a silent no-op.** **[FIXED — 2026-08-20]** **[verified by running]** Found
+2026-08-20 while settling **B3**. Three faults in four lines of
+`_AttoCubeImage.show_image`:
+
+```python
+if show_bg_region:
+    processing._draw_region_box(ax, self.bg_region, bg_region_color, label="bg region")
+    legend = True
+if laser_annotation and self.laser_ref is not None:
+    self._add_laser_circle(ax, self.laser_ref, legend=legend)
+```
+
+- **The box's label was dead in every case.** The only legend anywhere in this path was
+  the one `_add_laser_circle` built as `ax.legend(handles=[circle], loc="upper right")` —
+  an explicit handle list, so it omitted the box even when the box was drawn.
+- **`legend = True` did not mean what it reads as.** It looks like *drawing the box
+  implies a legend*. In fact it could only turn on the **circle's** legend, and only when
+  a circle was being drawn anyway.
+- **An absent region drew nothing and said nothing.** After **B3** that is the permanent
+  state on `AttoCubeSampleImage` and `SingleImage`, which take no `bg_region` at all.
+
+Measured on an `AttoCubePLImage`, counting artists on the axes afterwards:
+
+| call | boxes | circles | legend |
+|---|---|---|---|
+| no region, `show_bg_region=True` | 0 | 0 | none |
+| no region, `show_bg_region=True`, laser | 0 | 1 | circle only |
+| **has region, `show_bg_region=True`** | **1** | 0 | **none** |
+| has region, `show_bg_region=True`, laser | 1 | 1 | circle only |
+
+Row 3 is the one that shows `legend = True` doing nothing at all.
+
+*Fixed* by building **one legend in `show_image`, from the artists it actually drew.*
+Neither drawer can own it — `ax.legend(handles=[...])` takes an explicit list, so a
+legend raised inside either one omits the other's artist, which is exactly the bug. An
+absent region now warns and names the class. `_add_laser_circle` **loses its `legend`
+parameter**: its one caller no longer uses it, and dropping it moves that helper toward
+`plotting._draw_laser_circle`, which draws and returns and builds no legend — the shape
+**D2**'s remaining merge needs.
+
+`show_bg_region` and `bg_region_color` were also absent from the `Parameters` block,
+so the signature was their only documentation. Added, along with the `Warns` section.
+
+**One behaviour change, chosen deliberately:** `legend=` now decides, and
+`show_bg_region=True` no longer forces a legend on. The forcing was kept in view and
+rejected — an argument that silently overrides another argument is harder to predict, and
+the legend it forced did not contain the box it was forced on behalf of. The visible
+difference is narrow: with a laser circle, `show_bg_region=True` and `legend=False`, a
+circle-only legend used to appear and now does not.
+
+`stacklevel=2` is **measured**, not one of **A11**'s fifteen. Every reachable path is the
+researcher calling `show_image` directly: the one override,
+`AttoCubeLaserReferenceImage.show_image`, never passes `show_bg_region`, so the warning
+cannot arrive through it.
+
+*Test:* `tests/test_show_image_annotations.py`, 6 cases, reading the artists back off the
+axes because `show_image` returns only `(fig, ax)`. Four fail against the pre-fix code —
+the box in the legend, box and circle labelled together, `legend=False` honoured, and the
+warning with `caught[0].filename == __file__` — and the two that pass either way are the
+did-not-regress ones.
+
+*Adjacent, not fixed:* `AttoCubeLaserReferenceImage.show_image` sets `self.laser_ref =
+self`, calls the base, then resets it to `None`. If the base call raises, the object is
+left pointing at itself permanently.
 
 ## C. Documentation that contradicts the code
 
@@ -2260,7 +2328,8 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
    instance of A5. **B3** was checked on 2026-08-20 and is not a defect. **B4** was half
    wrong and half fixed the same day, as were **D1** and **D7** — none of the four was as
    mechanical as this line assumed, because three of them were entries the code had
-   already overtaken.)
+   already overtaken. **B5** was opened and fixed the same day too, found while settling
+   B3: the same class of fault as B1, a parameter accepted and then not acted on.)
 5. **E2, E3, E5** — the remaining design calls, one at a time.
 6. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
    because it is the only breaking change on the list and touches `examples/`.

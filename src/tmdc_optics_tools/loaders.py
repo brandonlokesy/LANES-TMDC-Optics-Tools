@@ -60,7 +60,7 @@ from .constants import (
 )
 
 from . import processing
-from .processing import _draw_region_box, jacobian_correction_wvl2E, subtract_background
+from .processing import jacobian_correction_wvl2E, subtract_background
 
 # ---------------------------------------------------------------------------
 # StackLayer — one material slab in the heterostructure

@@ -186,15 +186,21 @@ plotting.plot_spectrum(scan, index_fast = 3, index_slow = 1)  # by position
 
 Fit a Lorentzian (or Gaussian) to a chosen spectral window at every sweep point:
 
+Background subtraction is **not** an argument here. It is declared once when the scan
+is loaded, with `bg_region_nm=` or `bg_region_eV=` on the loader, and `fit_scan_peak`
+then fits the most-corrected array the scan holds — so a declared pedestal is already
+gone, on either axis. What the fit adds is `baseline`, a flat or sloping offset fitted
+*alongside* the peak so an un-subtracted pedestal cannot inflate the amplitude and width:
+
 ```python
 from tmdc_optics_tools import fitting
 
 results = fitting.fit_scan_peak(
     scan,
-    x_axis    = "energy",
-    x_range   = (1.30, 1.42),   # eV — zoom into your exciton
-    model     = "lorentzian",
-    bg_region = (1.20, 1.28),   # eV — region used for background subtraction
+    x_axis   = "energy",
+    x_range  = (1.30, 1.42),   # eV — zoom into your exciton
+    model    = "lorentzian",
+    baseline = "constant",     # the default: a flat offset fitted with the peak
 )
 
 # results is a list of FitResult, one per sweep
@@ -230,11 +236,11 @@ The DC Stark shift gives the out-of-plane dipole length of an interlayer exciton
 
 ```python
 result = fitting.extract_dipole_length(
-    scan,
+    scan,                          # background declared at load, as in §5
     x_range      = (1.30, 1.42),   # eV — spectral window for peak fitting
     model        = "lorentzian",
     Efield_range = (-8, 8),        # mV/nm — restrict to linear Stark regime
-    bg_region    = (1.20, 1.28),   # eV — background subtraction
+    baseline     = "constant",     # the default, passed to every peak fit
 )
 print(result)
 # DipoleResult

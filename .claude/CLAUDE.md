@@ -310,8 +310,9 @@ bwarea semantics are wanted at all.
   `result` instead of its artists — the standing counter-example to *parameters earn
   their place*. New code must not copy it.
 - README still names `AttoCubePLScan`, which does not exist — the class is
-  `AttoCubeSpectralSweep`. (`plot_pl_map` and `bg_region=` on `fit_scan_peak` are no
-  longer mentioned there; `__init__.py`'s quick start is fixed.)
+  `AttoCubeSpectralSweep`. (`plot_pl_map` is no longer mentioned there, `bg_region=` on
+  `fit_scan_peak` and `extract_dipole_length` went with **C2**, and `__init__.py`'s
+  quick start is fixed.)
 - `plot_current` is still named for the gate-sweep era, as are `plot_spectrum`'s
   hand-rolled `E_F` legend default and `SpectrumLinePanel`'s
   `sweep_attr`/`sweep_label`/`sweep_unit`. **Do the `plot_current` rename first** — two

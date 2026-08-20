@@ -3,16 +3,15 @@ name: docs
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
-# Allow one concurrent deployment, cancelling in-progress runs.
-concurrency:
-  group: pages
+# One run per branch: a new push cancels that branch's earlier run. Deliberately
+# not one group repo-wide — a pull request build must never cancel a main deploy.concurrency:
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -30,6 +29,11 @@ jobs:
           path: site
 
   deploy:
+    permissions: 
+      contents: read
+      pages: write
+      id-token: write
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     environment:

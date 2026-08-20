@@ -1,6 +1,6 @@
 # tmdc_optics_tools/constants.py
 
-from scipy.constants import h,c,e,hbar,epsilon_0
+from scipy.constants import h, c, e, epsilon_0
 
 # ----- Physical constants ----- #
 HC_EV_NM = (h * c / e) * 1e9   # eV·nm

@@ -1288,9 +1288,64 @@ are forwarded but never stored; `DiffusionResult` has no such field, though its
 docstring says the unit is "used only in `__repr__`".
 *Fix:* add the field and use it in `__repr__`, or drop the parameter.
 
-**B3.** `AttoCubeSampleImage.__init__` (`AttoCubeSampleImage.__init__`) doesn't forward
+**B3.** **[NOT A DEFECT — checked 2026-08-20]** `AttoCubeSampleImage.__init__`
+(`AttoCubeSampleImage.__init__`) doesn't forward
 `bg_region`/`bg_stat` to `_AttoCubeImage`, so sample images can't be
 background-corrected even though the base class supports it.
+
+*The mechanism is as described; the conclusion that it should be fixed is wrong.* The
+override replaces the base's four-parameter `__init__` with a two-parameter one and calls
+`super().__init__(path, laser_ref)`, so `bg_region` and `bg_stat` always take their
+defaults. Python does not merge the two signatures — the subclass's is the whole public
+signature — so `AttoCubeSampleImage(path, bg_region=R)` is a `TypeError`. The **attribute**
+still exists, because the base assigns it; it is simply always `None`.
+
+**A white-light sample image should not take a scalar background**, for two reasons that
+are about the measurement rather than the class:
+
+- **The corner of a reflection image is not dark.** `_apply_bg_region` subtracts one
+  number, the median or mean of a patch. On a real-space PL frame that patch has no
+  emitter in it, so the statistic estimates detector offset and stray counts. On a
+  white-light frame the same patch is substrate, and substrate reflects — the statistic
+  estimates the substrate's reflectance. Subtracting it yields counts measured from the
+  substrate, which reads like a contrast without being one: a reflectance contrast is a
+  dimensionless ratio.
+- **A reflectance image wants a ratio, not a difference.** ΔR/R = (I_sample − I_ref)/I_ref,
+  with a dark frame taken off both where one exists. A corner median is neither the dark
+  frame nor the reference, so `bg_region` is the wrong instrument even for a caller who
+  wants the sample image to be quantitative.
+
+Two supporting observations. **Nothing computes a number from a sample image** — its only
+consumers are `show_image` and `plotting.plot_image` — and both are invariant to an
+additive constant under autoscaling (`rescale_intensity(in_range="image")` maps min–max
+onto 0–1 either way). The knob would move `plot_image`'s colour-bar numbers and the
+meaning of an explicit `clim=`, and change nothing else. And where a white-light
+background genuinely has to go, the package already removes it with an estimator shaped
+like it: `AttoCubeLaserReferenceImage._preprocess` runs a white top-hat, because that
+background is flake contrast and reflectivity gradients rather than a constant.
+
+So the rule is not *images never get a background subtracted*. It is: subtract when a
+number is computed from the image, and use an estimator that matches the background's
+shape. A PL frame passes both tests — `analyse_diffusion_cloud` thresholds the image and
+takes areas and second moments, where a pedestal biases a fractional threshold and so the
+cloud area — which is why `bg_region` exists at all (**B1**). A sample image fails both.
+
+*What this entry points at that is real:* **there is no image-space reference or
+flat-field path anywhere in the package.** The reflectance / differential-reflectance and
+cavity work will need one, and it is a ratio against a second frame, not a region of the
+same one. That is a feature to design when a committed file needs it, not a parameter to
+forward.
+
+*Recorded* as a one-line **don't** in `.claude/CLAUDE.md`, and pinned by
+`tests/test_image_background_scope.py` (5 cases): a PL frame takes a region and applies
+the named statistic, `AttoCubeSampleImage` and `SingleImage` both refuse one at the
+signature, and both still carry `bg_region is None` so a viewer reading the attribute off
+a duck-typed image finds no region rather than an `AttributeError`. The `__init__`
+override is load-bearing because of that refusal — deleting it would inherit the base's
+parameters — and now says so in a comment.
+
+*Loose end, not fixed here:* `show_image(show_bg_region=True)` on an image with no region
+draws no box and still sets `legend=True`. Harmless, and its own small change.
 
 **B4.** `fitting.voigt_approx` is implemented but not reachable from any `fit_*`
 entry point; `constants.py` imports `hbar` unused.
@@ -2200,9 +2255,12 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
    (`sweep_atol=`); until one appears the entry is the evidence, not the work.
 3. **C1–C3** — the doc corrections, since they actively mislead. **C8** and **C9** join
    them, and both are cheapest taken by whatever next edits their function.
-4. **B2–B4, D1–D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
+4. **B2, D2–D6, D8, D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
    2026-08-10, and was not mechanical: the sketched fix would have introduced a second
-   instance of A5.)
+   instance of A5. **B3** was checked on 2026-08-20 and is not a defect. **B4** was half
+   wrong and half fixed the same day, as were **D1** and **D7** — none of the four was as
+   mechanical as this line assumed, because three of them were entries the code had
+   already overtaken.)
 5. **E2, E3, E5** — the remaining design calls, one at a time.
 6. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
    because it is the only breaking change on the list and touches `examples/`.

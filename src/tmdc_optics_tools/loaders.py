@@ -6080,8 +6080,32 @@ class AttoCubeSampleImage(_AttoCubeImage):
         Path to the CSV image file.
     laser_ref : AttoCubeLaserReferenceImage, optional
         Laser spot reference for annotation.
+
+    Notes
+    -----
+    Takes **no background region**, unlike :class:`AttoCubePLImage`, and
+    :attr:`bg_region` is therefore always ``None`` on an instance of this
+    class.  Both reasons are about what a white-light frame is rather than
+    about this class:
+
+    * A patch of a reflection image is substrate, and substrate reflects.  Its
+      median estimates the substrate's own reflectance, not a detector
+      pedestal, so subtracting it gives counts measured from the substrate —
+      which reads like a contrast without being one, a reflectance contrast
+      being a dimensionless ratio.
+    * The correction such an image wants is a **ratio** against a reference
+      frame, not a constant taken off it.  A single scalar is neither the dark
+      frame nor the reference.
+
+    Where a white-light background genuinely has to go, it is removed with an
+    estimator shaped like it: :class:`AttoCubeLaserReferenceImage` runs a white
+    top-hat before fitting the spot, because the background there is flake
+    contrast and reflectivity gradients rather than a constant.
     """
 
+    # Load-bearing despite forwarding nothing: deleting this override would
+    # inherit the base's bg_region/bg_stat parameters, which is what the Notes
+    # above refuse.  laser_ref is the only extra this class accepts.
     def __init__(self, path: str, laser_ref: "AttoCubeLaserReferenceImage" = None):
         super().__init__(path, laser_ref)
 

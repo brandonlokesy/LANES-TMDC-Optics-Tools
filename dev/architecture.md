@@ -996,7 +996,7 @@ has aligned the axes themselves has a route in, with no extra API.
 | `AttoCubePLVabScan` | — | compatibility shim over the above; raises `FutureWarning` |
 | `SingleSpectrum` | a 2-row CSV (row 0 = λ/nm, row 1 = counts) | mirrors the sweep's attribute names so plotting works unchanged |
 | `AttoCubePLScanRealSpace` | a directory of numeric-grid CSVs | image sequence for diffusion work |
-| `SingleImage`, `AttoCubeSampleImage`, `AttoCubePLImage` | one numeric-grid CSV | share `_AttoCubeImage` |
+| `SingleImage`, `AttoCubeSampleImage`, `AttoCubePLImage` | one numeric-grid CSV | share `_AttoCubeImage`; only `AttoCubePLImage` takes `bg_region=` — see below |
 | `AttoCubeLaserReferenceImage` | one numeric-grid CSV | fits the laser spot centre and 1/e² radius on construction |
 
 ## `AttoCubeTRPLSweep` — why a directory
@@ -1028,6 +1028,31 @@ ROIs. Everything it shares lives in `_AttoCubeSweep`.
 `_TRPL_TIME_UNIT` is the single place the ns/4-ps-bin assumption is written down. Any
 fitted lifetime inherits it, and it is consistent with the Picoharp rows and a
 ~78 MHz rep rate but **not independently confirmed**.
+
+## Which images take a background region
+
+`bg_region=` / `bg_stat=` live on `_AttoCubeImage` because that is where `img` is built,
+not because every image kind wants a pedestal removed. One of the four subclasses accepts
+them; the other three refuse, by taking a **narrower `__init__`**:
+
+| Class | `bg_region=` | Why |
+|---|---|---|
+| `AttoCubePLImage` | accepted | the corner is dark, and numbers are computed from the frame — `analyse_diffusion_cloud` thresholds it and takes areas and second moments, so a pedestal biases the cloud area |
+| `AttoCubeSampleImage` | refused | a white-light frame's corner is substrate, which reflects; the correction it wants is a ratio against a reference frame, not a constant |
+| `SingleImage` | refused | takes `path` only |
+| `AttoCubeLaserReferenceImage` | refused | removes its background with a **white top-hat** in `_preprocess`, an estimator shaped like the structured white-light background it faces |
+
+`AttoCubePLScanRealSpace` is not one of these — it is a sequence loader, not an
+`_AttoCubeImage` — but it takes the same two arguments for the same reason, and keeps the
+corrected frames in `load_frame_bg` so `load_frame` stays the file's own counts.
+
+The attribute exists on every one of them regardless — the base assigns it — and is
+`None` on the three that refuse. So a viewer reading `image.bg_region` off a duck-typed
+object finds no region rather than an `AttributeError`.
+
+There is **no image-space reference or flat-field path** in the package. Reflectance,
+differential reflectance and cavity work will need one, and it is a ratio against a
+second frame rather than a region of the same one.
 
 ---
 

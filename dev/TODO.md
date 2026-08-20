@@ -59,6 +59,9 @@
       `(n_points, n_slow, n_fast)` as a view.
     - **Still open: plot it as a map.** `as_grid()` plus `nesting.fast_axis` /
       `slow_axis` are the inputs a `plot_spatial_map` needs; nothing draws one yet.
+      Not covered by 0028: that gave `plot_spectral_map` nest pinning, so it draws
+      spectra along *one line* of the grid. This entry wants a fitted quantity —
+      peak position, intensity — over the whole real-space x/y plane.
 - TRPL follow-ups (see E12):
     - No plotting: `_resolve_x_axis` knows only energy/wavelength. Let it ask the
       scan for its own axis instead of adding a third string.

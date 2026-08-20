@@ -390,6 +390,133 @@ def _signal_label(obj, normalized: bool = False, source: str = None) -> str:
     return f"{name} ({unit})" if unit else name
 
 
+def _resolve_sweep_block(scan, *, fast=None, index_fast=None,
+                         slow=None, index_slow=None,
+                         axis           : str = "sweep",
+                         axis_param     : str = "series_axis",
+                         spectra_source : str = "best",
+                         x_axis         : str = "energy",
+                         what           : str = "") -> tuple:
+    """
+    Return ``(data, coord, coord_label)`` — the spectra to draw and their coordinate.
+
+    A flat sweep is already a line of points and needs no pinning.  A declared
+    nest is pinned on one of its two axes, and the axis left free is the one the
+    spectra run along.  Either way *data* comes back ``(n_pixels, n)`` and *coord*
+    is the matching ``(n,)`` array, so a caller never branches on
+    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.is_nested`.
+
+    Parameters
+    ----------
+    scan : AttoCubeSpectralSweep
+    fast, slow : float, optional
+        Coordinate at which to hold that nest axis.  Nested scans only.
+    index_fast, index_slow : int, optional
+        The same, by integer position.  Exactly one of these four on a nest, none
+        on a flat sweep.
+    axis : str
+        Which quantity a flat sweep's coordinate is read against — ``"sweep"``,
+        a registry key, or a raw row label.  Flat sweeps only.
+    axis_param : str
+        The caller's own name for *axis*, interpolated into the message that
+        refuses it, so the error names the keyword that was typed.
+    spectra_source : str
+        A :data:`~tmdc_optics_tools.loaders._SPECTRA_SOURCES` key.
+    x_axis : {"energy", "wavelength"}
+        Which spectral ordering *spectra_source* is served on.
+    what : str
+        The calling function, named at the front of every message.
+
+    Returns
+    -------
+    tuple of (np.ndarray, np.ndarray, str)
+        On a pinned nest *data* is a **view** into the scan's own array, as the
+        accessors return; on a flat sweep it is whatever the source resolver
+        holds.  A caller that filters or smooths it must copy first.
+
+    Raises
+    ------
+    ValueError
+        If the nest pinning does not match the scan — none named on a nest, more
+        than one named, or any named on a flat sweep — or if *axis* is not
+        ``"sweep"`` on a nested scan, or names no quantity this scan holds.
+
+    Notes
+    -----
+    Selection is not re-implemented here: a nest goes through
+    :meth:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.get_spectrum_at` and
+    :meth:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.get_spectrum_by_index`,
+    so an ambiguous coordinate is refused and a distant one warns exactly as they
+    do.
+    """
+    pinned = [name for name, arg in (("fast", fast), ("index_fast", index_fast),
+                                     ("slow", slow), ("index_slow", index_slow))
+              if arg is not None]
+
+    if scan.is_nested:
+        if len(pinned) != 1:
+            raise ValueError(
+                f"{what}: this sweep is a declared nest "
+                f"({scan.nesting}), so name exactly one axis to hold: fast=, "
+                f"index_fast=, slow= or index_slow=. The axis left free is the "
+                f"one the spectra run along. "
+                f"Got {', '.join(pinned) if pinned else 'none'}. "
+                f"Naming two pins every axis and leaves a single spectrum, "
+                f"which is get_spectrum_at(); for the whole grid, use "
+                f"scan.as_grid()."
+            )
+        if axis != "sweep":
+            raise ValueError(
+                f"{what}: {axis_param}={axis!r} reads the sweep points "
+                f"against another quantity, which applies to a flat "
+                f"sweep. This one is a declared nest ({scan.nesting}), where the "
+                f"free axis already carries its own coordinate, label and unit, "
+                f"so the plot follows it. To read it against a different "
+                f"quantity, declare the nest in it with fast_sweep= / "
+                f"slow_sweep= at load time."
+            )
+
+        held_fast = fast is not None or index_fast is not None
+
+        if index_fast is not None:
+            data = scan.get_spectrum_by_index(
+                fast=index_fast, source=spectra_source, x_axis=x_axis)
+        elif fast is not None:
+            data = scan.get_spectrum_at(
+                fast=fast, source=spectra_source, x_axis=x_axis)
+        elif index_slow is not None:
+            data = scan.get_spectrum_by_index(
+                slow=index_slow, source=spectra_source, x_axis=x_axis)
+        else:
+            data = scan.get_spectrum_at(
+                slow=slow, source=spectra_source, x_axis=x_axis)
+
+        # Holding the fast axis strides across the grid and returns one spectrum
+        # per *slow* point, so the free axis — the other one — is what varies
+        # along the columns of `data`, and therefore what the coordinate means.
+        nest        = scan.nesting
+        coord       = np.asarray(
+            nest.slow_axis if held_fast else nest.fast_axis, dtype=float)
+        coord_label = nest.slow_axis_label if held_fast else nest.fast_axis_label
+    else:
+        if pinned:
+            raise ValueError(
+                f"{what}: {', '.join(pinned)} needs a declared "
+                f"nest, and this sweep is flat ({scan.n_sweeps} points). A flat "
+                f"sweep is already one line of points, so pass none of fast=, "
+                f"index_fast=, slow=, index_slow=. If these points are a grid, "
+                f"declare it with fast_sweep= and slow_sweep= at load time."
+            )
+        data = _resolve_spectra(scan, spectra_source, x_axis)
+        # param= so a bad name reports itself under the caller's own keyword, not
+        # as the axis= of the loader accessors the resolver is shared with.
+        values, label, unit = scan._lookup_axis(axis, param=axis_param)
+        coord       = np.asarray(values, dtype=float)
+        coord_label = f"{label} ({unit})" if unit else label
+
+    return data, coord, coord_label
+
+
 # ---------------------------------------------------------------------------
 # 2-D map plots
 # ---------------------------------------------------------------------------
@@ -399,6 +526,15 @@ def plot_spectral_map(
     ax             = None,
     figsize        : tuple = (6, 4),
     dpi            : int   = None,
+    # --- nest pinning (nested scans only) ---
+    fast           : float = None,
+    index_fast     : int   = None,
+    slow           : float = None,
+    index_slow     : int   = None,
+    # --- which spectra, read against what ---
+    spectra_source : str   = "best",
+    y_axis         : str   = "sweep",
+    # --- spectral axis ---
     x_axis         : str   = "energy",
     cmap           : ColormapLike = "magma",
     median_kernel  : int   = 3,
@@ -408,29 +544,73 @@ def plot_spectral_map(
     rescale_img    : bool  = False,
 ) -> tuple:
     """
-    Plot every spectrum of a sweep as a 2-D map: spectral axis against sweep axis.
+    Plot a set of spectra as a 2-D map: spectral axis against sweep axis.
 
-    Works for any sweep an
-    :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` can hold — gate
-    voltage, displacement field, excitation power, piezo position, or the bare
-    sweep index.  The y-axis and its label come from
-    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.sweep_axis` and
-    :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.sweep_axis_label`,
-    so whatever was declared as ``sweep=`` at load time is what is plotted.
+    A flat sweep is itself the map, one row per sweep point.  A declared nest is
+    pinned on one of its two axes, and the axis left free becomes the y-axis, so
+    a raster gives a map along one line of it rather than along the flat index.
 
     Corrections are configured at load time on the scan object (via
-    ``bg_region_nm``, ``bg_region_eV``, ``apply_jacobian`` and ``cosmic_rays``).
-    This function plots the most-corrected array the scan has for the chosen axis
-    — :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_energy_spectra`
-    or :attr:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep.best_spectra` — so
-    a declared background or cosmic-ray repair reaches the map on either axis.
+    ``bg_region_nm``, ``bg_region_eV``, ``apply_jacobian`` and ``cosmic_rays``),
+    and *spectra_source* chooses which of the resulting states is drawn.
 
     Parameters
     ----------
     scan : AttoCubeSpectralSweep
     ax : matplotlib.axes.Axes, optional
         Creates a new figure if ``None``.
+    figsize : tuple
+        Figure size, used only when *ax* is ``None``.
+    dpi : int, optional
+        Figure resolution, used only when *ax* is ``None``.
+
+    Nest pinning
+    ------------
+    fast, slow : float, optional
+        Coordinate at which to hold that nest axis.  The other axis becomes the
+        y-axis.  Nested scans only.
+    index_fast, index_slow : int, optional
+        The same, by integer position rather than by coordinate.
+
+        Name exactly one of these four on a nested scan and none of them on a
+        flat one.  Holding the fast axis gives one row per slow point and vice
+        versa, so the map always runs along the axis *not* named.
+
+    Spectra
+    -------
+    spectra_source : str
+        Which correction state to plot; *x_axis* decides the axis it is served on.
+
+        * ``"best"``  — the most-corrected state the scan holds.  **Default.**
+        * ``"raw"``   — the file's own counts.
+        * ``"cr"``    — cosmic-ray repaired.  Requires ``cosmic_rays`` at load time.
+        * ``"bg"``    — background-subtracted.  Requires ``bg_region_nm`` /
+          ``bg_region_eV`` or ``bg_spectrum`` at load time.
+        * ``"contrast"`` — ΔR/R₀ against the reference.  Requires ``reference``.
+        * ``"pre_jacobian"`` — the raw counts on the energy axis with the Jacobian
+          left off, whatever ``apply_jacobian`` says.  Energy axis only.
+
+    Axes
+    ----
+    y_axis : str
+        Which quantity the sweep points are read against — the coordinate that
+        positions the rows and labels the y-axis.  ``"sweep"`` (default) is the
+        scan's declared sweep axis.  Anything else is spelled as ``sweep=``
+        spells it: a registry key such as ``"top_voltage"`` or
+        ``"carrier_density"``, or a raw row label such as ``"V_A"``.  Use it when
+        a scan is declared in one coordinate and the figure is wanted in another
+        — a displacement-field sweep driven by both gates, read in top-gate volts.
+
+        This is **not** *x_axis*'s vocabulary: ``"energy"`` and ``"wavelength"``
+        order the detector pixels and are not sweep quantities.
+
+        Flat sweeps only.  On a nest the free axis carries its own coordinate,
+        label and unit, and the y-axis follows it.
     x_axis : {"energy", "wavelength"}
+        Which spectral ordering to plot along x.
+
+    Appearance
+    ----------
     cmap : str, Colormap, or sequence of colours
         Passed to :func:`get_cmap`.
     median_kernel : int
@@ -439,16 +619,38 @@ def plot_spectral_map(
         Colour axis limits. Auto-scaled if ``None``.
     colorbar : bool
     colorbar_label : str, optional
-        Colour-bar label.  Derived from the scan's measurement type when
-        ``None`` — a reflectance sweep is labelled as reflectance, and a
-        dimensionless ratio gets no unit.  A string is used **verbatim**, so
-        include the unit.
+        Colour-bar label.  Derived from the scan's measurement type and
+        *spectra_source* when ``None`` — a reflectance sweep is labelled as
+        reflectance, and a dimensionless ratio gets no unit.  A string is used
+        **verbatim**, so include the unit.
     rescale_img : bool
         Default is `False`. If `True`, rescales intensity to [0, 1] before plotting.
 
     Returns
     -------
     fig, ax, mesh
+
+    Raises
+    ------
+    ValueError
+        If the nest pinning does not match the scan — none named on a nest, more
+        than one named, or any named on a flat sweep; or if *y_axis* is not
+        ``"sweep"`` on a nested scan, or names no quantity this scan holds.
+
+    See Also
+    --------
+    tmdc_optics_tools.loaders.AttoCubeSpectralSweep.get_spectrum_at :
+        the spectra a pinned nest axis selects, without drawing them.
+    tmdc_optics_tools.loaders.AttoCubeSpectralSweep.as_grid :
+        a nested sweep reshaped onto its grid, rather than pinned to a line.
+
+    Examples
+    --------
+    >>> fig, ax, mesh = plot_spectral_map(power_scan)            # doctest: +SKIP
+
+    A gate × power nest, mapped against gate voltage at one power:
+
+    >>> plot_spectral_map(scan, slow=50.0)                       # doctest: +SKIP
     """
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -456,13 +658,25 @@ def plot_spectral_map(
         fig = ax.get_figure()
 
     x, xlabel = _resolve_x_axis(scan, x_axis)
-    y, ylabel  = scan.sweep_axis, scan.sweep_axis_label
+    data, y, ylabel = _resolve_sweep_block(
+        scan,
+        fast=fast, index_fast=index_fast, slow=slow, index_slow=index_slow,
+        axis=y_axis, axis_param="y_axis",
+        spectra_source=spectra_source, x_axis=x_axis,
+        what="plot_spectral_map()",
+    )
 
-    x_m = np.tile(x[:, np.newaxis], (1, scan.n_sweeps))
+    # (n_pixels, 1) and (1, n) tiled to the mesh's (n_pixels, n) grid: one x per
+    # detector pixel down every column, one y per sweep point across every row.
+    # n is the points actually drawn, which a pinned nest shortens — reading
+    # scan.n_sweeps here would describe the whole flat sweep instead.
+    x_m = np.tile(x[:, np.newaxis], (1, y.size))
     y_m = np.tile(y[np.newaxis, :], (scan.n_pixels, 1))
 
-    # Copied because the filters below build on it; the resolver itself does not.
-    data = _resolve_spectra(scan, "best", x_axis).copy()
+    # Copied because the filters below build on it, and because a pinned nest
+    # arrives as a view into the scan's own array — see get_spectrum_at — which
+    # the never-mutate-after-load rule reaches.
+    data = np.array(data)
 
     if median_kernel > 1:
         data = processing.smooth_median(data, kernel=median_kernel)
@@ -483,7 +697,8 @@ def plot_spectral_map(
     if colorbar:
         cb = fig.colorbar(mesh, ax=ax, pad=0.02)
         cb.set_label(colorbar_label if colorbar_label is not None
-                     else _signal_label(scan, normalized=rescale_img))
+                     else _signal_label(scan, normalized=rescale_img,
+                                        source=spectra_source))
 
     return fig, ax, mesh
 
@@ -4060,71 +4275,15 @@ def plot_spectral_series(
 
     # --- which spectra become the series -----------------------------------
     # A nest is pinned on one axis and the free axis becomes the series; a flat
-    # sweep is already the series.  Either way `data` ends up (n_pixels, n) and
-    # `series` is the matching (n,) coordinate that colours the lines.
-    pinned = [name for name, arg in (("fast", fast), ("index_fast", index_fast),
-                                     ("slow", slow), ("index_slow", index_slow))
-              if arg is not None]
-
-    if scan.is_nested:
-        if len(pinned) != 1:
-            raise ValueError(
-                f"plot_spectral_series(): this sweep is a declared nest "
-                f"({scan.nesting}), so name exactly one axis to hold: fast=, "
-                f"index_fast=, slow= or index_slow=. The axis left free becomes "
-                f"the series. Got {', '.join(pinned) if pinned else 'none'}. "
-                f"Naming two pins every axis and leaves a single spectrum, "
-                f"which is get_spectrum_at(); for the whole grid, use "
-                f"scan.as_grid()."
-            )
-        if series_axis != "sweep":
-            raise ValueError(
-                f"plot_spectral_series(): series_axis={series_axis!r} reads the "
-                f"series against another quantity, which applies to a flat "
-                f"sweep. This one is a declared nest ({scan.nesting}), where the "
-                f"free axis already carries its own coordinate, label and unit, "
-                f"so the colours follow it. To colour by a different quantity, "
-                f"declare the nest in it with fast_sweep= / slow_sweep= at load "
-                f"time."
-            )
-
-        held_fast = fast is not None or index_fast is not None
-
-        if index_fast is not None:
-            data = scan.get_spectrum_by_index(
-                fast=index_fast, source=spectra_source, x_axis=x_axis)
-        elif fast is not None:
-            data = scan.get_spectrum_at(
-                fast=fast, source=spectra_source, x_axis=x_axis)
-        elif index_slow is not None:
-            data = scan.get_spectrum_by_index(
-                slow=index_slow, source=spectra_source, x_axis=x_axis)
-        else:
-            data = scan.get_spectrum_at(
-                slow=slow, source=spectra_source, x_axis=x_axis)
-
-        # Holding the fast axis strides across the grid and returns one spectrum
-        # per *slow* point, so the free axis — the other one — is what varies
-        # along the columns of `data`, and therefore what the colours mean.
-        nest         = scan.nesting
-        series       = np.asarray(
-            nest.slow_axis if held_fast else nest.fast_axis, dtype=float)
-        series_label = nest.slow_axis_label if held_fast else nest.fast_axis_label
-    else:
-        if pinned:
-            raise ValueError(
-                f"plot_spectral_series(): {', '.join(pinned)} needs a declared "
-                f"nest, and this sweep is flat ({scan.n_sweeps} points). A flat "
-                f"sweep is already the series, so pass none of fast=, "
-                f"index_fast=, slow=, index_slow=. If these points are a grid, "
-                f"declare it with fast_sweep= and slow_sweep= at load time."
-            )
-        data = _resolve_spectra(scan, spectra_source, x_axis)
-        # param= so a bad name reports itself as series_axis=, not as the axis=
-        # of the loader accessors the resolver is shared with.
-        values, label, unit = scan._lookup_axis(series_axis, param="series_axis")
-        series       = np.asarray(values, dtype=float)
-        series_label = f"{label} ({unit})" if unit else label
+    # sweep is already the series.  Either way `data` comes back (n_pixels, n)
+    # and `series` is the matching (n,) coordinate that colours the lines.
+    data, series, series_label = _resolve_sweep_block(
+        scan,
+        fast=fast, index_fast=index_fast, slow=slow, index_slow=index_slow,
+        axis=series_axis, axis_param="series_axis",
+        spectra_source=spectra_source, x_axis=x_axis,
+        what="plot_spectral_series()",
+    )
 
     # --- subset: which points of the series are drawn -----------------------
     # Bounds are read on `series`, the same coordinate that colours the lines,

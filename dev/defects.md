@@ -1268,6 +1268,17 @@ background-corrected even though the base class supports it.
 **B4.** `fitting.voigt_approx` is implemented but not reachable from any `fit_*`
 entry point; `constants.py` imports `hbar` unused.
 
+**[HALF WRONG AS FILED; the other half FIXED — 2026-08-20]** `voigt_approx` **is**
+reachable, and was made so by the PR #19 fitting work: `fit_voigt` passes it to
+`_fit_single_peak`, and `multi_voigt` sums one call per peak, which is what
+`fit_multi_voigt`, `fit_raman_modes` and `fit_pl_peaks` all fit with. `plotting`
+reconstructs each component with it too. Nothing to do.
+
+The `hbar` half stood, and is fixed here: `scipy.constants.hbar` was imported by
+`constants.py` and read by nothing in the package. `h`, `c`, `e` and `epsilon_0` on the
+same line are all used — `h`/`c`/`e` build `HC_EV_NM`, and `e`/`epsilon_0` are
+re-exported as `E_CHARGE`/`EPS_0` — so only the one name went.
+
 ## C. Documentation that contradicts the code
 
 Worse than missing docs, because they will be acted on.

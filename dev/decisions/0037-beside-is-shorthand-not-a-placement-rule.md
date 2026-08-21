@@ -28,7 +28,7 @@ So a new argument buys no capability. `dev/design-principles.md` asks whether an
 argument does something the caller cannot readily supply themselves, and three
 records in a row have refused second spellings on exactly this basis: a
 configuration file for the folder names (0032, 0034), a `--mirror` flag (0035), a
-`processed_dir=` parameter (0034).
+`processed_dir=` parameter (0032).
 
 What survives that test is a narrower claim. `out=` takes a **path**, and a
 mistyped path does not fail — it is still a valid destination, so the output

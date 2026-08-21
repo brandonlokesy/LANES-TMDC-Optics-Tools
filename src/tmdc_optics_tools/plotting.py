@@ -390,6 +390,39 @@ def _signal_label(obj, normalized: bool = False, source: str = None) -> str:
     return f"{name} ({unit})" if unit else name
 
 
+def _refuse_rescaled_clim(clim, rescale_img: bool, what: str) -> None:
+    """
+    Refuse *clim* together with *rescale_img*.
+
+    *clim* is read in the data's own units, and the rescale remaps the values to
+    [0, 1] before the colour scale is applied, so limits in those units fall
+    outside the rescaled range and every cell lands on the same colour.  One
+    guard for both callers, so the two messages cannot drift apart.
+
+    Parameters
+    ----------
+    clim : tuple of (vmin, vmax) or None
+    rescale_img : bool
+    what : str
+        The calling function, named at the front of the message.
+
+    Raises
+    ------
+    ValueError
+        If both are given.
+    """
+    if clim is not None and rescale_img:
+        raise ValueError(
+            f"{what}: clim={clim} is read in the data's own units, and "
+            f"rescale_img=True remaps the values to [0, 1] before the colour "
+            f"scale is applied, so these limits fall outside the rescaled range "
+            f"and every cell draws as one colour. Keep clim= and drop "
+            f"rescale_img= to set the limits in the data's units, or keep "
+            f"rescale_img= and drop clim= — rescaled values already span the "
+            f"colour scale."
+        )
+
+
 def _resolve_sweep_block(scan, *, fast=None, index_fast=None,
                          slow=None, index_slow=None,
                          axis           : str = "sweep",
@@ -537,7 +570,7 @@ def plot_spectral_map(
     # --- spectral axis ---
     x_axis         : str   = "energy",
     cmap           : ColormapLike = "magma",
-    median_kernel  : int   = 3,
+    median_kernel  : int   = 1,
     clim           : tuple = None,
     colorbar       : bool  = True,
     colorbar_label : str   = None,
@@ -614,9 +647,13 @@ def plot_spectral_map(
     cmap : str, Colormap, or sequence of colours
         Passed to :func:`get_cmap`.
     median_kernel : int
-        2-D median filter size. Set to 1 to disable.
+        Median filter size, applied to the block before it is drawn.  The
+        footprint is square, so a value ``n`` above ``1`` takes the median over
+        ``n`` detector pixels **and** ``n`` neighbouring sweep points, which are
+        independent measurements.  ``1``, the default, applies no filter.
     clim : tuple of (vmin, vmax), optional
-        Colour axis limits. Auto-scaled if ``None``.
+        Colour axis limits, in the data's own units.  Auto-scaled if ``None``.
+        Cannot be given together with *rescale_img*.
     colorbar : bool
     colorbar_label : str, optional
         Colour-bar label.  Derived from the scan's measurement type and
@@ -624,18 +661,28 @@ def plot_spectral_map(
         reflectance, and a dimensionless ratio gets no unit.  A string is used
         **verbatim**, so include the unit.
     rescale_img : bool
-        Default is `False`. If `True`, rescales intensity to [0, 1] before plotting.
+        Rescale the whole map to [0, 1] before plotting, which marks a derived
+        colour-bar label ``norm.``.  Default ``False``.  With the colour limits auto-scaled
+        this changes the numbers on the colour bar and not the colours drawn,
+        since the scale already spans the data either way.  Cannot be given
+        together with *clim*.
 
     Returns
     -------
     fig, ax, mesh
+        *mesh* is a :class:`~matplotlib.collections.QuadMesh` whose array runs
+        ``(n_sweep_points, n_pixels)`` — matplotlib's row-major order, one row
+        per sweep point — the transpose of the ``(n_pixels, n)`` block the scan
+        serves.
 
     Raises
     ------
     ValueError
         If the nest pinning does not match the scan — none named on a nest, more
         than one named, or any named on a flat sweep; or if *y_axis* is not
-        ``"sweep"`` on a nested scan, or names no quantity this scan holds.
+        ``"sweep"`` on a nested scan, or names no quantity this scan holds.  Or
+        if *clim* and *rescale_img* are given together: the limits are read in
+        the data's own units, which the rescale replaces.
 
     See Also
     --------
@@ -652,6 +699,8 @@ def plot_spectral_map(
 
     >>> plot_spectral_map(scan, slow=50.0)                       # doctest: +SKIP
     """
+    _refuse_rescaled_clim(clim, rescale_img, "plot_spectral_map()")
+
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     else:
@@ -666,13 +715,6 @@ def plot_spectral_map(
         what="plot_spectral_map()",
     )
 
-    # (n_pixels, 1) and (1, n) tiled to the mesh's (n_pixels, n) grid: one x per
-    # detector pixel down every column, one y per sweep point across every row.
-    # n is the points actually drawn, which a pinned nest shortens — reading
-    # scan.n_sweeps here would describe the whole flat sweep instead.
-    x_m = np.tile(x[:, np.newaxis], (1, y.size))
-    y_m = np.tile(y[np.newaxis, :], (scan.n_pixels, 1))
-
     # Copied because the filters below build on it, and because a pinned nest
     # arrives as a view into the scan's own array — see get_spectrum_at — which
     # the never-mutate-after-load rule reaches.
@@ -685,8 +727,15 @@ def plot_spectral_map(
         data = rescale_intensity(data, in_range="image", out_range=(0, 1))
 
     vmin, vmax = clim if clim is not None else (None, None)
+
+    # 1-D x and y: pcolormesh builds the mesh itself, so no (n_pixels, n)
+    # coordinate arrays are allocated here.  It reads C as (rows=y, cols=x) and
+    # data is (n_pixels, n), so the block goes in transposed.  A 2-D coordinate
+    # pair draws the same quads; what the 1-D pair adds is that matplotlib
+    # checks both lengths against C, rather than accepting any two arrays of
+    # equal shape.
     mesh = ax.pcolormesh(
-        x_m, y_m, data,
+        x, y, data.T,
         cmap=get_cmap(cmap), shading="auto",
         vmin=vmin, vmax=vmax,
     )
@@ -1449,9 +1498,13 @@ def plot_image(
         measurement type to derive anything better from.  A string is used
         **verbatim**, so include the unit.
     rescale_img : bool
-        Rescale intensity to [0, 1] before plotting.
+        Rescale intensity to [0, 1] before plotting, which marks a derived
+        colour-bar label ``norm.``.  With the colour limits auto-scaled this changes the numbers
+        on the colour bar and not the colours drawn, since the scale already
+        spans the data either way.  Cannot be given together with *clim*.
     clim : tuple of (vmin, vmax), optional
-        Colour axis limits. Auto-scaled if ``None``.
+        Colour axis limits, in the image's own units.  Auto-scaled if ``None``.
+        Cannot be given together with *rescale_img*.
     xlabel, ylabel : str
         Axis labels (ignored when *show_axes* is ``False``).
     show_axes : bool
@@ -1486,7 +1539,15 @@ def plot_image(
     ImagePlot
         Named 5-tuple of the figure, axes, image, laser-boundary circle and
         colorbar.
+
+    Raises
+    ------
+    ValueError
+        If *clim* and *rescale_img* are given together: the limits are read in
+        the image's own units, which the rescale replaces.
     """
+    _refuse_rescaled_clim(clim, rescale_img, "plot_image()")
+
     img = image.img if hasattr(image, "img") else np.asarray(image, dtype=float)
 
     if ax is None:

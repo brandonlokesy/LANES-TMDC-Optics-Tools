@@ -140,7 +140,8 @@ fig, ax, mesh = plotting.plot_spectral_map(
     scan,
     x_axis        = "energy",      # or "wavelength"
     cmap          = "magma",
-    median_kernel = 3,             # 2D median filter; set to 1 to disable
+    median_kernel = 1,             # 1 = no filter. Above 1 medians a square
+                                   # footprint, across sweeps as well as pixels
 )
 ```
 

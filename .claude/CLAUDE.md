@@ -273,6 +273,16 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
   don't fork `_resolve_sweep_block` back into either of them. A flat-index map or
   series puts consecutive rows at unrelated settings. Don't respell the map's
   `y_axis=` as `series_axis=`, or give it `x_axis=`'s energy/wavelength vocabulary.
+- Don't rebuild `plot_spectral_map`'s coordinate meshes — not with `np.tile`, and not
+  with `np.broadcast_to` to keep the old orientation. `pcolormesh` gets the 1-D pair and
+  the block transposed, so `mesh.get_array()` runs `(n_sweeps, n_pixels)`. Don't flip it
+  back, and don't `reshape` a mesh array where a transpose is meant — a reshape
+  scrambles instead of failing.
+- Don't make `clim=` and `rescale_img=` work together, in `plot_spectral_map` or
+  `plot_image`. The pair is refused through one guard, `_refuse_rescaled_clim`: don't
+  downgrade it to a warning, don't give each function its own copy, and don't rescale
+  the limits alongside the data. `clim=` is read in the data's own units and the rescale
+  replaces them.
 - Don't make the accessors return one match for an ambiguous coordinate.
 - Don't give `plot_spectrum` a positional `value`, or truncate a fractional index.
 - Don't append to a caller's label string — `None` derives, a string is verbatim.
@@ -338,10 +348,6 @@ bwarea semantics are wanted at all.
   also *suppresses repeats*, so it is a diagnostics failure rather than a cosmetic one.
   Its own pass, not a character changed while passing through. **Trace by measuring,
   not by reading `def` lines.**
-- `plot_spectral_map`'s `median_kernel` should default to `1` (off). The current `3`
-  runs a 2-D median filter that smooths across the sweep axis, mixing physically
-  independent sweeps. Keep 2-D available, just not by default. (`plot_pl_map_Vab_scan`
-  is only a deprecation shim onto it, so fixing the shim fixes nothing.)
 - `DiffusionCloudPanel` accepts a `var_array` shorter than the animation and raises
   partway through rendering, and analyses every frame regardless of how many are being
   shown. Both want `diffusion`'s first tests, which do not exist yet.

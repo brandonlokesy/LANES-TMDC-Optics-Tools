@@ -1,7 +1,7 @@
 """
 Tests for ``plotting.plot_spectral_map`` and its deprecated alias.
 
-Four things are pinned. First, the y-axis comes from ``sweep_axis`` rather than
+Six things are pinned. First, the y-axis comes from ``sweep_axis`` rather than
 the ``gate_axis`` alias, which is what lets the alias be deleted: a test that
 only checked the values would pass either way, so the declared sweep is varied
 (index, power, piezo) and the axis compared against the property.
@@ -17,6 +17,15 @@ called, including that a contrast source is not labelled as PL.
 
 Fourth, ``plot_pl_map_Vab_scan`` warns and then produces a figure identical to
 the new name's — a shim that warns but has drifted is worse than no shim.
+
+Fifth, ``median_kernel`` runs no filter unless a kernel is named, and still runs
+one when it is.  The other array comparisons here pass ``median_kernel=1``, so
+they cannot see the default; one test names no kernel so that it can.
+
+Sixth, the mesh holds one row per sweep point.  ``pcolormesh`` reads ``C`` as
+(rows=y, cols=x) and the map's y is the sweep axis, so the ``(n_pixels, n)``
+block is handed over transposed; a test that only checked values would not
+notice a flip, and every coordinate assertion here depends on the orientation.
 """
 
 import matplotlib
@@ -63,10 +72,11 @@ def test_y_axis_is_the_declared_sweep(csv_path, sweep, expected):
     fig, ax, mesh = plotting.plot_spectral_map(scan)
 
     # shading="auto" resolves to "nearest" for equal-shaped X/Y/C, so
-    # _coordinates holds cell *edges* — (n_pixels+1, n_sweeps+1, 2), with the
-    # outer edges extrapolated half a cell beyond the data. Averaging adjacent
-    # edges of row 0 recovers the sweep-axis centres that were passed in.
-    y_edges = mesh._coordinates[0, :, 1]
+    # _coordinates holds cell *edges* — (n_sweeps+1, n_pixels+1, 2), with the
+    # outer edges extrapolated half a cell beyond the data. The sweep axis runs
+    # down the rows, so averaging adjacent edges of column 0 recovers the
+    # sweep-axis centres that were passed in.
+    y_edges = mesh._coordinates[:, 0, 1]
     y_centres = 0.5 * (y_edges[:-1] + y_edges[1:])
     assert np.allclose(y_centres, expected)
     assert np.allclose(scan.sweep_axis, expected)
@@ -81,6 +91,29 @@ def test_x_axis_switches_between_energy_and_wavelength(csv_path):
 
     assert ax_e.get_xlabel() == "Energy (eV)"
     assert ax_w.get_xlabel() == "Wavelength (nm)"
+
+
+# ---------------------------------------------------------------------------
+# The mesh orientation
+# ---------------------------------------------------------------------------
+
+def test_the_mesh_holds_one_row_per_sweep_point(csv_path):
+    """
+    ``pcolormesh`` reads ``C`` as (rows=y, cols=x), and y is the sweep axis.
+
+    Pinned by name because the block is handed over transposed: going back to a
+    2-D coordinate pair would flip it, and the other tests here would then fail
+    inside ``_y_centres`` or on a shape, neither of which says what changed.
+    """
+    scan = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL")
+    _, _, mesh = plotting.plot_spectral_map(scan, median_kernel=1)
+
+    assert mesh.get_array().shape == (scan.n_sweeps, scan.n_pixels)
+
+    # Column 0 of the drawn array is detector pixel 0 across every sweep point,
+    # which is row 0 of the block the scan serves.
+    drawn = np.asarray(mesh.get_array())
+    assert np.allclose(drawn[:, 0], scan.best_energy_spectra[0, :])
 
 
 # ---------------------------------------------------------------------------
@@ -139,9 +172,10 @@ def _y_centres(mesh) -> np.ndarray:
 
     ``shading="auto"`` resolves to ``"nearest"`` for equal-shaped X/Y/C, so
     ``_coordinates`` holds cell *edges* with the outer ones extrapolated half a
-    cell beyond the data; averaging adjacent edges of row 0 recovers the centres.
+    cell beyond the data.  The sweep axis runs down the rows, so averaging
+    adjacent edges of column 0 recovers the centres.
     """
-    edges = mesh._coordinates[0, :, 1]
+    edges = mesh._coordinates[:, 0, 1]
     return 0.5 * (edges[:-1] + edges[1:])
 
 
@@ -165,7 +199,7 @@ def test_holding_the_slow_axis_maps_the_fast_one(nested):
 
     assert np.allclose(_y_centres(mesh), nested.nesting.fast_axis)
     assert ax.get_ylabel() == nested.nesting.fast_axis_label
-    assert mesh.get_array().shape == (nested.n_pixels, N_FAST)
+    assert mesh.get_array().shape == (N_FAST, nested.n_pixels)
 
 
 def test_holding_the_fast_axis_maps_the_slow_one(nested):
@@ -173,7 +207,7 @@ def test_holding_the_fast_axis_maps_the_slow_one(nested):
 
     assert np.allclose(_y_centres(mesh), nested.nesting.slow_axis)
     assert ax.get_ylabel() == nested.nesting.slow_axis_label
-    assert mesh.get_array().shape == (nested.n_pixels, N_SLOW)
+    assert mesh.get_array().shape == (N_SLOW, nested.n_pixels)
 
 
 def test_a_position_pins_the_same_axis_as_a_coordinate(nested):
@@ -190,7 +224,7 @@ def test_the_mapped_block_is_the_scans_own_grid_row(nested):
         nested, index_slow=1, median_kernel=1)
 
     grid = nested.as_grid(nested.best_energy_spectra)   # (n_pixels, n_slow, n_fast)
-    assert np.allclose(mesh.get_array(), grid[:, 1, :])
+    assert np.allclose(mesh.get_array(), grid[:, 1, :].T)
 
 
 def test_the_nest_keywords_need_a_declared_nest(csv_path):
@@ -242,7 +276,7 @@ def test_the_raw_source_plots_the_files_own_counts(csv_path):
     _, _, mesh = plotting.plot_spectral_map(
         scan, spectra_source="raw", x_axis="wavelength", median_kernel=1)
 
-    assert np.allclose(mesh.get_array(), scan.spectra)
+    assert np.allclose(mesh.get_array(), scan.spectra.T)
 
 
 def test_the_contrast_source_takes_the_contrast_label(contrast_scan):
@@ -250,3 +284,33 @@ def test_the_contrast_source_takes_the_contrast_label(contrast_scan):
                                            spectra_source="contrast")
 
     assert fig.axes[-1].get_ylabel() == contrast_scan.contrast_label
+
+
+# ---------------------------------------------------------------------------
+# The median filter is off unless asked for, and reachable when it is
+# ---------------------------------------------------------------------------
+
+def test_no_median_filter_runs_unless_a_kernel_is_named(csv_path):
+    """
+    The default draws the scan's own array, unfiltered.
+
+    Every other array comparison in this file passes ``median_kernel=1``
+    explicitly, so all of them would keep passing whatever the default were.
+    This one names no kernel, which is what pins the default itself.
+    """
+    scan = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                                 apply_jacobian=False)
+    _, _, mesh = plotting.plot_spectral_map(
+        scan, spectra_source="raw", x_axis="wavelength")
+
+    assert np.allclose(mesh.get_array(), scan.spectra.T)
+
+
+def test_a_kernel_above_one_still_filters(csv_path):
+    """The square filter stays reachable, so opting in must change the array."""
+    scan = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                                 apply_jacobian=False)
+    _, _, mesh = plotting.plot_spectral_map(
+        scan, spectra_source="raw", x_axis="wavelength", median_kernel=3)
+
+    assert not np.allclose(mesh.get_array(), scan.spectra.T)

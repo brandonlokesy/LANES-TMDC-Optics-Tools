@@ -287,14 +287,17 @@ def test_curated_properties_are_read_only(scan):
 
 
 def test_constructor_overrides_flow_through_registry(csv_path):
+    # scale 1.0 means the raw row, which is not microwatts — so the unit is
+    # restated too.  Leaving it at the registry's "µW" is exactly the fault this
+    # argument exists to prevent, and the loader warns about it.
     s = AttoCubeSpectralSweep(
         str(csv_path), spectra_type="PL",
         gates={"top": "V_B", "bottom": "V_A"}, curated_labels={"power": "Galvo_X"},
-        curated_scales={"power": 1.0},
+        curated_scales={"power": 1.0}, curated_units={"power": "counts"},
     )
     # scale override: power now equals the raw row it was pointed at
     assert np.allclose(s.power, s.parameters["Galvo_X"])
-    assert s.curated_parameters["power"] == ("Galvo_X", 1.0, "µW")
+    assert s.curated_parameters["power"] == ("Galvo_X", 1.0, "counts")
     # gates override: v_top now reads the V_B row
     assert np.allclose(s.v_top, s.parameters["V_B"])
     assert s.curated_parameters["v_top"][0] == "V_B"
@@ -646,12 +649,147 @@ def test_curated_scales_flips_a_current_with_its_voltage(csv_path):
     # because curated_scales is keyed by curated attribute.  The scale *replaces*
     # the registry's, so flipping a current keeps its A -> nA factor: -1.0 here
     # would silently return amps.
+    #
+    # The units are restated unchanged because a sign flip does not change them:
+    # -1e9 still lands in nA.  That is also what silences the rescaled-without-a-
+    # unit warning, which is the point of stating them rather than a workaround.
     s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
-                              curated_scales={"v_top": -1.0, "i_top": -1e9})
+                              curated_scales={"v_top": -1.0, "i_top": -1e9},
+                              curated_units ={"v_top": "V",  "i_top": "nA"})
     assert np.allclose(s.v_top, -PARAMS["V_A"])
     assert np.allclose(s.i_top, -PARAMS["I_A"] * 1e9)
     # The raw rows are untouched by a curated scale.
     assert np.allclose(s["I_A"], PARAMS["I_A"])
+
+
+# ---------------------------------------------------------------------------
+# curated_units — the unit a rescaled row is now in (B6)
+#
+# The registry entry is (row, scale, unit) and all three are declarable.  The
+# unit matters beyond the registry's own view: a curated-backed sweep axis reads
+# its unit from here, so it reaches sweep_axis_label, the repr and every legend.
+# ---------------------------------------------------------------------------
+
+
+def test_a_unit_override_reaches_the_registry(csv_path):
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              curated_scales={"scanner_x": 12.5},
+                              curated_units ={"scanner_x": "µm"})
+    assert s.curated_parameters["scanner_x"] == ("Scanner X", 12.5, "µm")
+    # The scale still does what it always did.
+    assert np.allclose(s.scanner_x, PARAMS["Scanner X"] * 12.5)
+
+
+def test_a_unit_override_reaches_the_sweep_axis_label(csv_path):
+    # This is the defect: converting a piezo row to µm used to leave every label
+    # reading V, because the axis took its unit from _SWEEP_TYPES rather than
+    # from the registry the override lands in.  Scanner Y is the varying row.
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              sweep="piezo_y",
+                              curated_scales={"scanner_y": 12.5},
+                              curated_units ={"scanner_y": "µm"})
+    assert s.sweep_unit == "µm"
+    assert s.sweep_axis_label == r"Piezo $y$ (µm)"
+    assert np.allclose(s.sweep_axis, PARAMS["Scanner Y"] * 12.5)
+
+
+def test_an_explicit_sweep_unit_still_wins_over_the_registry(csv_path):
+    # sweep_unit= is the caller's last word on the axis label, unchanged by this.
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              sweep="piezo_y", sweep_unit="nm",
+                              curated_scales={"scanner_y": 12.5},
+                              curated_units ={"scanner_y": "µm"})
+    assert s.sweep_unit == "nm"
+    # The registry keeps what it was told; only the axis label was overridden.
+    assert s.curated_parameters["scanner_y"][2] == "µm"
+
+
+def test_a_unit_override_reaches_the_repr_power_line(csv_path):
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              curated_scales={"power": 1.0},
+                              curated_units ={"power": "counts"})
+    # Startswith, not "Power" in: the Varying line lists "Excitation Power" too.
+    power_line = [ln for ln in repr(s).splitlines()
+                  if ln.strip().startswith("Power")]
+    assert len(power_line) == 1
+    assert power_line[0].endswith("counts")
+
+
+def test_the_curated_backed_sweep_units_are_unchanged_by_the_collapse(csv_path):
+    # Regression pin for moving these units out of _SWEEP_TYPES and into the
+    # registry: with no override, every axis must read exactly as it always did.
+    geom = DeviceGeometry.from_single("WS2", d_hbn_top=53, d_hbn_bottom=46)
+    expected = {
+        "top_voltage"    : "V",
+        "bottom_voltage" : "V",
+        "power"          : "µW",
+        "piezo_y"        : "V",
+        "electric_field" : "mV/nm",
+        None             : "",
+    }
+    for sweep, unit in expected.items():
+        s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                                  sweep=sweep, geometry=geom)
+        assert s.sweep_unit == unit, f"sweep={sweep!r}"
+
+
+def test_rescaling_without_a_unit_warns(csv_path):
+    with pytest.warns(UserWarning, match="curated_scales rescaled") as caught:
+        s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                                  curated_scales={"scanner_x": 12.5})
+    # The numbers are converted either way — it is the label that is now wrong.
+    assert np.allclose(s.scanner_x, PARAMS["Scanner X"] * 12.5)
+    assert s.curated_parameters["scanner_x"][2] == "V"
+    # The message has to name the entry and the unit left standing.
+    assert "'scanner_x'" in str(caught[0].message)
+    assert "'V'" in str(caught[0].message)
+    # Measured, not assumed: the warning must blame the caller's line.
+    assert caught[0].filename == __file__
+
+
+def test_rescaling_with_a_unit_is_silent(csv_path):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              curated_scales={"scanner_x": 12.5},
+                              curated_units ={"scanner_x": "µm"})
+    assert not [w for w in caught if "rescaled" in str(w.message)]
+
+
+def test_restating_the_scale_in_force_is_not_a_rescale(csv_path):
+    # Nothing changed, so there is nothing to warn about: the registry default
+    # for power is already this value.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              curated_scales={"power": POWER_SCALE})
+    assert not [w for w in caught if "rescaled" in str(w.message)]
+
+
+def test_a_gate_name_is_accepted_by_curated_units(csv_path):
+    # curated_labels refuses these, because a row is a wiring claim and gates=
+    # is its one spelling.  A unit claims nothing about wiring, so it is accepted
+    # here exactly as curated_scales accepts it.
+    s = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              curated_units={"v_top": "mV"})
+    assert s.curated_parameters["v_top"] == ("V_A", 1.0, "mV")
+    with pytest.raises(ValueError, match="cannot be set through curated_labels"):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              curated_labels={"v_top": "Galvo_X"})
+
+
+def test_unknown_curated_units_name_rejected(csv_path):
+    with pytest.raises(ValueError, match="not a curated parameter"):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              curated_units={"nonsense": "µm"})
+
+
+def test_a_none_unit_is_refused(csv_path):
+    # str(None) would store the string "None" and label an axis with it.  The
+    # dimensionless spelling is "", which is what the sweep index uses.
+    with pytest.raises(ValueError, match='pass ""'):
+        AttoCubeSpectralSweep(str(csv_path), spectra_type="PL", gates=GATES,
+                              curated_units={"scanner_x": None})
 
 
 # ---------------------------------------------------------------------------
@@ -990,7 +1128,9 @@ def test_shim_with_geometry_uses_field_axis(csv_path):
 
 
 def test_shim_translates_old_label_arguments(csv_path):
-    with pytest.warns(FutureWarning):
+    # The shim has no unit argument of its own, so power_scale= necessarily
+    # arrives without one and the rescaled-without-a-unit warning fires too.
+    with pytest.warns(FutureWarning), pytest.warns(UserWarning, match="rescaled"):
         s = AttoCubePLVabScan(str(csv_path), power_scale=1.0,
                               top_gate_label="V_B")
     assert s.curated_parameters["v_top"][0] == "V_B"

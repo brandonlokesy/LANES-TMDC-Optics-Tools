@@ -23,6 +23,7 @@ Layout
     ├── metadata/                  attrs: spectra_type, axis_kind, sweep_type,
     │   │                                 sweep_label, sweep_unit, source_file,
     │   │                                 curated_labels, curated_scales,
+    │   │                                 curated_units,
     │   │                                 gates, fast_sweep, slow_sweep,
     │   │                                 n_fast, n_slow (only if the shape was
     │   │                                 asserted), fast_group_by, slow_group_by
@@ -134,7 +135,7 @@ from . import __version__
 # reference without erroring.  Hence the major gate on read — a silently missing
 # reference is worse than a refused file.
 FORMAT_NAME    = "tmdc_optics_tools.attocube_sweep"
-FORMAT_VERSION = "2.2"
+FORMAT_VERSION = "2.3"
 _FORMAT_MAJOR  = FORMAT_VERSION.split(".")[0]
 
 # Files written before the module served both axis kinds carry the old name.
@@ -156,7 +157,8 @@ _CLASS_FOR_AXIS_KIND = {
 }
 
 # Keys stored as JSON strings because HDF5 attributes have no mapping type.
-_JSON_ATTRS = ("curated_labels", "curated_scales", "gates", "cosmic_rays")
+_JSON_ATTRS = ("curated_labels", "curated_scales", "curated_units",
+               "gates", "cosmic_rays")
 
 # Structured dtype for the TMDC stack: one row per layer, so layer *order* — the
 # physical stacking sequence — is carried by the dataset rather than by dataset
@@ -300,12 +302,18 @@ def write_sweep(
         meta.attrs["source_file"]    = scan.path
 
         # The resolved curated map, so an unusual power scale is restored rather
-        # than silently reverting to the class defaults.
+        # than silently reverting to the class defaults.  All three elements go,
+        # because a scale without its unit says nothing about what the numbers
+        # are — the reader would put a µm/V-rescaled piezo row back under "V".
+        # Unlike the labels, the units need no gate strip on read: a unit is not
+        # a claim about which channel reached which electrode.
         curated = scan.curated_parameters
         meta.attrs["curated_labels"] = json.dumps(
             {name: cfg[0] for name, cfg in curated.items()})
         meta.attrs["curated_scales"] = json.dumps(
             {name: cfg[1] for name, cfg in curated.items()})
+        meta.attrs["curated_units"]  = json.dumps(
+            {name: cfg[2] for name, cfg in curated.items()})
 
         # The channel-to-gate mapping, written *only* when the writing session
         # declared it.  The curated dump above always carries a resolved label for

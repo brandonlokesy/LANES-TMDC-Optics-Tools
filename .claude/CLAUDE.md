@@ -239,6 +239,13 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
 - Don't declare the gate mapping anywhere but `gates=`, and don't re-propose
   `gates={"bottom": "A"}`.
 - Don't rename `v_top`/`v_bot`/`i_top`/`i_bot` to channel names.
+- Don't put a unit literal back into `_SWEEP_TYPES` for a curated-backed axis. Those
+  five rows hold `None` on purpose — the unit lives in `_CURATED`, because that is where
+  `curated_units=` can reach it, and a second copy is what let a rescaled row keep its
+  old label. `index`, `electric_field` and `carrier_density` keep their own, having no
+  curated row behind them. Don't drop the warning a changed `curated_scales` raises when
+  no `curated_units` accompanies it, and don't promote it to a refusal — restating the
+  unit is what silences it, and a polarity flip legitimately restates it unchanged.
 - Don't make `ef` work for a single-gated device, or treat `"channel"` as a third gate.
 - Don't default a `v_ref` threshold to make `carrier_density` absolute.
 - Don't return zeros for `i_*` on a role declared `None`.

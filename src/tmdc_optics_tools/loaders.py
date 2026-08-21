@@ -697,18 +697,25 @@ class DeviceGeometry:
 # sweep index is used.  Anything *not* in this table is looked up as a raw CSV
 # row label instead, which is why an unforeseen swept quantity ("Galvo_Y",
 # "T", …) needs no change here to be usable as a sweep axis.
+#
+# A ``None`` *unit* means "read it from the curated registry", which is where a
+# ``curated_units`` override lands.  Only the three axes with no curated row
+# behind them spell a unit here: the sweep index, and the two quantities derived
+# from gate voltages rather than promoted from one.  Keeping a literal beside a
+# curated-backed axis is what let a rescaled row keep its old label.
 _SWEEP_TYPES = {
     "index"          : (None,        "Sweep index",        ""),
     "electric_field" : ("ef",        r"$E_F$",             "mV/nm"),
     "carrier_density": ("carrier_density", r"$\Delta n$",  r"cm$^{-2}$"),
-    "top_voltage"    : ("v_top",     r"$V_\mathrm{top}$",  "V"),
-    "bottom_voltage" : ("v_bot",     r"$V_\mathrm{bot}$",  "V"),
-    "power"          : ("power",     "Power",              "µW"),
+    "top_voltage"    : ("v_top",     r"$V_\mathrm{top}$",  None),
+    "bottom_voltage" : ("v_bot",     r"$V_\mathrm{bot}$",  None),
+    "power"          : ("power",     "Power",              None),
     # The scanners are piezos and the rows carry their drive voltage, so these
     # two axes are in V.  Converting to a distance needs a per-stage µm/V
-    # calibration the file does not contain; pass one via ``curated_scales``.
-    "piezo_x"        : ("scanner_x", r"Piezo $x$",         "V"),
-    "piezo_y"        : ("scanner_y", r"Piezo $y$",         "V"),
+    # calibration the file does not contain; pass one via ``curated_scales``,
+    # and say what the numbers then are via ``curated_units``.
+    "piezo_x"        : ("scanner_x", r"Piezo $x$",         None),
+    "piezo_y"        : ("scanner_y", r"Piezo $y$",         None),
 }
 
 # Which curated rows each sweep type depends on.  Checked at load time so a
@@ -1689,11 +1696,16 @@ class _AttoCubeSweep:
 
     # Canonical curated parameters: attribute name -> (CSV row label, scale, unit).
     # These are the analysis-primary quantities promoted to first-class
-    # properties (scaled views into :attr:`parameters`).  The label and/or scale
-    # of any entry can be overridden per-instance via ``curated_labels`` /
-    # ``curated_scales``; everything else in the file is reached through the
-    # generic :attr:`parameters` store.  A row listed here that a given file does
-    # not contain is not an error — the property raises only if accessed.
+    # properties (scaled views into :attr:`parameters`).  The label, scale and/or
+    # unit of any entry can be overridden per-instance via ``curated_labels`` /
+    # ``curated_scales`` / ``curated_units``; everything else in the file is
+    # reached through the generic :attr:`parameters` store.  A row listed here
+    # that a given file does not contain is not an error — the property raises
+    # only if accessed.
+    #
+    # The unit is not decoration: it is what ``_SWEEP_TYPES`` reads for a
+    # curated-backed axis, so it reaches every axis label, ``__repr__`` line and
+    # legend entry.  A scale and its unit are one fact and move together.
     #
     # The role-backed entries are the exception: their labels come from ``gates``
     # alone, and the rows below are never read without one.  They are listed here
@@ -1727,6 +1739,7 @@ class _AttoCubeSweep:
         gates          : dict = None,
         curated_labels : dict = None,
         curated_scales : dict = None,
+        curated_units  : dict = None,
     ) -> dict:
         """
         Decode *path* and settle everything that does not depend on the axis.
@@ -1775,11 +1788,18 @@ class _AttoCubeSweep:
             for name, value in (meta.get("curated_labels") or {}).items()
             if name not in _DECLARED_CURATED
         }
-        # Curated config has format (label, scale, unit).  Only label (index 0) and scale (index 1) can be overwritten
-        for store, idx in ((meta_labels,                0),
-                           (curated_labels,             0),
-                           (meta.get("curated_scales"), 1),
-                           (curated_scales,             1)):
+        # Curated config is (label, scale, unit) and all three can be overridden,
+        # so idx runs 0..2.  ``from_caller`` marks the stores that came from the
+        # constructor rather than from the file, because only a scale the *caller*
+        # changed can be missing its unit: an HDF5 file dumps a value for every
+        # entry, so a key is never absent on that side.
+        rescaled_by_caller = {}
+        for store, idx, from_caller in ((meta_labels,                0, False),
+                                        (curated_labels,             0, True),
+                                        (meta.get("curated_scales"), 1, False),
+                                        (curated_scales,             1, True),
+                                        (meta.get("curated_units"),  2, False),
+                                        (curated_units,              2, True)):
             for name, value in (store or {}).items():
                 if name not in self._curated:
                     raise ValueError(
@@ -1796,9 +1816,53 @@ class _AttoCubeSweep:
                         f"row names that electrode's current row too, so the "
                         f"currents are not set separately either."
                     )
-                # If a curated parameter is not present in the file's metadata or the provided overrides, it retains its default value from _CURATED.
-                # If idx == 0, we are updating the label; if idx == 1, we are updating the scale. The value is converted to float for scales.
-                self._curated[name][idx] = value if idx == 0 else float(value)
+                # A curated entry the file's metadata and the arguments both leave
+                # alone keeps its default from _CURATED.
+                if idx == 0:
+                    # Verbatim: a current's label is legitimately None until gates
+                    # names it, so this slot is not always a string.
+                    self._curated[name][idx] = value
+                elif idx == 1:
+                    if from_caller and float(value) != self._curated[name][idx]:
+                        rescaled_by_caller[name] = (self._curated[name][idx],
+                                                    float(value))
+                    self._curated[name][idx] = float(value)
+                else:
+                    if value is None:
+                        raise ValueError(
+                            f"curated_units['{name}'] is None. A unit is a string; "
+                            f"pass \"\" for a dimensionless quantity, which is how "
+                            f"the sweep index spells its own."
+                        )
+                    self._curated[name][idx] = str(value)
+
+        # A scale the caller changed without saying what the numbers now are leaves
+        # a label that misstates them — this registry is what every axis label,
+        # __repr__ line and legend entry reads the unit through.  Restating the
+        # unit silences this, which is what a polarity flip does: -1e9 nA is still
+        # nA.  Not raised, because the researcher may be mid-calibration and the
+        # numbers are correct either way; not silent, because nothing downstream
+        # can detect it.
+        unstated = sorted(set(rescaled_by_caller) - set(curated_units or {}))
+        if unstated:
+            detail = "; ".join(
+                f"'{name}' {rescaled_by_caller[name][0]:g} -> "
+                f"{rescaled_by_caller[name][1]:g}, unit still "
+                f"{self._curated[name][2]!r}"
+                for name in unstated
+            )
+            warnings.warn(
+                f"curated_scales rescaled {detail}. Pass curated_units="
+                f"{{{', '.join(repr(n) + ': ...' for n in unstated)}}} to state "
+                f"what the numbers now are — the unit reaches every axis label, "
+                f"__repr__ line and legend entry, so it is a misread otherwise.",
+                # Measured, not counted off def lines: 1 is here, 2 is the
+                # constructor that called this, 3 is the researcher's own line.
+                # AttoCubePLVabScan adds a frame and so points at its own
+                # super().__init__ instead; it is deprecated, and its comment
+                # there says so.  This is a new site, not one of A11's fifteen.
+                UserWarning, stacklevel=3,
+            )
 
         # The declared mapping is what backs the gate roles.  A role left out, or
         # present with a None row (an electrode tied to ground that no channel
@@ -2469,6 +2533,13 @@ class _AttoCubeSweep:
                 for role in _GATE_ELECTRODES:
                     if role in self._gates:
                         self.geometry.gate_capacitance(role)
+            # A curated-backed axis takes its unit from the curated registry, so a
+            # curated_units override reaches the axis label rather than only the
+            # registry's own view.  _SWEEP_TYPES spells a unit only for the axes
+            # with no curated row behind them; a None beside a source that is not
+            # a registry key is a table error, and the KeyError names it.
+            if default_unit is None:
+                default_unit = self._curated[source][2]
             kind = ("index", None) if source is None else ("curated", source)
             return (sweep, kind,
                     label if label is not None else default_label,
@@ -2812,6 +2883,9 @@ class _AttoCubeSweep:
         Documents which CSV rows are promoted to first-class properties, the
         scale applied (e.g. raw amps → nA), and the resulting unit — making the
         raw-vs-scaled distinction with :attr:`parameters` explicit.
+
+        The unit is also what a curated-backed sweep axis is labelled with, so
+        this is where :attr:`sweep_axis_label` gets "V" or "µW" from.
         """
         return dict(self._curated)
 
@@ -3570,7 +3644,9 @@ class _AttoCubeSweep:
         # device cannot define one — an undeclared wiring leaves its sign undefined,
         # a single gate leaves it undefined outright.  A repr must render whatever
         # state the object is in.
-        extra = [("Power", self._curated_or_none("power"), "µW")]
+        # The power unit comes from the registry, not a literal: a curated_scales
+        # override with its curated_units changes what these numbers are.
+        extra = [("Power", self._curated_or_none("power"), self._curated["power"][2])]
         if self.sweep_type != "electric_field" and self.is_dual_gated:
             extra.append(("E_F", self.ef, "mV/nm"))
         for label, arr, unit in extra:
@@ -3834,7 +3910,20 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         one spelling.
     curated_scales : dict, optional
         Override the scale factor of a curated attribute, e.g.
-        ``{"power": 1.0}`` to keep raw power.  Same keys as *curated_labels*.
+        ``{"power": 1.0}`` to keep raw power.  The scale *replaces* the registry's
+        rather than multiplying it.  Keys are the same curated attribute names as
+        *curated_labels*, except that the role-backed ones are accepted here: a
+        unit conversion claims nothing about which channel reached which
+        electrode.  Changing a scale without also passing *curated_units* warns.
+    curated_units : dict, optional
+        Override the unit of a curated attribute, e.g.
+        ``{"scanner_x": "µm"}`` beside a µm/V *curated_scales* entry.  Same keys as
+        *curated_scales*.  Pass ``""`` for a dimensionless quantity.
+
+        This is not cosmetic.  The unit reaches :attr:`sweep_axis_label`, the
+        :func:`repr` and every plot legend that names the swept coordinate, so a
+        rescaled row left with its old unit reads as a measurement in the wrong
+        units rather than as an untidy figure.
     roi : {1, 2}
         Which spectrometer ROI :attr:`spectra` points at.  Default ``1``.
         Both are always loaded — see :attr:`spectra_roi1` / :attr:`spectra_roi2`.
@@ -3945,7 +4034,9 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
     scanner_x, scanner_y : np.ndarray, shape (n_sweeps,)
         Piezo scanner X / Y drive voltage in V — a drive level, not a distance.
         Converting to µm needs a per-stage µm/V calibration that is not in the
-        file; supply one through *curated_scales*.  Read-only properties (views).
+        file; supply one through *curated_scales*, and say what the numbers then
+        are through *curated_units*, or the axis will still be labelled in volts.
+        Read-only properties (views).
     ef : np.ndarray or None, shape (n_sweeps,)
         Displacement field in mV/nm, or ``None`` if no geometry supplied.
         Read-only property computed from :attr:`v_top` / :attr:`v_bot`, so it
@@ -3973,9 +4064,9 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         Mapping ``attr -> (csv_label, scale, unit)`` documenting which rows are
         promoted to the curated properties above, the scale applied, and the
         resulting unit.  Configurable via the class-level :attr:`_CURATED`
-        registry and the constructor *curated_labels* / *curated_scales*
-        overrides.  A curated row that this file does not contain is simply
-        absent here, and its property raises only if accessed.
+        registry and the constructor *curated_labels* / *curated_scales* /
+        *curated_units* overrides.  A curated row that this file does not contain
+        is simply absent here, and its property raises only if accessed.
     parameters : dict[str, np.ndarray]
         Every labeled parameter row from the CSV, mapped to its per-sweep
         array in the file's **raw** units (one entry per row, shape
@@ -4124,6 +4215,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         gates           : dict  = None,
         curated_labels  : dict  = None,
         curated_scales  : dict  = None,
+        curated_units   : dict  = None,
         roi             : int   = None,
     ):
         # Both checks precede the read: an export is large enough that a mistyped
@@ -4147,6 +4239,7 @@ class AttoCubeSpectralSweep(_AttoCubeSweep):
         payload = self._decode_and_describe(
             path, spectra_type=spectra_type, geometry=geometry, gates=gates,
             curated_labels=curated_labels, curated_scales=curated_scales,
+            curated_units=curated_units,
         )
         meta = payload["metadata"]
 
@@ -4878,6 +4971,11 @@ class AttoCubePLVabScan(AttoCubeSpectralSweep):
             bg_region_eV   = bg_region_eV,
             apply_jacobian = apply_jacobian,
             curated_labels = labels or None,
+            # No curated_units to pass on: this class never had a unit argument,
+            # and it is being retired rather than extended.  A power_scale= here
+            # therefore raises the rescaled-without-a-unit warning through one
+            # extra frame, so it points at this call rather than at the caller's
+            # line.  The FutureWarning above is what asks them to move.
             curated_scales = {"power": power_scale} if power_scale is not None else None,
             roi            = roi,
         )
@@ -4945,7 +5043,13 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         :class:`AttoCubeSpectralSweep` — the roles present describe the device, and
         the declaration is required for :attr:`v_top`, :attr:`v_bot`,
         :attr:`v_channel`, :attr:`ef` and the gate sweep types.
-    curated_labels, curated_scales : dict, optional
+    curated_labels, curated_scales, curated_units : dict, optional
+        Override which row backs a curated attribute, its scale, and its unit.
+        As :class:`AttoCubeSpectralSweep`, and keyed by the same curated attribute
+        names — which here include the three Picoharp rows added by this class.
+        Two of those carry a unit this package has not confirmed (``"Hz?"``,
+        ``"s?"``); *curated_units* is where a confirmed one is stated, so the
+        question mark does not reach a figure.
     time_rtol : float
         Tolerance for agreement between the per-file time axes.  They are *not*
         bit-identical across files — the example sweep's bin width varies in its
@@ -5038,6 +5142,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         gates          : dict  = None,
         curated_labels : dict  = None,
         curated_scales : dict  = None,
+        curated_units  : dict  = None,
         time_rtol      : float = 1e-4,
     ):
         self._prefix    = prefix
@@ -5046,6 +5151,7 @@ class AttoCubeTRPLSweep(_AttoCubeSweep):
         payload = self._decode_and_describe(
             path, spectra_type=spectra_type, geometry=geometry, gates=gates,
             curated_labels=curated_labels, curated_scales=curated_scales,
+            curated_units=curated_units,
         )
 
         self.time   = payload["time"]                 # ns, ascending

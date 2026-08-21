@@ -673,7 +673,8 @@ def plot_spectral_map(
         *mesh* is a :class:`~matplotlib.collections.QuadMesh` whose array runs
         ``(n_sweep_points, n_pixels)`` — matplotlib's row-major order, one row
         per sweep point — the transpose of the ``(n_pixels, n)`` block the scan
-        serves.
+        serves.  Non-finite cells are masked, so they are drawn as nothing and
+        take no part in the colour limits or in *rescale_img*'s range.
 
     Raises
     ------
@@ -722,6 +723,15 @@ def plot_spectral_map(
 
     if median_kernel > 1:
         data = processing.smooth_median(data, kernel=median_kernel)
+
+    # Masking precedes the rescale, and follows the median filter — which
+    # returns a plain array and would drop the mask.  A contrast source is a
+    # ratio against a reference, so a guarded reference pixel gives a whole
+    # non-finite column; rescale_intensity(in_range="image") reads its limits
+    # off the array's own min and max, and one NaN makes both NaN, so every
+    # cell comes back NaN and the panel draws blank.  A masked array's min and
+    # max skip the masked entries.
+    data = np.ma.masked_invalid(data)
 
     if rescale_img:
         data = rescale_intensity(data, in_range="image", out_range=(0, 1))

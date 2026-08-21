@@ -1,7 +1,7 @@
 """
 Tests for ``plotting.plot_spectral_map`` and its deprecated alias.
 
-Six things are pinned. First, the y-axis comes from ``sweep_axis`` rather than
+Seven things are pinned. First, the y-axis comes from ``sweep_axis`` rather than
 the ``gate_axis`` alias, which is what lets the alias be deleted: a test that
 only checked the values would pass either way, so the declared sweep is varied
 (index, power, piezo) and the axis compared against the property.
@@ -26,6 +26,11 @@ Sixth, the mesh holds one row per sweep point.  ``pcolormesh`` reads ``C`` as
 (rows=y, cols=x) and the map's y is the sweep axis, so the ``(n_pixels, n)``
 block is handed over transposed; a test that only checked values would not
 notice a flip, and every coordinate assertion here depends on the orientation.
+
+Seventh, one non-finite cell does not blank a rescaled panel.  The rescale takes
+its limits from the array's own min and max, which a single ``NaN`` makes
+``NaN``, so the assertions are on the values and not only on the mask — every
+cell being masked is exactly the failure being pinned against.
 """
 
 import matplotlib
@@ -314,3 +319,42 @@ def test_a_kernel_above_one_still_filters(csv_path):
         scan, spectra_source="raw", x_axis="wavelength", median_kernel=3)
 
     assert not np.allclose(mesh.get_array(), scan.spectra.T)
+
+
+# ---------------------------------------------------------------------------
+# A non-finite cell does not blank the rescaled panel
+# ---------------------------------------------------------------------------
+
+def test_rescale_img_survives_a_guarded_contrast_pixel(tmp_path, csv_path):
+    """
+    One guarded reference pixel must not empty the whole map.
+
+    ``rescale_intensity(in_range="image")`` reads its limits off the array's own
+    min and max, so a single ``NaN`` makes both ``NaN`` and every cell comes
+    back ``NaN``.  The route in is a real one: ``spectral_contrast`` guards a
+    zero-count reference pixel to ``NaN``, which is a non-finite *column* of the
+    map rather than one stray cell.
+    """
+    ref = tmp_path / "reference.csv"
+    counts = np.full(len(WAVELENGTH), 50.0)
+    counts[2] = 0.0                                  # guarded: cannot divide by it
+    _write_reference(ref, counts)
+
+    with pytest.warns(UserWarning, match="reference pixel"):
+        scan = AttoCubeSpectralSweep(str(csv_path), spectra_type="R",
+                                     reference=str(ref))
+
+    # The wavelength axis keeps the file's pixel order, so the guarded pixel is
+    # column 2 of the map; the energy axis would argsort it elsewhere.
+    _, _, mesh = plotting.plot_spectral_map(
+        scan, spectra_source="contrast", x_axis="wavelength", rescale_img=True)
+
+    # (n_sweeps, n_pixels), so the guarded pixel is a masked column.
+    arr = mesh.get_array()
+    assert arr.mask[:, 2].all()
+    assert not arr.mask[:, 0].any()
+
+    finite = arr.compressed()
+    assert finite.size == arr.size - scan.n_sweeps    # only that column is gone
+    assert np.isfinite(finite).all()
+    assert (finite.min(), finite.max()) == (0.0, 1.0)  # genuinely rescaled

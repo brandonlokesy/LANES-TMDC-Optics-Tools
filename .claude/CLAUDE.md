@@ -273,6 +273,16 @@ keyword in the index there. Don't re-litigate, and don't "helpfully" restore.
   don't fork `_resolve_sweep_block` back into either of them. A flat-index map or
   series puts consecutive rows at unrelated settings. Don't respell the map's
   `y_axis=` as `series_axis=`, or give it `x_axis=`'s energy/wavelength vocabulary.
+- Don't rebuild `plot_spectral_map`'s coordinate meshes — not with `np.tile`, and not
+  with `np.broadcast_to` to keep the old orientation. `pcolormesh` gets the 1-D pair and
+  the block transposed, so `mesh.get_array()` runs `(n_sweeps, n_pixels)`. Don't flip it
+  back, and don't `reshape` a mesh array where a transpose is meant — a reshape
+  scrambles instead of failing.
+- Don't make `clim=` and `rescale_img=` work together, in `plot_spectral_map` or
+  `plot_image`. The pair is refused through one guard, `_refuse_rescaled_clim`: don't
+  downgrade it to a warning, don't give each function its own copy, and don't rescale
+  the limits alongside the data. `clim=` is read in the data's own units and the rescale
+  replaces them.
 - Don't make the accessors return one match for an ambiguous coordinate.
 - Don't give `plot_spectrum` a positional `value`, or truncate a fractional index.
 - Don't append to a caller's label string — `None` derives, a string is verbatim.

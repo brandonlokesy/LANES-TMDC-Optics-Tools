@@ -1220,6 +1220,18 @@ whitespace delimiter collapses them away, so row 0 reads as 1024 columns against
 1026. Classifying the file before parsing it, or reading with an explicit tab delimiter,
 would let the written message do its job.
 
+**A30. `plot_spectral_map(rescale_img=True)` blanks the whole panel on one `NaN`.**
+`rescale_intensity(data, in_range="image", out_range=(0, 1))` takes its limits from the
+array's own minimum and maximum, and a single `NaN` makes both of them `NaN`, so every
+cell comes back `NaN` and nothing is drawn. `plot_image` already carries the fix —
+`np.ma.masked_invalid` before the rescale, because a masked array's min and max skip the
+masked entries and the mask survives the arithmetic — with a test at
+`tests/test_plot_image.py:76`. `plot_spectral_map` has no such line: it goes straight
+into `rescale_intensity`. Reachable, because `spectra_source="contrast"` is a ratio
+against a reference frame, so a zero reference pixel gives a non-finite column. Found
+while closing E3 and deliberately left out of that change; the fix is the same one line
+`plot_image` already has, plus a test.
+
 
 ## B. Dead parameters — accepted, documented, silently ignored
 
@@ -1868,7 +1880,13 @@ inside the function body for no reason.)
 
 **E3. `plot_pl_map_Vab_scan` has three questionable defaults in ~20 lines.**
 - `np.tile` builds two full `(n_pixels, n_sweeps)` coordinate meshes; `pcolormesh`
-  accepts 1-D `x`/`y`.
+  accepts 1-D `x`/`y`. **[FIXED — 2026-08-21, `fcd8b41`]** **[verified against real
+  data]** The 1-D call needs the block transposed, because `pcolormesh` reads `C` as
+  `(rows=y, cols=x)` only when the coordinates are 1-D, so `mesh.get_array()` and
+  `mesh._coordinates` now run `(n_sweeps, n_pixels)`. Checked on
+  `examples/data/1L-WSe2-PL` at 1340 × 161: identical quads, colour values, colour
+  limits and axis limits. Reasoning and the rejected `np.broadcast_to` alternative:
+  `dev/decisions/0031-the-spectral-maps-mesh-runs-one-row-per-sweep-point.md`.
 - **`median_kernel=3` runs a 2-D median filter**, i.e. it smooths *across gate
   voltage*, mixing physically independent sweeps. **Decided: default should be `1`
   (off), with 2-D kept available.** **[FIXED — 2026-08-21]**
@@ -1879,10 +1897,27 @@ inside the function body for no reason.)
   `test_no_median_filter_runs_unless_a_kernel_is_named` names no kernel, so it is the
   default it sees, and `test_a_kernel_above_one_still_filters` names 3, so deleting the
   filter would be caught. `plot_pl_map_Vab_scan` forwards `*args, **kwargs` and needed
-  no change. The other two bullets stand.
+  no change.
+
+  Both of those tests compare the drawn array against `scan.spectra`, so both took a
+  `.T` when the bullet above transposed the mesh. That is why the three bullets landed
+  as one branch rather than in any order: a shape mismatch inside `np.allclose` raises
+  instead of reporting a difference, so whichever change went second would have broken
+  the other's tests on arrival.
 - `rescale_img=True` rescales the whole map to [0,1], silently changing what the
   colour bar means; the `colorbar_label` parameter is accepted but then overwritten
-  (line 197, with the old line left commented out).
+  (line 197, with the old line left commented out). **[FIXED — in two parts]** The
+  `colorbar_label` overwrite went with the E12 label work (2026-08-06): the call now
+  reads `colorbar_label if colorbar_label is not None else _signal_label(scan,
+  normalized=rescale_img, ...)`, so a caller's string is verbatim and a derived one
+  reads `norm.`. The colour bar therefore no longer misstates what was drawn.
+  What remained was that `clim` is read in the data's own units while `rescale_img`
+  replaces them, so the two together drew one flat colour — measured spread across
+  the colour scale, `clim=(500, 1500)` on counts of 503–1497: 0.994 raw against
+  0.001 rescaled. The pair is now refused, in `plot_spectral_map` and `plot_image`
+  alike. **[FIXED — 2026-08-21, `129258f`]** Reasoning and the rejected
+  warn-and-draw and reinterpret-the-limits alternatives:
+  `dev/decisions/0030-clim-and-rescale-img-are-refused-together.md`.
 
 **E4. Test coverage.** Only `tests/test_loaders.py` and `tests/test_laser_spot.py`
 exist — nothing covers `fitting`, `processing`, `diffusion`, or `plotting`, which is
@@ -2523,7 +2558,16 @@ deprecation cost — which is the argument for taking them now rather than later
 
 **E22 was worked around before it was fixed.** scikit-learn was installed into
 `viz-sci-plot` on 2026-08-19 so the suite could run; the module-level import went on
-2026-08-20.
+2026-08-20. *That install has since been lost:* on 2026-08-21
+`tests/test_import_cost.py::test_the_function_that_needs_sklearn_can_still_reach_it`
+fails in `viz-sci-plot` with `ModuleNotFoundError: No module named 'sklearn'`, and the
+suite is otherwise green. scikit-learn is not declared in any extra in
+`pyproject.toml`, which is the same undeclared-dependency shape **E4** records — an
+environment cannot announce what it is missing, and this one drifted back.
+
+**Opened 2026-08-21 while closing E3:** **A30**. Same class as A25 — a figure drawn from
+values that are not measurements — and it rides along with whatever next touches
+`plot_spectral_map`'s rescale path.
 
 Outside this order: **E9 is largely closed** — sample files arrived, and R/RC and
 TRPL support landed on 2026-07-30 along with the rename and arbitrary-sweep rewrite

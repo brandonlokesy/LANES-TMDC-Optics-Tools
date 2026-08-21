@@ -22,9 +22,21 @@ belong together, so it is asked for rather than assumed.
 
 Where output lands
 ------------------
-A converted file goes into a ``processed/`` folder: the sibling of ``raw/`` when
-the source sits in one, and a folder created beside the source otherwise.  Pass
-*out* to override.  The two folder names are fixed and take no parameter.
+A converted file goes into a ``converted/`` folder: the sibling of ``raw/`` when
+the source sits in one, and a folder created beside the source otherwise.  The
+folder is created if it does not exist.  The two names are fixed and take no
+parameter.
+
+``converted/`` rather than ``processed/`` because a conversion is not an analysis:
+the output holds the same numbers the export held.  A ``processed/`` folder is for
+what an analysis extracts from the raw data, and keeping the two apart is what
+makes either one meaningful.
+
+Pass *out* to send output elsewhere.  For a directory run it is an output **root**
+and the tree is mirrored beneath it, so ``raw/spot01/01-PL/sweep.csv`` becomes
+``<out>/spot01/01-PL/sweep.h5``.  Either way a source's position is preserved,
+which is what keeps two folders holding an identically named frame from
+overwriting one another.
 
 Public functions
 ----------------
@@ -79,8 +91,14 @@ from .loaders import (
 # folder output always lands in.  Fixed names rather than parameters: a setting
 # would be a second place the answer lives, and the first time it disagreed with
 # the folder on screen it would cost more than it saved.
+#
+# "converted", not "processed": nothing here extracts, fits or derives anything.
+# The numbers in the output are the numbers that were in the CSV, in a container
+# that is smaller and that a viewer will open.  A "processed" folder is for what
+# an analysis pulls *out* of the raw data, which is a different thing and belongs
+# beside this rather than mixed into it.
 _RAW_DIR = "raw"
-_OUT_DIR = "processed"
+_OUT_DIR = "converted"
 
 _DTYPES = ("auto", "uint16", "uint32", "float32")
 
@@ -156,7 +174,7 @@ def _default_output(src, new_suffix: str, out=None) -> Path:
     Returns
     -------
     pathlib.Path
-        With *out* omitted: ``<parent>/processed/<stem><suffix>``, where
+        With *out* omitted: ``<parent>/converted/<stem><suffix>``, where
         ``<parent>`` is the grandparent when *src* sits in a ``raw/`` folder and
         the source's own folder otherwise.
     """
@@ -179,8 +197,8 @@ def _dir_output(directory, stem: str, new_suffix: str, out=None) -> Path:
 
     The same rule as :func:`_default_output`, applied to a folder rather than a
     file, so a directory-wide output lands where the folder's own per-file output
-    would have.  ``scan/raw/`` gives ``scan/processed/``; ``scan/frames/`` gives
-    ``scan/frames/processed/``.
+    would have.  ``scan/raw/`` gives ``scan/converted/``; ``scan/frames/`` gives
+    ``scan/frames/converted/``.
 
     Parameters
     ----------
@@ -238,7 +256,7 @@ def _claim_target(target: Path, overwrite: bool) -> Path:
 
     For writers that do not create their own directory — ``tifffile.imwrite`` does
     not, ``hdf5.write_sweep`` does.  The refusal runs first, so a refused
-    conversion leaves no empty ``processed/`` folder behind.
+    conversion leaves no empty ``converted/`` folder behind.
 
     Raises
     ------
@@ -410,7 +428,7 @@ def convert_image_csv_to_tiff(
         rows is refused rather than converted.
     out : str or Path, optional
         Destination file or directory.  Omitted, the file lands in a
-        ``processed/`` folder — see the module docstring.
+        ``converted/`` folder — see the module docstring.
     dtype : {"auto", "uint16", "uint32", "float32"}
         Pixel type.  ``"auto"`` keeps integer counts exactly.
     overwrite : bool
@@ -459,7 +477,7 @@ def convert_image_dir_to_tiff_stack(
         every image CSV in the folder is used.
     out : str or Path, optional
         Destination file or directory.  Omitted, the stack lands in the same
-        ``processed/`` folder its frames would have, named after *prefix* with
+        ``converted/`` folder its frames would have, named after *prefix* with
         trailing separators stripped, or after the folder.
     dtype : {"auto", "uint16", "uint32", "float32"}
         Pixel type for every page.
@@ -541,7 +559,7 @@ def convert_spectral_csv_to_hdf5(
         the keys of :data:`tmdc_optics_tools.constants.SPECTROSCOPY_TYPES`.
     out : str or Path, optional
         Destination file or directory.  Omitted, the archive lands in a
-        ``processed/`` folder — see the module docstring.
+        ``converted/`` folder — see the module docstring.
     overwrite : bool
         Replace an existing archive.  Default False, which raises.
     compression : str or None
@@ -609,7 +627,7 @@ def convert_trpl_dir_to_hdf5(
         indices, but a warning is not a refusal.
     out : str or Path, optional
         Destination file or directory.  Omitted, the archive lands in a
-        ``processed/`` folder, named after *prefix* with trailing separators
+        ``converted/`` folder, named after *prefix* with trailing separators
         stripped, or after the folder.
     overwrite : bool
         Replace an existing archive.  Default False, which raises.
@@ -684,9 +702,14 @@ def convert_path(
     path : str or Path
         A single CSV, or a directory of them.
     out : str or Path, optional
-        Destination.  Omitted, each source folder gets its own ``processed/``
-        folder, which is what keeps two sweeps holding an identically named frame
-        from overwriting one another.
+        Output **root**.  The tree under *path* is mirrored beneath it, so
+        ``<path>/spot01/01-PL/sweep.csv`` becomes
+        ``<out>/spot01/01-PL/sweep.h5``.  Omitted, each source folder gets its own
+        ``converted/`` folder instead.  Either way the source's position is
+        preserved, which is what keeps two folders holding an identically named
+        frame from overwriting one another.  A path carrying a suffix is taken as
+        one filename and used verbatim — meaningful with *stack*, and a
+        ``FileExistsError`` on the second output otherwise.
     recursive : bool
         Descend into subdirectories.  Ignored when *path* is a file.
     stack : bool
@@ -743,8 +766,27 @@ def convert_path(
     # a stack and a TRPL sweep are both per folder.
     csvs = path.rglob("*.csv") if recursive else path.glob("*.csv")
 
+    def destination(folder: Path):
+        """
+        Where *folder*'s output goes: *out* with the folder's own position under
+        *path* appended.  ``None`` leaves each converter on the ``converted/`` rule.
+
+        A folder at the top of the walk has a relative path of ``.``, which
+        ``joinpath`` drops, so a non-recursive run addresses *out* directly and the
+        mirror only shows up where there is a tree to mirror.
+        """
+        if out is None:
+            return None
+        root = Path(out)
+        if root.suffix and not root.is_dir():
+            return root                       # an explicit filename, not a root
+        return root / folder.relative_to(path)
+
     for folder in sorted({csv.parent for csv in csvs}):
         kinds = _folder_kinds(folder, prefix)
+        # Never rebind `out`: destination() reads it, so a rebind would mirror the
+        # second folder against the first folder's output.
+        into  = destination(folder)
         # A temporal file makes the whole folder one sweep, which is what decides
         # whether its spectral files are sweeps or that sweep's companion.
         is_trpl = any(kind == "temporal" for kind in kinds.values())
@@ -759,7 +801,7 @@ def convert_path(
         if is_trpl:
             if named:
                 attempt(lambda: convert_trpl_dir_to_hdf5(
-                    folder, prefix=prefix, out=out, overwrite=overwrite,
+                    folder, prefix=prefix, out=into, overwrite=overwrite,
                     compression=compression), folder)
             else:
                 skipped[folder] = _TRPL_DIR_KIND
@@ -767,7 +809,7 @@ def convert_path(
             for f, kind in kinds.items():
                 if kind == "spectral":
                     attempt(lambda f=f: convert_spectral_csv_to_hdf5(
-                        f, spectra_type, out=out, overwrite=overwrite,
+                        f, spectra_type, out=into, overwrite=overwrite,
                         compression=compression), f)
 
         images = [f for f, kind in kinds.items() if kind == "image"]
@@ -775,7 +817,7 @@ def convert_path(
             continue
         if stack:
             attempt(lambda: convert_image_dir_to_tiff_stack(
-                folder, prefix=prefix, out=out, dtype=dtype,
+                folder, prefix=prefix, out=into, dtype=dtype,
                 overwrite=overwrite), folder)
         else:
             # Filename order, not acquisition order: each frame becomes its own
@@ -785,7 +827,7 @@ def convert_path(
             # sweep legitimately do not.
             for frame in images:
                 attempt(lambda frame=frame: convert_image_csv_to_tiff(
-                    frame, out=out, dtype=dtype, overwrite=overwrite), frame)
+                    frame, out=into, dtype=dtype, overwrite=overwrite), frame)
 
     return ConversionReport(outputs, skipped, errors)
 
@@ -812,7 +854,7 @@ def main(argv=None) -> int:
         prog="tmdc-convert",
         description=(
             "Convert AttoCube CSV exports to compact formats: real-space images to "
-            "TIFF, spectral and TRPL sweeps to HDF5. Output lands in a processed/ "
+            "TIFF, spectral and TRPL sweeps to HDF5. Output lands in a converted/ "
             "folder: the sibling of raw/ when the source is in one, and a folder "
             "beside the source otherwise."
         ),
@@ -820,8 +862,9 @@ def main(argv=None) -> int:
     parser.add_argument("path", help="A CSV, or a directory of them.")
     parser.add_argument(
         "--out", default=None,
-        help="Destination directory (or file, for a single input). "
-             "Default: a processed/ folder per source folder.",
+        help="Output root. The tree under PATH is mirrored beneath it, so "
+             "raw/spot01/01-PL/ lands in OUT/spot01/01-PL/. Default: a converted/ "
+             "folder per source folder.",
     )
     parser.add_argument(
         "--spectra-type", default=None, choices=sorted(SPECTROSCOPY_TYPES),

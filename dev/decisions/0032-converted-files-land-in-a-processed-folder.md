@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted |
+| **Status** | Superseded by 0034 (the folder is named `converted/`; every other point stands) |
 | **Date** | 2026-08-21 |
 | **Audit** | — |
 

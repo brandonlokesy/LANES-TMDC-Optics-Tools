@@ -1132,11 +1132,11 @@ taken. That is what keeps it out of `loaders` despite reading files.
 Three export shapes, three destinations:
 
 ```
-scan/raw/frame_iter_0.csv …   ──►  scan/processed/frame_iter_0.tif …   (default)
-                              └─►  scan/processed/raw_stack.tif        (--stack)
+scan/raw/frame_iter_0.csv …   ──►  scan/converted/frame_iter_0.tif …  (default)
+                              └─►  scan/converted/raw_stack.tif       (--stack)
 
-scan/raw/sweep.csv            ──►  scan/processed/sweep.h5
-trpl/  (a directory of decays) ─►  processed/trpl.h5
+scan/raw/sweep.csv            ──►  scan/converted/sweep.h5
+trpl/  (a directory of decays) ─►  converted/trpl.h5
 ```
 
 The HDF5 side owns no format of its own. It loads with `AttoCubeSpectralSweep` or
@@ -1179,11 +1179,26 @@ one skip that asks the caller to act. Full argument:
 
 ## Where output lands
 
-Always a `processed/` folder — the sibling of `raw/` when the source is in one,
-created beside the source otherwise. `out=` is the single override. A directory
-run resolves this **per source folder**, so two sweeps holding an identically
-named frame keep their own output. Fixed names, no setting:
-`dev/decisions/0032-converted-files-land-in-a-processed-folder.md`.
+Always a **`converted/`** folder — the sibling of `raw/` when the source is in one,
+created beside the source otherwise, at any depth. Fixed names, no setting:
+`dev/decisions/0034-converted-files-land-in-a-converted-folder.md`.
+
+`converted/` and not `processed/` on purpose. `processed/` is what an analysis pulls
+*out* of the raw data — fitted positions, integrated intensities, diffusion lengths
+— and is not reproducible by re-running anything. A conversion decides nothing: the
+`.h5` holds the counts the CSV held. Which folder a file sits in therefore says
+whether it can be thrown away and regenerated.
+
+`out=` is the override, and for a directory run it is an output **root**: the tree
+under the named path is mirrored beneath it, so `raw/spot01/01-PL/sweep.csv` becomes
+`<out>/spot01/01-PL/sweep.h5`. Mirroring lives only in `convert_path`, which
+resolves a destination per folder and passes it down as an ordinary `out=`; the
+single-file converters are unchanged.
+`dev/decisions/0035-out-is-an-output-root-and-the-tree-is-mirrored.md`.
+
+Either way a source's **position** is preserved, which is the point: two spot
+folders holding the same `laser_ref_*.csv` keep their own output instead of one
+refusing on top of the other.
 
 ## What it does not decide for itself
 

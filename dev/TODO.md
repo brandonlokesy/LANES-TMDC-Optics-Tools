@@ -35,8 +35,11 @@
   `converters.py` converts real-space image CSVs to TIFF, one file per frame or one
   multi-page stack, and carries the `tmdc-convert` command. It reuses
   `loaders._classify_csv` and `loaders._order_by_iter`; the branch's own copies of
-  both reimplemented A9 and A7. Output goes to a `processed/` folder
-  (`dev/decisions/0032-converted-files-land-in-a-processed-folder.md`).
+  both reimplemented A9 and A7. Output goes to a `converted/` folder
+  (`dev/decisions/0034-converted-files-land-in-a-converted-folder.md`, superseding
+  0032 on the name only — `processed/` is for what an analysis extracts, a
+  conversion decides nothing). With `out=` a directory run mirrors the source tree
+  beneath it (`dev/decisions/0035-out-is-an-output-root-and-the-tree-is-mirrored.md`).
     - ~~Still owed: bulk spectral CSV → HDF5 on the command line~~ **done 2026-08-21.**
       `convert_spectral_csv_to_hdf5` loads with `AttoCubeSpectralSweep` and writes
       with `hdf5.write_sweep`, so the package has one archive format and a converted

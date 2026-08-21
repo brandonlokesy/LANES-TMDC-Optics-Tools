@@ -220,23 +220,23 @@ def test_unknown_dtype_is_refused(tmp_path):
 # Where output lands
 # ---------------------------------------------------------------------------
 
-def test_a_raw_folder_writes_to_its_sibling_processed(tmp_path):
+def test_a_raw_folder_writes_to_its_sibling_converted(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
     _frame(raw, "img.csv", 1)
 
     tif = converters.convert_image_csv_to_tiff(raw / "img.csv")
 
-    assert tif == tmp_path / "processed" / "img.tif"
+    assert tif == tmp_path / "converted" / "img.tif"
     assert tif.is_file()
 
 
-def test_any_other_folder_gets_a_processed_subfolder(tmp_path):
+def test_any_other_folder_gets_a_converted_subfolder(tmp_path):
     _frame(tmp_path, "img.csv", 1)
 
     tif = converters.convert_image_csv_to_tiff(tmp_path / "img.csv")
 
-    assert tif == tmp_path / "processed" / "img.tif"
+    assert tif == tmp_path / "converted" / "img.tif"
 
 
 def test_out_names_a_file_verbatim(tmp_path):
@@ -257,7 +257,7 @@ def test_a_stack_lands_beside_the_frames_own_output(tmp_path):
 
     stack_path = converters.convert_image_dir_to_tiff_stack(raw)
 
-    assert stack_path == tmp_path / "processed" / "raw_stack.tif"
+    assert stack_path == tmp_path / "converted" / "raw_stack.tif"
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +289,7 @@ def test_a_refused_conversion_creates_no_folder(tmp_path):
     with pytest.raises(ValueError):
         converters.convert_image_csv_to_tiff(tmp_path / "spec.csv")
 
-    assert not (tmp_path / "processed").exists()
+    assert not (tmp_path / "converted").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -308,8 +308,8 @@ def test_recursive_run_keeps_folders_apart(tmp_path):
 
     assert len(report.outputs) == 2
     assert not report.errors
-    assert tifffile.imread(tmp_path / "scan_a" / "processed" / "pl_iter_0.tif")[0, 0] == 1
-    assert tifffile.imread(tmp_path / "scan_b" / "processed" / "pl_iter_0.tif")[0, 0] == 2
+    assert tifffile.imread(tmp_path / "scan_a" / "converted" / "pl_iter_0.tif")[0, 0] == 1
+    assert tifffile.imread(tmp_path / "scan_b" / "converted" / "pl_iter_0.tif")[0, 0] == 2
 
 
 def test_recursive_stack_is_one_per_folder(tmp_path):
@@ -329,8 +329,8 @@ def test_a_batch_continues_past_a_failure(tmp_path):
     for i in (0, 1):
         _frame(tmp_path, f"pl_iter_{i}.csv", i)
     # Pre-place one output so its conversion is refused while the other succeeds.
-    (tmp_path / "processed").mkdir()
-    (tmp_path / "processed" / "pl_iter_0.tif").write_bytes(b"")
+    (tmp_path / "converted").mkdir()
+    (tmp_path / "converted" / "pl_iter_0.tif").write_bytes(b"")
 
     report = converters.convert_path(tmp_path)
 
@@ -364,7 +364,7 @@ def test_cli_writes_frames_and_returns_zero(tmp_path):
         _frame(raw, f"pl_iter_{i}.csv", i)
 
     assert converters.main([str(raw)]) == 0
-    assert sorted(p.name for p in (tmp_path / "processed").iterdir()) == [
+    assert sorted(p.name for p in (tmp_path / "converted").iterdir()) == [
         "pl_iter_0.tif", "pl_iter_1.tif"
     ]
 
@@ -376,7 +376,7 @@ def test_cli_stack_writes_one_file(tmp_path):
         _frame(raw, f"pl_iter_{i}.csv", i)
 
     assert converters.main([str(raw), "--stack"]) == 0
-    assert [p.name for p in (tmp_path / "processed").iterdir()] == ["raw_stack.tif"]
+    assert [p.name for p in (tmp_path / "converted").iterdir()] == ["raw_stack.tif"]
 
 
 def test_cli_returns_one_on_failure(tmp_path):
@@ -460,7 +460,7 @@ def test_an_unknown_spectra_type_is_refused_before_the_decode(tmp_path):
     with pytest.raises(ValueError, match="not a recognised measurement type"):
         converters.convert_spectral_csv_to_hdf5(csv, "PLL", out=tmp_path)
 
-    assert not (tmp_path / "processed").exists()
+    assert not (tmp_path / "converted").exists()
 
 
 def test_converting_a_frame_as_spectral_is_refused(tmp_path):
@@ -472,14 +472,14 @@ def test_converting_a_frame_as_spectral_is_refused(tmp_path):
     assert "not a spectral export CSV" in str(excinfo.value)
 
 
-def test_an_archive_lands_in_processed(tmp_path):
+def test_an_archive_lands_in_converted(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()
     make_spectral_csv(raw / "sweep.csv")
 
     h5 = converters.convert_spectral_csv_to_hdf5(raw / "sweep.csv", "PL")
 
-    assert h5 == tmp_path / "processed" / "sweep.h5"
+    assert h5 == tmp_path / "converted" / "sweep.h5"
 
 
 def test_an_existing_archive_is_refused(tmp_path):
@@ -539,7 +539,7 @@ def test_trpl_directory_becomes_one_archive(tmp_path):
 
     h5 = converters.convert_trpl_dir_to_hdf5(folder)
 
-    assert h5 == tmp_path / "processed" / "raw.h5"
+    assert h5 == tmp_path / "converted" / "raw.h5"
     original = AttoCubeTRPLSweep(folder)
     reopened = AttoCubeTRPLSweep(h5)
     assert np.array_equal(reopened.time, original.time)
@@ -589,6 +589,76 @@ def test_a_committed_trpl_folder_writes_one_archive_not_two(tmp_path):
     archives = [p for p in report.outputs if p.suffix == ".h5"]
     assert len(archives) == 1
     assert AttoCubeTRPLSweep(archives[0]).n_sweeps == 3
+
+
+# ---------------------------------------------------------------------------
+# out= is an output root: the tree is mirrored beneath it
+# ---------------------------------------------------------------------------
+
+def _spot_tree(root):
+    """A raw/spot<N>/<measurement>/ tree, as a benchmarking run produces."""
+    for spot in ("spot01", "spot02"):
+        sweep_dir = root / "raw" / spot / "01-PL-Vbot"
+        ref_dir   = root / "raw" / spot / "ref"
+        sweep_dir.mkdir(parents=True)
+        ref_dir.mkdir(parents=True)
+        make_spectral_csv(sweep_dir / "sweep.csv")
+        # The same reference filename under two spots — the case that collides
+        # when a tree is flattened into one folder.
+        _frame(ref_dir, "laser_ref.csv", 1)
+    return root / "raw"
+
+
+def test_out_mirrors_the_source_tree(tmp_path):
+    raw = _spot_tree(tmp_path)
+
+    report = converters.convert_path(
+        raw, out=tmp_path / "converted", recursive=True, spectra_type="PL")
+
+    assert not report.errors
+    assert sorted(p.relative_to(tmp_path / "converted").as_posix()
+                  for p in report.outputs) == [
+        "spot01/01-PL-Vbot/sweep.h5",
+        "spot01/ref/laser_ref.tif",
+        "spot02/01-PL-Vbot/sweep.h5",
+        "spot02/ref/laser_ref.tif",
+    ]
+
+
+def test_a_repeated_filename_survives_the_mirror(tmp_path):
+    # Flattened into one folder these two overwrite, or refuse.  Mirrored, each
+    # keeps its own place, which is the whole reason out= is a root.
+    raw = _spot_tree(tmp_path)
+
+    report = converters.convert_path(
+        raw, out=tmp_path / "converted", recursive=True, spectra_type="PL")
+
+    refs = sorted(p for p in report.outputs if p.name == "laser_ref.tif")
+    assert len(refs) == 2
+    assert {p.parent.parent.name for p in refs} == {"spot01", "spot02"}
+
+
+def test_a_non_recursive_run_addresses_out_directly(tmp_path):
+    # One folder, so there is no tree to mirror and out= is the folder itself.
+    (tmp_path / "raw").mkdir()
+    for i in (0, 1):
+        _frame(tmp_path / "raw", f"pl_iter_{i}.csv", i)
+
+    report = converters.convert_path(tmp_path / "raw", out=tmp_path / "converted")
+
+    assert sorted(p.parent for p in report.outputs) == [tmp_path / "converted"] * 2
+
+
+def test_out_naming_a_file_is_used_verbatim(tmp_path):
+    # Meaningful with a stack, which is one output for the whole folder.
+    (tmp_path / "raw").mkdir()
+    for i in (0, 1):
+        _frame(tmp_path / "raw", f"pl_iter_{i}.csv", i)
+
+    report = converters.convert_path(
+        tmp_path / "raw", out=tmp_path / "mystack.tif", stack=True)
+
+    assert report.outputs == [tmp_path / "mystack.tif"]
 
 
 def test_the_cli_reports_a_deferred_directory(tmp_path, capsys):

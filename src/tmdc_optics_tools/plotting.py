@@ -537,7 +537,7 @@ def plot_spectral_map(
     # --- spectral axis ---
     x_axis         : str   = "energy",
     cmap           : ColormapLike = "magma",
-    median_kernel  : int   = 3,
+    median_kernel  : int   = 1,
     clim           : tuple = None,
     colorbar       : bool  = True,
     colorbar_label : str   = None,
@@ -614,7 +614,10 @@ def plot_spectral_map(
     cmap : str, Colormap, or sequence of colours
         Passed to :func:`get_cmap`.
     median_kernel : int
-        2-D median filter size. Set to 1 to disable.
+        Median filter size, applied to the block before it is drawn.  The
+        footprint is square, so a value ``n`` above ``1`` takes the median over
+        ``n`` detector pixels **and** ``n`` neighbouring sweep points, which are
+        independent measurements.  ``1``, the default, applies no filter.
     clim : tuple of (vmin, vmax), optional
         Colour axis limits. Auto-scaled if ``None``.
     colorbar : bool

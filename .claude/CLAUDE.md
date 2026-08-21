@@ -338,10 +338,6 @@ bwarea semantics are wanted at all.
   also *suppresses repeats*, so it is a diagnostics failure rather than a cosmetic one.
   Its own pass, not a character changed while passing through. **Trace by measuring,
   not by reading `def` lines.**
-- `plot_spectral_map`'s `median_kernel` should default to `1` (off). The current `3`
-  runs a 2-D median filter that smooths across the sweep axis, mixing physically
-  independent sweeps. Keep 2-D available, just not by default. (`plot_pl_map_Vab_scan`
-  is only a deprecation shim onto it, so fixing the shim fixes nothing.)
 - `DiffusionCloudPanel` accepts a `var_array` shorter than the animation and raises
   partway through rendering, and analyses every frame regardless of how many are being
   shown. Both want `diffusion`'s first tests, which do not exist yet.

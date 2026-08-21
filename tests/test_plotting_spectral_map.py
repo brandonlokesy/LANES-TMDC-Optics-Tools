@@ -1,7 +1,7 @@
 """
 Tests for ``plotting.plot_spectral_map`` and its deprecated alias.
 
-Four things are pinned. First, the y-axis comes from ``sweep_axis`` rather than
+Five things are pinned. First, the y-axis comes from ``sweep_axis`` rather than
 the ``gate_axis`` alias, which is what lets the alias be deleted: a test that
 only checked the values would pass either way, so the declared sweep is varied
 (index, power, piezo) and the axis compared against the property.
@@ -17,6 +17,10 @@ called, including that a contrast source is not labelled as PL.
 
 Fourth, ``plot_pl_map_Vab_scan`` warns and then produces a figure identical to
 the new name's — a shim that warns but has drifted is worse than no shim.
+
+Fifth, ``median_kernel`` runs no filter unless a kernel is named, and still runs
+one when it is.  The other array comparisons here pass ``median_kernel=1``, so
+they cannot see the default; one test names no kernel so that it can.
 """
 
 import matplotlib
@@ -250,3 +254,33 @@ def test_the_contrast_source_takes_the_contrast_label(contrast_scan):
                                            spectra_source="contrast")
 
     assert fig.axes[-1].get_ylabel() == contrast_scan.contrast_label
+
+
+# ---------------------------------------------------------------------------
+# The median filter is off unless asked for, and reachable when it is
+# ---------------------------------------------------------------------------
+
+def test_no_median_filter_runs_unless_a_kernel_is_named(csv_path):
+    """
+    The default draws the scan's own array, unfiltered.
+
+    Every other array comparison in this file passes ``median_kernel=1``
+    explicitly, so all of them would keep passing whatever the default were.
+    This one names no kernel, which is what pins the default itself.
+    """
+    scan = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                                 apply_jacobian=False)
+    _, _, mesh = plotting.plot_spectral_map(
+        scan, spectra_source="raw", x_axis="wavelength")
+
+    assert np.allclose(mesh.get_array(), scan.spectra)
+
+
+def test_a_kernel_above_one_still_filters(csv_path):
+    """The square filter stays reachable, so opting in must change the array."""
+    scan = AttoCubeSpectralSweep(str(csv_path), spectra_type="PL",
+                                 apply_jacobian=False)
+    _, _, mesh = plotting.plot_spectral_map(
+        scan, spectra_source="raw", x_axis="wavelength", median_kernel=3)
+
+    assert not np.allclose(mesh.get_array(), scan.spectra)

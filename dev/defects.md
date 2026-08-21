@@ -731,6 +731,11 @@ Incidental find, unrelated to the repair but visible from the test: `plot_spectr
 told otherwise. The test passes `median_kernel=1` to compare arrays. Still the open item
 in CLAUDE.md's *Known issues*.
 
+*Update, 2026-08-21.* That default is now `1`, under **E3**, and the CLAUDE.md entry is
+gone. `_map_column` in `tests/test_cosmic_rays_downstream.py` still passes
+`median_kernel=1` explicitly, which is now redundant but harmless — it states what the
+comparison needs rather than relying on a default.
+
 **Not fixed, and its own change:** there is no background-corrected wavelength-space
 array, so `bg_region_nm=` shows on the energy axis only, and `best_spectra` therefore
 means "repaired" on a sweep and "background-subtracted" on a `SingleSpectrum`. Closing
@@ -1866,7 +1871,15 @@ inside the function body for no reason.)
   accepts 1-D `x`/`y`.
 - **`median_kernel=3` runs a 2-D median filter**, i.e. it smooths *across gate
   voltage*, mixing physically independent sweeps. **Decided: default should be `1`
-  (off), with 2-D kept available.** Not yet implemented.
+  (off), with 2-D kept available.** **[FIXED — 2026-08-21]**
+  **[verified by running]** `plot_spectral_map` defaults `median_kernel=1`; a value
+  above 1 still applies the square footprint, and the docstring now says that the
+  footprint spans the sweep axis as well as the pixel axis. Two tests in
+  `tests/test_plotting_spectral_map.py` pin both halves —
+  `test_no_median_filter_runs_unless_a_kernel_is_named` names no kernel, so it is the
+  default it sees, and `test_a_kernel_above_one_still_filters` names 3, so deleting the
+  filter would be caught. `plot_pl_map_Vab_scan` forwards `*args, **kwargs` and needed
+  no change. The other two bullets stand.
 - `rescale_img=True` rescales the whole map to [0,1], silently changing what the
   colour bar means; the `colorbar_label` parameter is accepted but then overwritten
   (line 197, with the old line left commented out).

@@ -1221,6 +1221,7 @@ whitespace delimiter collapses them away, so row 0 reads as 1024 columns against
 would let the written message do its job.
 
 **A30. `plot_spectral_map(rescale_img=True)` blanks the whole panel on one `NaN`.**
+**[FIXED — 2026-08-21]** **[verified by running]**
 `rescale_intensity(data, in_range="image", out_range=(0, 1))` takes its limits from the
 array's own minimum and maximum, and a single `NaN` makes both of them `NaN`, so every
 cell comes back `NaN` and nothing is drawn. `plot_image` already carries the fix —
@@ -1231,6 +1232,35 @@ into `rescale_intensity`. Reachable, because `spectra_source="contrast"` is a ra
 against a reference frame, so a zero reference pixel gives a non-finite column. Found
 while closing E3 and deliberately left out of that change; the fix is the same one line
 `plot_image` already has, plus a test.
+
+*Fixed as sketched*, with two things the sketch did not say. **The line's position is
+load-bearing in a way it is not in `plot_image`:** `plot_spectral_map` runs
+`processing.smooth_median` first, and that returns a plain array, so a mask applied before
+the filter is discarded. It goes between the two. And the mask is applied
+**unconditionally**, as `plot_image` does, rather than inside the `rescale_img` branch —
+`pcolormesh` already leaves a bare non-finite cell undrawn, so the default path is
+unchanged, and one spelling cannot drift from the other.
+
+*Test:* `test_rescale_img_survives_a_guarded_contrast_pixel` in
+`tests/test_plotting_spectral_map.py`, reproducing the reachable route rather than
+planting a `NaN` — a reference with one zero-count pixel, which `spectral_contrast` guards
+to `NaN`, giving a non-finite **column**. It reads the map on the **wavelength** axis
+because the energy axis argsorts the pixels, so the guarded pixel is not column 2 there;
+the first draft asserted the wrong column and failed for that reason rather than for the
+defect. Assertions are on the values, not only the mask: every cell is masked in the
+broken case, so a mask-only test would pass against it. Confirmed by reverting the one
+line — all three rows of column 0 come back masked, and skimage emits its own
+*"Rescaling will broadcast NaN to the full image"* warning, which nothing in the package
+was listening for.
+
+Documented on the `Returns` block, which now says non-finite cells are masked and take no
+part in the colour limits or in `rescale_img`'s range — the caller-facing half of the
+same fact `plot_image` states on its `img` parameter.
+
+*Not addressed, and adjacent:* `smooth_median` still spreads a non-finite cell across its
+footprint, so `median_kernel > 1` on a block holding a guarded column widens that column
+by the kernel. Whether the median filter should skip non-finite pixels is its own
+question, in `processing`, not in the plotting call.
 
 
 ## B. Dead parameters — accepted, documented, silently ignored
@@ -2577,7 +2607,10 @@ scikit-learn 1.9.0 with it; the suite is 917 passed, 0 failed, and
 
 **Opened 2026-08-21 while closing E3:** **A30**. Same class as A25 — a figure drawn from
 values that are not measurements — and it rides along with whatever next touches
-`plot_spectral_map`'s rescale path.
+`plot_spectral_map`'s rescale path. **Fixed the same day**, on its own rather than as a
+passenger: it was the cheapest open entry in the file, the fix already existed in
+`plot_image`, and the test already existed for `plot_image` to be modelled on. **A25** is
+now the cheapest one left.
 
 Outside this order: **E9 is largely closed** — sample files arrived, and R/RC and
 TRPL support landed on 2026-07-30 along with the rename and arbitrary-sweep rewrite

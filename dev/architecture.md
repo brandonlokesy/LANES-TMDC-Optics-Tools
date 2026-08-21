@@ -242,20 +242,32 @@ Four things to know:
 - **A curated row a file lacks is not an error.** The property raises only if you
   access it. A file from a different instrument configuration still loads.
 - **`self._CURATED` is the class default; `self._curated` is this instance's
-  resolved copy** — same keys, but labels and scales may have been overridden. It is
-  built as lists so it can be mutated during construction, then frozen to tuples so
-  it cannot be after.
+  resolved copy** — same keys, but labels, scales and units may all have been
+  overridden. It is built as lists so it can be mutated during construction, then
+  frozen to tuples so it cannot be after.
 - **Everything else in the file is still reachable** through `parameters`. Curation
   buys you a name and a unit, nothing more.
+- **The unit is not decoration.** It is where a curated-backed sweep axis gets its
+  own unit from, so it reaches `sweep_axis_label`, the `__repr__` sweep and power
+  lines, the held-axis warning and every legend that names the coordinate. This is
+  the *only* home for it — see `_SWEEP_TYPES` below.
 
 Overriding, per instance:
 
 ```python
 scan = AttoCubeSpectralSweep(..., curated_labels={"scanner_x": "Galvo_X"})  # which row
-scan = AttoCubeSpectralSweep(..., curated_scales={"scanner_x": 12.5})       # µm per V
+scan = AttoCubeSpectralSweep(..., curated_scales={"scanner_x": 12.5},       # µm per V
+                                  curated_units ={"scanner_x": "µm"})       # …now in µm
 ```
 
-`v_top` and `v_bot` are the exception — see roles, next.
+The two go together: a scale changed with no unit beside it **warns**, because the
+numbers have moved and every label still states the old unit. Restating the unit
+silences it, which is what a polarity flip does — `{"i_top": -1e9}` is still nA.
+`""` is the dimensionless spelling; `None` is refused. Reasoning and the rejected
+shapes: `dev/decisions/0029-a-curated-rows-unit-is-declared-with-its-scale.md`.
+
+`v_top` and `v_bot` are the exception for *labels* — see roles, next. Scales and
+units reach them, since neither claims anything about wiring.
 
 ### Role, electrode, channel
 
@@ -454,7 +466,7 @@ The distinction that matters:
 
 | Restored on read | Recorded only |
 |---|---|
-| `spectra_type`, `sweep`, `gates`, `geometry`, `curated_labels`/`scales`, `roi` | `apply_jacobian`, `bg_region_nm`, `cosmic_rays`, the aux spectra |
+| `spectra_type`, `sweep`, `gates`, `geometry`, `curated_labels`/`scales`/`units`, `roi` | `apply_jacobian`, `bg_region_nm`, `cosmic_rays`, the aux spectra |
 | *what the measurement was* | *what one session did to it* |
 
 ---
@@ -1241,6 +1253,7 @@ A change that breaks one of these is a bug even if the tests pass.
 | reshape a raster, or pick a spectrum out of one | declare `fast_sweep=`/`slow_sweep=`, then `as_grid()` / `get_spectrum_at()`; §`sweep_grid()` above |
 | add a new input format | write a decoder returning the §2.1 payload; add a suffix to the dispatch in `_decode` |
 | add a curated parameter | one row in `_AttoCubeSweep._CURATED`, plus a property |
+| add a curated-backed sweep axis | a `_SWEEP_TYPES` row whose unit is `None` — the unit comes from the registry entry, and a literal here would go stale under `curated_units` |
 | understand a gate refusal | the refusal matrix in §2.2 above |
 | know why a number is what it is | `dev/physics-conventions.md` |
 | know why the code is shaped this way | `dev/decisions/`, index in its README |
@@ -1265,7 +1278,7 @@ skeleton of the whole design:
 
 | Table | Maps | Adding an entry means |
 |---|---|---|
-| `_SWEEP_TYPES` | sweep type → (property name, label, unit) | a new declarable sweep axis |
+| `_SWEEP_TYPES` | sweep type → (property name, label, unit — `None` means *read it from `_CURATED`*) | a new declarable sweep axis |
 | `_SWEEP_REQUIRES` | sweep type → curated rows it needs | load-time validation for it |
 | `_GATE_ROLE_CURATED` | role → curated attribute | (fixed — the one gate fact) |
 | `_GATE_CURATED` | *(derived)* the gate curated names | — |
@@ -1274,7 +1287,7 @@ skeleton of the whole design:
 | `_GATE_ROLES` | *(derived)* + `"channel"` | — |
 | `_BLOCK_LAYOUTS` | block field names → layout kind | a new export layout |
 | `_CLASS_FOR_KIND` | layout kind → class name | (for the "wrong class" error) |
-| `_CURATED` | curated attribute → (row label, scale, unit) | a new promoted parameter |
+| `_CURATED` | curated attribute → (row label, scale, unit); the one home for that unit | a new promoted parameter |
 | `_COSMIC_RAY_KEYS` | *(derived from a signature)* | — |
 | `constants.SPECTROSCOPY_TYPES` | code → full name | a new measurement type |
 | `constants.SIGNAL_LABELS` | code → (axis name, unit) | its axis label |

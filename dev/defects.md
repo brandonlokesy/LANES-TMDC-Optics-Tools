@@ -1479,6 +1479,7 @@ self`, calls the base, then resets it to `None`. If the base call raises, the ob
 left pointing at itself permanently.
 
 **B6. A curated row's scale can be overridden and its unit cannot.**
+**[FIXED — 2026-08-20]** **[verified by running]**
 Found 2026-08-20 while fixing **B2**; the same fault one module over, and worse.
 `loaders._CURATED` stores each entry as `(row label, scale, unit)`, and the override loop
 in `_decode_and_describe` says so in its own comment: *"Only label (index 0) and scale
@@ -1491,14 +1492,75 @@ line and legend entry still reading **V**. B2 dropped a label that was offered; 
 keeps a label that has become wrong, which is the more dangerous of the two, and it
 happens on the one path the documentation actively recommends.
 
-*Not fixed here* — it needs a decision rather than an edit. Two shapes: a
-`curated_units=` override alongside `curated_scales`, symmetrical with the existing
-mechanism; or refusing a scale override that arrives without a unit, on the grounds that
-a rescaled quantity whose unit is unstated is not something the package should serve.
-The first is more usable, the second is harder to misuse. Either way `hdf5` carries the
-curated config, so whichever lands has to round-trip, and `_SWEEP_TYPES` holds its own
-copy of the unit for the sweep axes — which is a second place the same string lives, and
-should be checked before adding a third.
+*This entry's diagnosis was half wrong, and the fix turned on the correction.* The
+symptom above is real, but **`_CURATED[...][2]` was never what labelled anything.**
+Traced by reading every reader of `self._curated`: the unit slot was read by exactly one
+thing, the `curated_parameters` property — a documentation view. `_curated_value`
+discards it. Every user-visible unit came from a *different copy*:
+
+| copy | reaches |
+|---|---|
+| `_SWEEP_TYPES[key][2]` | `_resolve_sweep` → `sweep_unit` → `sweep_axis_label`, the `__repr__` sweep line, the held-axis warning, `_coordinate_text` legends, nest labels |
+| a hardcoded `"µW"` in `__repr__` | the Power line |
+| `sweep_unit="V"` panel defaults in `plotting` | `SpectrumLinePanel`, `NormalizedSpectrumPanel` — already owed to **E12** |
+
+So the fault was not one missing override: **the unit for one quantity lived in three
+places, only the scale was overridable, and any override desynchronised them.** Adding
+`curated_units=` alone would have fixed `curated_parameters` and left every label reading
+V — the entry's own headline symptom untouched.
+
+*Fixed* as two coupled halves, recorded in
+`dev/decisions/0029-a-curated-rows-unit-is-declared-with-its-scale.md`:
+
+1. **`curated_units=`** on both live loaders, third store in the same override loop,
+   round-tripped through HDF5 (`FORMAT_VERSION` 2.2 → 2.3). It reaches the gate and
+   current entries, as `curated_scales` does and `curated_labels` does not — a unit
+   claims nothing about wiring.
+2. **The duplicate in `_SWEEP_TYPES` collapsed.** The five curated-backed rows now hold
+   `None` for their unit, meaning *read it from the registry*; only `index`,
+   `electric_field` and `carrier_density` still spell one, having no curated row behind
+   them. Behaviour-preserving, because all five pairs already agreed
+   (`V`/`V`, `V`/`V`, `µW`/`µW`, `V`/`V`, `V`/`V`) — pinned by a regression test rather
+   than asserted.
+
+**A changed scale with no unit warns**, naming the entry, both scales and the unit left
+standing. Not raised: the numbers are right either way and the researcher may be
+mid-calibration. Not silent: nothing downstream can detect it. Restating the unit
+silences it, which is what decision 0005's polarity flip does — `-1e9` is still nA. Its
+`stacklevel=3` is **measured** on both live doors, not counted off `def` lines; it is a
+new site, not one of **A11**'s fifteen. `AttoCubePLVabScan` adds a frame and so points
+at its own `super().__init__`; it is deprecated and gets a comment, not an argument.
+
+Two tests were pinning the defect as correct behaviour:
+
+- `test_constructor_overrides_flow_through_registry` asserted
+  `curated_parameters["power"] == ("Galvo_X", 1.0, "µW")` — a scale dropped to 1.0, so
+  raw counts, still claiming microwatts.
+- `test_curated_overrides_restored` checked the label and the scale across a round trip
+  and never the unit. That is why this went unnoticed.
+
+Measured on `examples/data/position-scan/PL`, `curated_scales={"scanner_y": 12.5}`:
+
+| | `curated_parameters` | `sweep_axis_label` | `__repr__` |
+|---|---|---|---|
+| scale only | `('Scanner Y', 12.5, 'V')` | `Piezo $y$ (V)` | `0 → 1125 V` |
+| scale + unit | `('Scanner Y', 12.5, 'µm')` | `Piezo $y$ (µm)` | `0 → 1125 µm` |
+| + HDF5 round trip | `('Scanner Y', 12.5, 'µm')` | `Piezo $y$ (µm)` | `0 → 1125 µm` |
+
+The legend path with it: `_coordinate_text` goes from `'Piezo $y$ (V) = 125'` to
+`'Piezo $y$ (µm) = 125'`.
+
+*Test:* 11 new cases in `tests/test_loaders.py` and 2 in `tests/test_hdf5_roundtrip.py`
+(895 → 908). 15 fail against the pre-fix code, including the two corrected above; the
+negative ones — a restated scale is not a rescale, a stored scale does not warn on read
+— are the did-not-regress cases.
+
+*Adjacent, not fixed:* decision 0005 §79-82 recorded in passing that `curated_scales`
+*replaces* rather than multiplies, so `{"i_bot": -1.0}` silently returns amps. That is
+this same fault seen earlier and left; the warning now catches the unit half of it, not
+the magnitude half. `curated_scales`'s docstring also claimed "Same keys as
+*curated_labels*", which was never true — the role-backed keys are refused there and
+accepted here; corrected while in the block.
 
 
 ## C. Documentation that contradicts the code
@@ -2395,7 +2457,7 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
    (`sweep_atol=`); until one appears the entry is the evidence, not the work.
 3. **C1–C3** — the doc corrections, since they actively mislead. **C8** and **C9** join
    them, and both are cheapest taken by whatever next edits their function.
-4. **B6, D2–D6, D8, D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
+4. **D2–D6, D8, D9** — dead parameters and duplication; mechanical, low risk. (B1 fixed
    2026-08-10, and was not mechanical: the sketched fix would have introduced a second
    instance of A5. **B3** was checked on 2026-08-20 and is not a defect. **B4** was half
    wrong and half fixed the same day, as were **D1** and **D7** — none of the four was as
@@ -2403,7 +2465,11 @@ themselves. The standing one-line **don't** for each lives in `.claude/CLAUDE.md
    already overtaken. **B5** was opened and fixed the same day too, found while settling
    B3: the same class of fault as B1, a parameter accepted and then not acted on.
    **B2** was fixed on 2026-08-20 by adding the field, and opened **B6** — the same
-   fault in `loaders._CURATED`, where a scale can be overridden and its unit cannot.)
+   fault in `loaders._CURATED`, where a scale can be overridden and its unit cannot.
+   **B6** was fixed the same day and was *not* mechanical either: its filed diagnosis
+   was half wrong, and the unit that actually reached the labels lived in
+   `_SWEEP_TYPES`, so the fix was a deduplication as well as a new argument. That makes
+   five entries on this line the code or the analysis had already overtaken.)
 5. **E2, E3, E5** — the remaining design calls, one at a time.
 6. **E11 (with D2)** — the `plot_diffusion_cloud` signature and return shape. Last
    because it is the only breaking change on the list and touches `examples/`.

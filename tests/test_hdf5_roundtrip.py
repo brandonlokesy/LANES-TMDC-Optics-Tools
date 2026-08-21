@@ -10,6 +10,8 @@ Reuses the synthetic CSV builder from test_loaders rather than forking a second
 copy of the export layout.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -135,7 +137,7 @@ def test_curated_overrides_restored(tmp_path, geom):
     scan = AttoCubeSpectralSweep(
         str(csv), spectra_type="PL", sweep="electric_field", geometry=geom,
         gates={"top": "V_B", "bottom": "V_A"},
-        curated_scales={"power": 1.0},
+        curated_scales={"power": 1.0}, curated_units={"power": "counts"},
     )
     scan.to_hdf5(tmp_path / "wired.h5")
     back = AttoCubeSpectralSweep(tmp_path / "wired.h5")
@@ -144,7 +146,45 @@ def test_curated_overrides_restored(tmp_path, geom):
     assert back.curated_parameters["v_top"][0] == "V_B"
     assert back.curated_parameters["v_bot"][0] == "V_A"
     assert back.curated_parameters["power"][1] == 1.0
+    # The unit too: a scale restored without it would put raw counts back under
+    # the registry's "µW", which is the whole reason the unit is written.
+    assert back.curated_parameters["power"][2] == "counts"
     assert np.allclose(back.ef, scan.ef)
+
+
+def test_a_curated_unit_reaches_the_axis_label_after_a_round_trip(tmp_path):
+    # The end-to-end case B6 is about: a piezo row calibrated to µm must still be
+    # labelled µm after the archive round trip, not reverted to the default V.
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    scan = AttoCubeSpectralSweep(
+        str(csv), spectra_type="PL", gates=GATES, sweep="piezo_y",
+        curated_scales={"scanner_y": 12.5}, curated_units={"scanner_y": "µm"},
+    )
+    scan.to_hdf5(tmp_path / "piezo.h5")
+    back = AttoCubeSpectralSweep(tmp_path / "piezo.h5")
+
+    assert back.curated_parameters["scanner_y"] == ("Scanner Y", 12.5, "µm")
+    assert back.sweep_unit == "µm"
+    assert back.sweep_axis_label == scan.sweep_axis_label
+    assert np.allclose(back.sweep_axis, scan.sweep_axis)
+
+
+def test_reading_a_stored_scale_does_not_warn_about_its_unit(tmp_path):
+    # The rescaled-without-a-unit warning is for a *caller* who omitted the unit.
+    # A file records a value for every entry, so reading one back must be silent
+    # or every archive with a non-default scale would warn on every load.
+    csv = tmp_path / "scan.csv"
+    make_spectral_csv(csv)
+    scan = AttoCubeSpectralSweep(
+        str(csv), spectra_type="PL", gates=GATES,
+        curated_scales={"scanner_y": 12.5}, curated_units={"scanner_y": "µm"},
+    )
+    scan.to_hdf5(tmp_path / "quiet.h5")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        AttoCubeSpectralSweep(tmp_path / "quiet.h5")
+    assert not [w for w in caught if "rescaled" in str(w.message)]
 
 
 def test_undeclared_wiring_stays_undeclared_on_read(tmp_path):

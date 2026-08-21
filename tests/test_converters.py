@@ -727,12 +727,73 @@ def test_from_raw_warns_and_falls_back_when_there_is_no_raw(tmp_path):
     assert report.outputs == [folder / "converted" / "sweep.h5"]
 
 
+def test_beside_writes_next_to_the_source(tmp_path):
+    # For a targeted conversion: no converted/ level at all.  The committed
+    # examples/data archives sit beside their CSVs this way.
+    raw = _spot_tree(tmp_path)
+    src = raw / "spot01" / "01-PL-Vbot" / "sweep.csv"
+
+    report = converters.convert_path(src, spectra_type="PL", beside=True)
+
+    assert report.outputs == [src.with_suffix(".h5")]
+    assert not (src.parent / "converted").exists()
+
+
+def test_beside_over_a_tree_leaves_every_output_with_its_source(tmp_path):
+    raw = _spot_tree(tmp_path)
+
+    report = converters.convert_path(
+        raw, recursive=True, spectra_type="PL", beside=True)
+
+    assert not report.errors
+    assert sorted(p.relative_to(raw).as_posix() for p in report.outputs) == [
+        "spot01/01-PL-Vbot/sweep.h5",
+        "spot01/ref/laser_ref.tif",
+        "spot02/01-PL-Vbot/sweep.h5",
+        "spot02/ref/laser_ref.tif",
+    ]
+    assert not list(raw.rglob("converted"))
+
+
+def test_beside_is_the_same_answer_as_out_naming_that_folder(tmp_path):
+    # It is shorthand, not a second placement rule.  If these ever diverge, one
+    # of them has grown a meaning of its own.
+    raw = _spot_tree(tmp_path)
+    src = raw / "spot01" / "01-PL-Vbot" / "sweep.csv"
+
+    by_beside = converters.convert_path(src, spectra_type="PL", beside=True)
+    by_out = converters.convert_path(
+        src, spectra_type="PL", out=src.parent, overwrite=True)
+
+    assert by_beside.outputs == by_out.outputs
+
+
+def test_beside_and_out_together_are_refused(tmp_path):
+    raw = _spot_tree(tmp_path)
+
+    with pytest.raises(ValueError, match="at most one of out=, from_raw= and beside="):
+        converters.convert_path(
+            raw, out=tmp_path / "elsewhere", beside=True, spectra_type="PL")
+
+
+def test_beside_and_from_raw_together_are_refused(tmp_path):
+    raw = _spot_tree(tmp_path)
+
+    with pytest.raises(ValueError) as excinfo:
+        converters.convert_path(raw, from_raw=True, beside=True, spectra_type="PL")
+
+    # The message names which two were given, not just that there was a clash.
+    assert "from_raw=, beside=" in str(excinfo.value)
+
+
 def test_out_and_from_raw_together_are_refused(tmp_path):
     raw = _spot_tree(tmp_path)
 
-    with pytest.raises(ValueError, match="at most one of out= and from_raw="):
+    with pytest.raises(ValueError) as excinfo:
         converters.convert_path(
             raw, out=tmp_path / "elsewhere", from_raw=True, spectra_type="PL")
+
+    assert "out=, from_raw=" in str(excinfo.value)
 
 
 def test_the_cli_reports_the_refusal_rather_than_raising(tmp_path):

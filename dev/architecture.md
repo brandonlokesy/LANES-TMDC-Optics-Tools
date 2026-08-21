@@ -1194,6 +1194,7 @@ still read their own immediate parent.
 
 | | root | anchor |
 |---|---|---|
+| `beside=True` | the source's own folder | the same folder |
 | `out=` given | `Path(out)` | the folder named in the call |
 | default, named folder is `raw` | its sibling `converted/` | that `raw` folder |
 | `from_raw=True` | nearest ancestor `raw`'s sibling `converted/` | that `raw` folder |
@@ -1207,8 +1208,10 @@ with nothing below it addresses the root directly.
 The default anchors on the folder the call **names**, never on one it searches for:
 the destination has to be readable off the command. `from_raw=` is the opt-in that
 searches upward, for a call pointing inside `raw/` — at one measurement folder, or
-at a single file — and it warns and falls back when no `raw` is found. Giving both
-`out=` and `from_raw=` raises, since both answer the same question.
+at a single file — and it warns and falls back when no `raw` is found. `beside=` is shorthand for `out=` naming the source's own folder — root and anchor
+the same, so every relative path is `.` and each output lands with its source. Any
+two of `out=`, `from_raw=` and `beside=` together raise, since all three answer the
+same question.
 `dev/decisions/0035-out-is-an-output-root-and-the-tree-is-mirrored.md` and
 `dev/decisions/0036-the-default-root-comes-from-the-folder-you-named.md`.
 

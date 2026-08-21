@@ -189,6 +189,30 @@ tmdc-convert EXP/raw --recursive --spectra-type PL --out D:/archive
 giving both is refused. An `--out` path carrying a suffix is taken as one filename
 instead of a root, which is meaningful with `--stack`.
 
+### If you just want the file right there
+
+`--beside` drops the `converted/` level altogether and writes each output into the
+folder its source came from. For a targeted conversion — one file you want an
+archive of, next to the CSV, the way the committed `examples/data` archives sit:
+
+```
+tmdc-convert examples/data/stark-shift/sweep.csv --spectra-type PL --beside
+
+examples/data/stark-shift/sweep.csv
+examples/data/stark-shift/sweep.h5     ← right next to it
+```
+
+It works over a folder too, in which case every output lands with its own source
+and no `converted/` folder appears anywhere.
+
+This is shorthand: `--out <that same folder>` does the identical thing. Prefer
+`--beside` for a one-off, because a boolean cannot be mistyped into a path that is
+wrong but still valid. It will write inside `raw/` if that is where the source is,
+and does not warn — you asked for it explicitly.
+
+`--out`, `--from-raw` and `--beside` are mutually exclusive; giving two names both
+in the refusal.
+
 ### All of it at a glance
 
 | You run | You get |
@@ -198,6 +222,7 @@ instead of a root, which is meaningful with `--stack`.
 | `tmdc-convert EXP/raw/spot01/01-PL` | `EXP/raw/spot01/01-PL/converted/…` |
 | `tmdc-convert EXP/raw/spot01/01-PL --from-raw` | `EXP/converted/spot01/01-PL/…` |
 | `tmdc-convert Downloads/mydata` (no `raw/`) | `Downloads/mydata/converted/…` |
+| `tmdc-convert EXP/raw/spot01/01-PL/sweep.csv --beside` | `EXP/raw/spot01/01-PL/sweep.h5` |
 
 !!! note "An existing output is refused"
     Every writer takes `overwrite=False` and raises `FileExistsError`, matching
@@ -254,10 +279,10 @@ Installing the package provides `tmdc-convert`. An editable install needs
 re-installing once for the command to appear.
 
 ```
-tmdc-convert PATH [--out ROOT] [--from-raw] [--spectra-type {A,PL,R,RC,T,TRPL}]
-             [--prefix P] [--stack] [--recursive]
-             [--dtype auto|uint16|uint32|float32] [--compression gzip|none]
-             [--overwrite]
+tmdc-convert PATH [--out ROOT | --from-raw | --beside]
+             [--spectra-type {A,PL,R,RC,T,TRPL}] [--prefix P] [--stack]
+             [--recursive] [--dtype auto|uint16|uint32|float32]
+             [--compression gzip|none] [--overwrite]
 ```
 
 It returns a non-zero exit status if anything failed. One folder can produce both

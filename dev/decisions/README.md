@@ -135,5 +135,6 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0034](0034-converted-files-land-in-a-converted-folder.md) | Converted files land in a `converted/` folder, not `processed/` | 2026-08-21 | Accepted · §2 extended by 0036 |
 | [0035](0035-out-is-an-output-root-and-the-tree-is-mirrored.md) | `out=` is an output root, and the tree is mirrored beneath it | 2026-08-21 | Accepted |
 | [0036](0036-the-default-root-comes-from-the-folder-you-named.md) | The default output root comes from the folder you named; `from_raw=` opts into searching | 2026-08-21 | Accepted |
+| [0037](0037-beside-is-shorthand-not-a-placement-rule.md) | `beside=` is shorthand for one `out=`, not a third placement rule | 2026-08-22 | Accepted |
 
 This table is the one mutable part of the folder.

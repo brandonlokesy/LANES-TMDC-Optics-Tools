@@ -23,9 +23,10 @@ belong together, so it is asked for rather than assumed.
 Where output lands
 ------------------
 A converted file goes into a ``converted/`` folder: the sibling of ``raw/`` when
-the source sits in one, and a folder created beside the source otherwise.  The
+the source sits in one, and one inside the source's own folder otherwise.  The
 folder is created if it does not exist.  The two names are fixed and take no
-parameter.
+parameter.  ``convert_path(beside=True)`` drops the ``converted/`` level entirely
+and writes each output next to its source, for a targeted conversion.
 
 ``converted/`` rather than ``processed/`` because a conversion is not an analysis:
 the output holds the same numbers the export held.  A ``processed/`` folder is for
@@ -695,6 +696,7 @@ def convert_path(
     prefix       : str  = None,
     compression  : str  = "gzip",
     from_raw     : bool = False,
+    beside       : bool = False,
 ) -> ConversionReport:
     """
     Convert a file, a directory, or a tree, continuing past failures.
@@ -771,6 +773,17 @@ def convert_path(
         high up an unrelated path anchors everything below it, and the result
         cannot be predicted from the call.  Turn it on having checked the path.
         Warns and falls back to the default when no ``raw`` is found.
+    beside : bool
+        Write each output into **the folder its source came from**, with no
+        ``converted/`` level.  For targeted conversions — one file, or a folder
+        whose outputs belong next to their inputs, as the committed
+        ``examples/data`` archives do.
+
+        Shorthand only: identical to passing ``out=`` naming that folder, and
+        preferred over it for a one-off because a boolean cannot be mistyped into
+        a valid-but-wrong path.  It will write inside ``raw/`` if that is where
+        the source is, and does not warn — an explicit argument is the caller
+        deciding.
 
     Returns
     -------
@@ -782,7 +795,7 @@ def convert_path(
     FileNotFoundError
         If *path* is neither a file nor a directory.
     ValueError
-        If both *out* and *from_raw* are given.
+        If more than one of *out*, *from_raw* and *beside* is given.
 
     Warns
     -----
@@ -792,18 +805,26 @@ def convert_path(
     path = Path(path)
     outputs, skipped, errors = [], {}, []
 
-    if out is not None and from_raw:
+    given = [name for name, on in (("out=", out is not None),
+                                   ("from_raw=", from_raw),
+                                   ("beside=", beside)) if on]
+    if len(given) > 1:
         raise ValueError(
-            "Give at most one of out= and from_raw=. Both answer the same "
-            "question — where output goes — and out= already mirrors the tree "
-            "beneath the folder you named."
+            f"Give at most one of out=, from_raw= and beside=; got "
+            f"{', '.join(given)}. All three answer the same question — where "
+            f"output goes."
         )
 
     # The two halves of a destination: a root to write under, and the folder that
     # positions are measured from.  Resolved once, because a per-folder answer is
     # what let a tree flatten into one place before.
     base = path.parent if path.is_file() else path
-    if out is not None:
+    if beside:
+        # Root and anchor the same folder, so every relative path is "." and each
+        # output lands in the folder its source came from.  No new placement
+        # concept — the shorthand for out= naming that folder.
+        root, anchor = base, base
+    elif out is not None:
         root, anchor = Path(out), base
     else:
         raw = _raw_ancestor(base, from_raw)
@@ -947,11 +968,17 @@ def main(argv=None) -> int:
              "and each source folder gets its own converted/.",
     )
     parser.add_argument(
+        "--beside", action="store_true",
+        help="Write each output into the folder its source came from, with no "
+             "converted/ level. For targeted conversions. Cannot be combined "
+             "with --out or --from-raw.",
+    )
+    parser.add_argument(
         "--from-raw", action="store_true",
         help="Search upward for the nearest raw/ folder and mirror from there, "
              "so output is placed correctly even when PATH is inside raw/. Reads "
              "folders you did not name — check your path first. Cannot be "
-             "combined with --out.",
+             "combined with --out or --beside.",
     )
     parser.add_argument(
         "--spectra-type", default=None, choices=sorted(SPECTROSCOPY_TYPES),
@@ -998,6 +1025,7 @@ def main(argv=None) -> int:
             spectra_type = args.spectra_type,
             prefix       = args.prefix,
             from_raw     = args.from_raw,
+            beside       = args.beside,
             # argparse cannot express "a filter name or nothing", so the word is
             # spelled on the command line and turned into None here.
             compression  = None if args.compression.lower() == "none"

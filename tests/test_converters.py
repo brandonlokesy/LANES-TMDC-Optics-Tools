@@ -649,6 +649,99 @@ def test_a_non_recursive_run_addresses_out_directly(tmp_path):
     assert sorted(p.parent for p in report.outputs) == [tmp_path / "converted"] * 2
 
 
+def test_pointing_at_raw_mirrors_into_its_sibling(tmp_path):
+    # No out= at all.  The folder named in the call is "raw", so its sibling
+    # converted/ is the root and the tree goes under it — which is what keeps a
+    # nested experiment from scattering converted/ folders inside raw/.
+    raw = _spot_tree(tmp_path)
+
+    report = converters.convert_path(raw, recursive=True, spectra_type="PL")
+
+    assert not report.errors
+    assert sorted(p.relative_to(tmp_path / "converted").as_posix()
+                  for p in report.outputs) == [
+        "spot01/01-PL-Vbot/sweep.h5",
+        "spot01/ref/laser_ref.tif",
+        "spot02/01-PL-Vbot/sweep.h5",
+        "spot02/ref/laser_ref.tif",
+    ]
+
+
+def test_an_uppercase_raw_counts(tmp_path):
+    (tmp_path / "RAW").mkdir()
+    make_spectral_csv(tmp_path / "RAW" / "sweep.csv")
+
+    report = converters.convert_path(tmp_path / "RAW", spectra_type="PL")
+
+    assert report.outputs == [tmp_path / "converted" / "sweep.h5"]
+
+
+def test_pointing_inside_raw_does_not_search_upward(tmp_path):
+    # The deliberate limit of the default: only the folder actually named is
+    # examined, so the destination is readable off the call.  from_raw= is the
+    # opt-in that looks further, and the next test is its half of the pair.
+    raw = _spot_tree(tmp_path)
+
+    report = converters.convert_path(
+        raw / "spot01" / "01-PL-Vbot", spectra_type="PL")
+
+    assert report.outputs == [
+        raw / "spot01" / "01-PL-Vbot" / "converted" / "sweep.h5"
+    ]
+
+
+def test_from_raw_searches_upward_from_a_measurement_folder(tmp_path):
+    raw = _spot_tree(tmp_path)
+
+    report = converters.convert_path(
+        raw / "spot01" / "01-PL-Vbot", spectra_type="PL", from_raw=True)
+
+    assert report.outputs == [
+        tmp_path / "converted" / "spot01" / "01-PL-Vbot" / "sweep.h5"
+    ]
+
+
+def test_from_raw_places_a_single_file(tmp_path):
+    # The case the default cannot help with at all: nothing was named but the
+    # file, so there is no folder to read.
+    raw = _spot_tree(tmp_path)
+
+    report = converters.convert_path(
+        raw / "spot01" / "01-PL-Vbot" / "sweep.csv",
+        spectra_type="PL", from_raw=True)
+
+    assert report.outputs == [
+        tmp_path / "converted" / "spot01" / "01-PL-Vbot" / "sweep.h5"
+    ]
+
+
+def test_from_raw_warns_and_falls_back_when_there_is_no_raw(tmp_path):
+    folder = tmp_path / "mydata"
+    folder.mkdir()
+    make_spectral_csv(folder / "sweep.csv")
+
+    with pytest.warns(UserWarning, match="no folder called 'raw'"):
+        report = converters.convert_path(
+            folder, spectra_type="PL", from_raw=True)
+
+    assert report.outputs == [folder / "converted" / "sweep.h5"]
+
+
+def test_out_and_from_raw_together_are_refused(tmp_path):
+    raw = _spot_tree(tmp_path)
+
+    with pytest.raises(ValueError, match="at most one of out= and from_raw="):
+        converters.convert_path(
+            raw, out=tmp_path / "elsewhere", from_raw=True, spectra_type="PL")
+
+
+def test_the_cli_reports_the_refusal_rather_than_raising(tmp_path):
+    raw = _spot_tree(tmp_path)
+
+    assert converters.main(
+        [str(raw), "--out", str(tmp_path / "elsewhere"), "--from-raw"]) == 1
+
+
 def test_out_naming_a_file_is_used_verbatim(tmp_path):
     # Meaningful with a stack, which is one output for the whole folder.
     (tmp_path / "raw").mkdir()

@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 from typing import NamedTuple
 
@@ -248,6 +249,31 @@ def _refuse_existing(target: Path, overwrite: bool) -> Path:
             f"replace it, or give a different out= path."
         )
     return target
+
+
+def _raw_ancestor(start: Path, search_upward: bool):
+    """
+    The ``raw/`` folder that governs *start*, or ``None``.
+
+    Parameters
+    ----------
+    start : Path
+        The directory a run was pointed at.
+    search_upward : bool
+        ``False`` looks at *start* alone — the folder the caller actually named,
+        so the answer is visible in the command they typed.  ``True`` walks up
+        the path to the nearest ancestor called ``raw``, which finds the folder a
+        caller pointed *inside* but cannot be predicted from the command alone.
+
+    Returns
+    -------
+    Path or None
+        Matching is case-insensitive, so ``RAW/`` and ``Raw/`` both count.
+    """
+    for candidate in (start, *start.parents) if search_upward else (start,):
+        if candidate.name.lower() == _RAW_DIR:
+            return candidate
+    return None
 
 
 def _claim_target(target: Path, overwrite: bool) -> Path:
@@ -668,6 +694,7 @@ def convert_path(
     spectra_type : str  = None,
     prefix       : str  = None,
     compression  : str  = "gzip",
+    from_raw     : bool = False,
 ) -> ConversionReport:
     """
     Convert a file, a directory, or a tree, continuing past failures.
@@ -704,12 +731,18 @@ def convert_path(
     out : str or Path, optional
         Output **root**.  The tree under *path* is mirrored beneath it, so
         ``<path>/spot01/01-PL/sweep.csv`` becomes
-        ``<out>/spot01/01-PL/sweep.h5``.  Omitted, each source folder gets its own
-        ``converted/`` folder instead.  Either way the source's position is
-        preserved, which is what keeps two folders holding an identically named
-        frame from overwriting one another.  A path carrying a suffix is taken as
-        one filename and used verbatim — meaningful with *stack*, and a
-        ``FileExistsError`` on the second output otherwise.
+        ``<out>/spot01/01-PL/sweep.h5``.  A path carrying a suffix is taken as one
+        filename and used verbatim — meaningful with *stack*, and a
+        ``FileExistsError`` on the second output otherwise.  Cannot be combined
+        with *from_raw*.
+
+        Omitted, the root is derived from the folder *named in the call*: if that
+        folder is called ``raw``, the root is its sibling ``converted/`` and the
+        tree is mirrored there; otherwise each source folder gets its own
+        ``converted/``.  So pointing at ``EXP/raw`` places the whole experiment
+        under ``EXP/converted`` with no argument at all, while pointing at one
+        measurement folder inside ``raw/`` does not — nothing is searched for, so
+        the destination is readable off the call.
     recursive : bool
         Descend into subdirectories.  Ignored when *path* is a file.
     stack : bool
@@ -727,6 +760,17 @@ def convert_path(
         form a TRPL sweep, and names a TIFF stack.
     compression : str or None
         Passed to :func:`~tmdc_optics_tools.hdf5.write_sweep` for HDF5 output.
+    from_raw : bool
+        Look **upward** from *path* for the nearest folder called ``raw``, and
+        mirror the tree from there into its sibling ``converted/``.  This places
+        output correctly even when the call points inside ``raw/`` — at one
+        measurement folder, or at a single file — which the default deliberately
+        does not.
+
+        Off by default because it reads folders the call does not name: a ``raw``
+        high up an unrelated path anchors everything below it, and the result
+        cannot be predicted from the call.  Turn it on having checked the path.
+        Warns and falls back to the default when no ``raw`` is found.
 
     Returns
     -------
@@ -737,9 +781,59 @@ def convert_path(
     ------
     FileNotFoundError
         If *path* is neither a file nor a directory.
+    ValueError
+        If both *out* and *from_raw* are given.
+
+    Warns
+    -----
+    UserWarning
+        If *from_raw* is asked for and no ``raw`` folder is found.
     """
     path = Path(path)
     outputs, skipped, errors = [], {}, []
+
+    if out is not None and from_raw:
+        raise ValueError(
+            "Give at most one of out= and from_raw=. Both answer the same "
+            "question — where output goes — and out= already mirrors the tree "
+            "beneath the folder you named."
+        )
+
+    # The two halves of a destination: a root to write under, and the folder that
+    # positions are measured from.  Resolved once, because a per-folder answer is
+    # what let a tree flatten into one place before.
+    base = path.parent if path.is_file() else path
+    if out is not None:
+        root, anchor = Path(out), base
+    else:
+        raw = _raw_ancestor(base, from_raw)
+        if raw is not None:
+            root, anchor = raw.parent / _OUT_DIR, raw
+        else:
+            root, anchor = None, base
+            if from_raw:
+                warnings.warn(
+                    f"from_raw=True, but no folder called '{_RAW_DIR}' was found "
+                    f"at or above '{base}'. Each source folder gets its own "
+                    f"'{_OUT_DIR}/' instead. Pass out= to place the output tree.",
+                    UserWarning, stacklevel=2,
+                )
+
+    def destination(folder: Path):
+        """
+        Where *folder*'s output goes: *root* with the folder's own position under
+        *anchor* appended.  ``None`` leaves each converter on the ``converted/``
+        rule.
+
+        A folder sitting at *anchor* has a relative path of ``.``, which
+        ``joinpath`` drops, so a run with nothing below it addresses *root*
+        directly and the mirror only shows up where there is a tree to mirror.
+        """
+        if root is None:
+            return None
+        if root.suffix and not root.is_dir():
+            return root                       # an explicit filename, not a root
+        return root / folder.relative_to(anchor)
 
     def attempt(convert, source):
         """Run one conversion, recording its output or its failure."""
@@ -749,14 +843,15 @@ def convert_path(
             errors.append((source, str(exc)))
 
     if path.is_file():
+        into = destination(base)
         kind = _classify_csv(path)
         if kind == "spectral":
             attempt(lambda: convert_spectral_csv_to_hdf5(
-                path, spectra_type, out=out, overwrite=overwrite,
+                path, spectra_type, out=into, overwrite=overwrite,
                 compression=compression), path)
         else:
             attempt(lambda: convert_image_csv_to_tiff(
-                path, out=out, dtype=dtype, overwrite=overwrite), path)
+                path, out=into, dtype=dtype, overwrite=overwrite), path)
         return ConversionReport(outputs, skipped, errors)
 
     if not path.is_dir():
@@ -765,22 +860,6 @@ def convert_path(
     # Every folder holding a CSV, deduplicated: output is resolved per folder, and
     # a stack and a TRPL sweep are both per folder.
     csvs = path.rglob("*.csv") if recursive else path.glob("*.csv")
-
-    def destination(folder: Path):
-        """
-        Where *folder*'s output goes: *out* with the folder's own position under
-        *path* appended.  ``None`` leaves each converter on the ``converted/`` rule.
-
-        A folder at the top of the walk has a relative path of ``.``, which
-        ``joinpath`` drops, so a non-recursive run addresses *out* directly and the
-        mirror only shows up where there is a tree to mirror.
-        """
-        if out is None:
-            return None
-        root = Path(out)
-        if root.suffix and not root.is_dir():
-            return root                       # an explicit filename, not a root
-        return root / folder.relative_to(path)
 
     for folder in sorted({csv.parent for csv in csvs}):
         kinds = _folder_kinds(folder, prefix)
@@ -863,8 +942,16 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--out", default=None,
         help="Output root. The tree under PATH is mirrored beneath it, so "
-             "raw/spot01/01-PL/ lands in OUT/spot01/01-PL/. Default: a converted/ "
-             "folder per source folder.",
+             "raw/spot01/01-PL/ lands in OUT/spot01/01-PL/. Default: point at a "
+             "raw/ folder and its sibling converted/ is used; point anywhere else "
+             "and each source folder gets its own converted/.",
+    )
+    parser.add_argument(
+        "--from-raw", action="store_true",
+        help="Search upward for the nearest raw/ folder and mirror from there, "
+             "so output is placed correctly even when PATH is inside raw/. Reads "
+             "folders you did not name — check your path first. Cannot be "
+             "combined with --out.",
     )
     parser.add_argument(
         "--spectra-type", default=None, choices=sorted(SPECTROSCOPY_TYPES),
@@ -910,12 +997,13 @@ def main(argv=None) -> int:
             overwrite    = args.overwrite,
             spectra_type = args.spectra_type,
             prefix       = args.prefix,
+            from_raw     = args.from_raw,
             # argparse cannot express "a filter name or nothing", so the word is
             # spelled on the command line and turned into None here.
             compression  = None if args.compression.lower() == "none"
                            else args.compression,
         )
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError) as exc:
         print(f"ERROR {exc}", file=sys.stderr)
         return 1
 

@@ -1179,9 +1179,8 @@ one skip that asks the caller to act. Full argument:
 
 ## Where output lands
 
-Always a **`converted/`** folder — the sibling of `raw/` when the source is in one,
-created beside the source otherwise, at any depth. Fixed names, no setting:
-`dev/decisions/0034-converted-files-land-in-a-converted-folder.md`.
+Always a **`converted/`** folder, created when missing at any depth. Fixed names,
+no setting: `dev/decisions/0034-converted-files-land-in-a-converted-folder.md`.
 
 `converted/` and not `processed/` on purpose. `processed/` is what an analysis pulls
 *out* of the raw data — fitted positions, integrated intensities, diffusion lengths
@@ -1189,16 +1188,33 @@ created beside the source otherwise, at any depth. Fixed names, no setting:
 `.h5` holds the counts the CSV held. Which folder a file sits in therefore says
 whether it can be thrown away and regenerated.
 
-`out=` is the override, and for a directory run it is an output **root**: the tree
-under the named path is mirrored beneath it, so `raw/spot01/01-PL/sweep.csv` becomes
-`<out>/spot01/01-PL/sweep.h5`. Mirroring lives only in `convert_path`, which
-resolves a destination per folder and passes it down as an ordinary `out=`; the
-single-file converters are unchanged.
-`dev/decisions/0035-out-is-an-output-root-and-the-tree-is-mirrored.md`.
+Placement is a **root plus an anchor**, resolved once per call in `convert_path`
+and handed down as an ordinary `out=`. The single-file converters never see it and
+still read their own immediate parent.
 
-Either way a source's **position** is preserved, which is the point: two spot
-folders holding the same `laser_ref_*.csv` keep their own output instead of one
-refusing on top of the other.
+| | root | anchor |
+|---|---|---|
+| `out=` given | `Path(out)` | the folder named in the call |
+| default, named folder is `raw` | its sibling `converted/` | that `raw` folder |
+| `from_raw=True` | nearest ancestor `raw`'s sibling `converted/` | that `raw` folder |
+| otherwise | none — per-file `_default_output` | — |
+
+Each source folder's path relative to the anchor is appended to the root, so
+`raw/spot01/01-PL/sweep.csv` becomes `<root>/spot01/01-PL/sweep.h5`. A folder
+sitting *at* the anchor has relative path `.`, which `joinpath` drops, so a run
+with nothing below it addresses the root directly.
+
+The default anchors on the folder the call **names**, never on one it searches for:
+the destination has to be readable off the command. `from_raw=` is the opt-in that
+searches upward, for a call pointing inside `raw/` — at one measurement folder, or
+at a single file — and it warns and falls back when no `raw` is found. Giving both
+`out=` and `from_raw=` raises, since both answer the same question.
+`dev/decisions/0035-out-is-an-output-root-and-the-tree-is-mirrored.md` and
+`dev/decisions/0036-the-default-root-comes-from-the-folder-you-named.md`.
+
+However it is resolved, a source's **position** is preserved, which is the point:
+two spot folders holding the same `laser_ref_*.csv` keep their own output instead
+of one refusing on top of the other.
 
 ## What it does not decide for itself
 

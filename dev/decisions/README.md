@@ -132,7 +132,8 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0031](0031-the-spectral-maps-mesh-runs-one-row-per-sweep-point.md) | The spectral map's mesh runs one row per sweep point | 2026-08-21 | Accepted |
 | [0032](0032-converted-files-land-in-a-processed-folder.md) | Converted files land in a `processed/` folder | 2026-08-21 | Superseded by 0034 (name only) |
 | [0033](0033-a-trpl-directory-converts-only-when-named.md) | A TRPL directory converts only when it is named | 2026-08-21 | Accepted |
-| [0034](0034-converted-files-land-in-a-converted-folder.md) | Converted files land in a `converted/` folder, not `processed/` | 2026-08-21 | Accepted |
+| [0034](0034-converted-files-land-in-a-converted-folder.md) | Converted files land in a `converted/` folder, not `processed/` | 2026-08-21 | Accepted · §2 extended by 0036 |
 | [0035](0035-out-is-an-output-root-and-the-tree-is-mirrored.md) | `out=` is an output root, and the tree is mirrored beneath it | 2026-08-21 | Accepted |
+| [0036](0036-the-default-root-comes-from-the-folder-you-named.md) | The default output root comes from the folder you named; `from_raw=` opts into searching | 2026-08-21 | Accepted |
 
 This table is the one mutable part of the folder.

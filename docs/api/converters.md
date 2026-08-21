@@ -103,15 +103,9 @@ converting before you have decided how to analyse.
 
 ## Where output lands
 
-A converted file goes into a **`converted/`** folder, created if it is not already
-there: the sibling of `raw/` when the source sits in one, and a folder beside the
-source otherwise.
-
-| Source | Output |
-|---|---|
-| `measurement/raw/frame_iter_0.csv` | `measurement/converted/frame_iter_0.tif` |
-| `measurement/raw/sweep.csv` | `measurement/converted/sweep.h5` |
-| `scratch/sweep.csv` | `scratch/converted/sweep.h5` |
+Output goes into a **`converted/`** folder, created if it is not already there.
+Which `converted/` depends on **the folder you name in the command** — nothing is
+searched for, so you can work the answer out from what you typed.
 
 !!! note "`converted/`, not `processed/`"
     A conversion is not an analysis. `processed/` is for what an analysis pulls
@@ -121,20 +115,89 @@ source otherwise.
     deleted and regenerated at any time. Which folder a file is in tells you which
     kind it is.
 
-`out=` is the override. For a directory run it is an output **root**, and the tree
-under the path you named is mirrored beneath it:
+### If you keep a `raw/` folder
+
+Point at `raw/` and its **sibling** `converted/` is used, with your folder
+structure copied underneath:
 
 ```
-tmdc-convert EXP/raw --recursive --spectra-type PL --out EXP/converted
-
-EXP/raw/spot01/01-PL-Vbot/sweep.csv   ->  EXP/converted/spot01/01-PL-Vbot/sweep.h5
-EXP/raw/spot01/ref/laser_ref.csv      ->  EXP/converted/spot01/ref/laser_ref.tif
-EXP/raw/spot02/ref/laser_ref.csv      ->  EXP/converted/spot02/ref/laser_ref.tif
+EXP/
+├── converted/          ← created for you
+└── raw/
+    ├── spot01/{01-PL-Vbot/, ref/}
+    └── spot02/{01-PL-Vbot/, ref/}
 ```
 
-Either way a source's **position** is preserved. That is what lets two spot folders
-hold the same `laser_ref_*.csv` without one overwriting the other. A path carrying
-a suffix is taken as one filename instead, which is meaningful with `--stack`.
+```
+tmdc-convert EXP/raw --recursive --spectra-type PL
+
+EXP/raw/spot01/01-PL-Vbot/sweep.csv  ->  EXP/converted/spot01/01-PL-Vbot/sweep.h5
+EXP/raw/spot01/ref/laser_ref.csv     ->  EXP/converted/spot01/ref/laser_ref.tif
+EXP/raw/spot02/ref/laser_ref.csv     ->  EXP/converted/spot02/ref/laser_ref.tif
+```
+
+Your structure is copied, not flattened, so two spot folders can hold the same
+`laser_ref_*.csv` without one overwriting the other. `RAW/` and `Raw/` count too.
+
+### If you do not
+
+Nothing changes for you. A `converted/` folder appears next to your files:
+
+```
+tmdc-convert Downloads/mydata --spectra-type PL
+
+Downloads/mydata/sweep.csv  ->  Downloads/mydata/converted/sweep.h5
+```
+
+### If you point *inside* `raw/`
+
+The command only looks at the folder you actually named. Name a single measurement
+folder and that folder is not called `raw`, so output lands beside your files —
+which means inside `raw/`:
+
+```
+tmdc-convert EXP/raw/spot01/01-PL-Vbot --spectra-type PL
+
+->  EXP/raw/spot01/01-PL-Vbot/converted/sweep.h5
+```
+
+The same applies to converting one file. Two ways out:
+
+**`--from-raw`** searches *upward* for the nearest folder called `raw` and places
+output relative to that:
+
+```
+tmdc-convert EXP/raw/spot01/01-PL-Vbot --spectra-type PL --from-raw
+
+->  EXP/converted/spot01/01-PL-Vbot/sweep.h5
+```
+
+It is not the default because it reads folders you did not name. If a folder called
+`raw` sits high up an unrelated path — `X:/Brandon/raw/01_Projects/…` — then
+everything beneath it anchors there, and you could not tell from the command.
+Check your path, then use it. If no `raw` is found it warns and falls back.
+
+**`--out`** says where output goes outright, and mirrors the tree beneath the
+folder you named:
+
+```
+tmdc-convert EXP/raw --recursive --spectra-type PL --out D:/archive
+->  D:/archive/spot01/01-PL-Vbot/sweep.h5
+```
+
+`--out` and `--from-raw` cannot be combined — both answer the same question, so
+giving both is refused. An `--out` path carrying a suffix is taken as one filename
+instead of a root, which is meaningful with `--stack`.
+
+### All of it at a glance
+
+| You run | You get |
+|---|---|
+| `tmdc-convert EXP/raw --recursive` | `EXP/converted/spot01/…` |
+| `tmdc-convert EXP/raw --recursive --out D:/a` | `D:/a/spot01/…` |
+| `tmdc-convert EXP/raw/spot01/01-PL` | `EXP/raw/spot01/01-PL/converted/…` |
+| `tmdc-convert EXP/raw/spot01/01-PL --from-raw` | `EXP/converted/spot01/01-PL/…` |
+| `tmdc-convert Downloads/mydata` (no `raw/`) | `Downloads/mydata/converted/…` |
 
 !!! note "An existing output is refused"
     Every writer takes `overwrite=False` and raises `FileExistsError`, matching
@@ -191,9 +254,10 @@ Installing the package provides `tmdc-convert`. An editable install needs
 re-installing once for the command to appear.
 
 ```
-tmdc-convert PATH [--out ROOT] [--spectra-type {A,PL,R,RC,T,TRPL}] [--prefix P]
-             [--stack] [--recursive] [--dtype auto|uint16|uint32|float32]
-             [--compression gzip|none] [--overwrite]
+tmdc-convert PATH [--out ROOT] [--from-raw] [--spectra-type {A,PL,R,RC,T,TRPL}]
+             [--prefix P] [--stack] [--recursive]
+             [--dtype auto|uint16|uint32|float32] [--compression gzip|none]
+             [--overwrite]
 ```
 
 It returns a non-zero exit status if anything failed. One folder can produce both

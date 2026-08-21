@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Accepted · supersedes 0032 |
+| **Status** | Accepted · supersedes 0032 · §2 extended by 0036 |
 | **Date** | 2026-08-21 |
 | **Audit** | — |
 

@@ -30,7 +30,7 @@ numbers, because names survive edits and line numbers rot silently.
 
 # 1. The shape of the package
 
-Eight modules, ~9.5k lines, one dependency direction. Nothing below imports
+Nine modules, ~10k lines, one dependency direction. Nothing below imports
 anything above it.
 
 ```
@@ -39,6 +39,7 @@ anything above it.
              ▼
         loaders.py           I/O + device geometry.  Turns files into objects.
         ├── hdf5.py          one archive format, both axis kinds
+        ├── converters.py    image CSV exports → TIFF, and the CLI
         └── processing.py    pure array functions — no objects, no files
              │
              ├──► fitting.py     arrays → dataclasses (FitResult, DipoleResult)
@@ -56,6 +57,10 @@ The contracts, in one line each:
   or matplotlib. This is where maths goes so that plotting can't reimplement it.
 - **`hdf5`** — serialise a loader object and read it back. Imported *lazily* inside
   `loaders._decode` so `h5py` is only needed if you actually touch an `.h5`.
+- **`converters`** — rewrites an export in a better format without interpreting it.
+  Reads image CSVs, writes TIFF, and owns the `tmdc-convert` command. Reuses
+  `loaders._classify_csv` and `loaders._order_by_iter` rather than deciding again
+  what a frame is or what order frames go in — see §9.1.
 - **`fitting`** — curve fits, returning dataclasses that carry parameters,
   uncertainties, and diagnostics.
 - **`plotting`** — draws. Returns `(fig, ax, <artist>)`, or a named tuple when it
@@ -1115,6 +1120,68 @@ Four design points a maintainer needs:
 `FORMAT_VERSION` is gated on the **major** on read. Bump the minor when adding a
 field; bump the major only for a change an older reader would mis-read (2.0 moved the
 auxiliary spectra out of `/metadata`, which an old reader would silently drop).
+
+---
+
+# 9.1 CSV → TIFF conversion
+
+`converters.py` rewrites an export in a better format. It does not interpret one:
+nothing here corrects, calibrates, or reorders counts, and no loader object is
+built. That is what keeps it out of `loaders` despite reading files.
+
+Two shapes out, from the one shape in:
+
+```
+scan/raw/frame_iter_0.csv …   ──►  scan/processed/frame_iter_0.tif …   (default)
+                              └─►  scan/processed/raw_stack.tif        (--stack)
+```
+
+## Where output lands
+
+Always a `processed/` folder — the sibling of `raw/` when the source is in one,
+created beside the source otherwise. `out=` is the single override. A directory
+run resolves this **per source folder**, so two sweeps holding an identically
+named frame keep their own output. Fixed names, no setting:
+`dev/decisions/0032-converted-files-land-in-a-processed-folder.md`.
+
+## What it does not decide for itself
+
+Two questions the converter could have answered on its own, and does not:
+
+| Question | Answered by | Why not here |
+|---|---|---|
+| Is this CSV a frame? | `loaders._classify_csv` | A two-row spectrum is numeric on its first line exactly like an image. Deciding again is how **A9** happened the first time. |
+| What order do frames go in? | `loaders._order_by_iter` | Filename order puts `iter_10` before `iter_2`, and export padding widths vary. Deciding again is **A7**. |
+
+Both were promoted to module-level helpers in `loaders.py` precisely so a second
+caller could reach them. `_classify_csv` moved when `converters` arrived;
+`_order_by_iter` moved when A7 was fixed. A third caller adds no new copy.
+
+## Pixel type
+
+`dtype="auto"` keeps integer counts exactly — `uint16` to 65535, `uint32` above —
+and narrows anything else to `float32`. The narrowing is real: `np.loadtxt` reads
+`float64`, so a background-subtracted or non-integer frame loses precision. It is
+stated in the docstring rather than hidden behind the word *lossless*.
+
+A stack is written with `photometric="minisblack"`. Left to guess, `tifffile`
+stores a `(3, ny, nx)` array as one RGB image with separate colour planes, so a
+three-point sweep would open as a single colour frame instead of three pages.
+
+## Overwriting
+
+`overwrite=False` on both writers, raising `FileExistsError`, matching
+`hdf5.write_sweep`. The path is resolved before anything is created, so a refused
+conversion leaves no empty `processed/` behind.
+
+## The command
+
+`tmdc-convert` is declared in `pyproject.toml` under `[project.scripts]` and
+points at `converters:main`. It appears in the environment's `Scripts/` directory
+at install time, so an existing editable install needs re-installing once before
+the command exists. `main` returns an exit status rather than raising, and
+`convert_path` collects failures into a `ConversionReport` so one unreadable frame
+does not abandon a sweep.
 
 ---
 

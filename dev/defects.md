@@ -262,6 +262,14 @@ package was depending on a filename convention it does not control and has alrea
 seen vary. Committed frame counts are 11, 18, 46, 47 and 57 — all past the 10 where
 this begins.
 
+**Second caller, 2026-08-21.** `converters.convert_image_dir_to_tiff_stack` orders
+its pages with the same `_order_by_iter`, rather than the `sorted(glob(...))` the
+unmerged `dev/hdf5` branch used. A stack built in filename order carries the sweep
+scrambled inside a single file, where it is harder to notice than a mislabelled
+animation. `tests/test_converters.py::test_unpadded_stack_is_in_acquisition_order`
+pins it with **unpadded** names, which is the case the branch's own fixture could not
+exhibit.
+
 *Fixed* by **moving** `AttoCubeTRPLSweep._order_by_iter` and `_ITER_INDEX` to a
 module-level helper (after `_drop_unwritten_blocks`, where the other
 "what is this file" logic lives) and calling it from both loaders — not copying it,
@@ -425,6 +433,14 @@ Note the contrast with `_read_block_layout`, which was given exactly this
 discrimination on 2026-07-31 — a bare grid of two rows is named as `SingleSpectrum`,
 more than two as an image sequence — so the rule to copy already existed in the
 package.
+
+**Second caller, 2026-08-21.** `converters` selects frames with the same
+`_classify_csv`, so a spectrum sitting beside the frames is reported as skipped
+rather than written out as a two-pixel-tall TIFF, and `convert_image_csv_to_tiff`
+refuses one outright using the existing `_CSV_KIND_REASON` wording. The helper moved
+from a `staticmethod` on `AttoCubePLScanRealSpace` to module level in that change so
+a second caller could reach it. Pinned by
+`tests/test_converters.py::test_spectrum_beside_frames_is_not_converted`.
 
 **Fixed by replacing the predicate with a classifier.** `_is_image_csv` is gone;
 `_classify_csv` returns the kind, because a bool cannot carry the reason a file was

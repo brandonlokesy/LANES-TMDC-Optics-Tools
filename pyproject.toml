@@ -18,7 +18,11 @@ dependencies = [
     "ffmpeg",
     "requests",
     "h5py",
+    "tifffile",
 ]
+
+[project.scripts]
+tmdc-convert = "tmdc_optics_tools.converters:main"
 
 [project.optional-dependencies]
 # Extra colormap sources.  None is required: every default is a Matplotlib

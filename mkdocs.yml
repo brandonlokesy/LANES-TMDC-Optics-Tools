@@ -59,6 +59,7 @@ nav:
   - API Reference:
       - Loaders: api/loaders.md
       - HDF5: api/hdf5.md
+      - Converters: api/converters.md
       - Processing: api/processing.md
       - Fitting: api/fitting.md
       - Plotting: api/plotting.md

@@ -12,6 +12,7 @@ plotting    Publication-ready figure style and common plot types.
 fitting     Spectral fitting (Lorentzian, Gaussian, multi-peak) and sparse TRPL lifetime fitting.
 processing  Smoothing, normalisation, spectral conversions.
 hdf5        Self-describing HDF5 storage for spectral sweeps.
+converters  AttoCube real-space image CSV exports to TIFF.
 
 Quick start
 -----------
@@ -46,7 +47,11 @@ from .loaders import (
     RamanSpectrum,
     RamanMap,
 )
-from . import hdf5, processing
+from . import converters, hdf5, processing
+from .converters import (
+    convert_image_csv_to_tiff,
+    convert_image_dir_to_tiff_stack,
+)
 
 __all__ = [
     "StackLayer",
@@ -59,7 +64,10 @@ __all__ = [
     "SingleImage",
     "RamanSpectrum",
     "RamanMap",
+    "convert_image_csv_to_tiff",
+    "convert_image_dir_to_tiff_stack",
     "constants",
+    "converters",
     "hdf5",
     "plotting",
     "fitting",

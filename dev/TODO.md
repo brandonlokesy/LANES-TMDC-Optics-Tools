@@ -30,9 +30,19 @@
     - Field × power (a genuinely 2-parameter sweep) still unseen in a real file —
       though it is now expressible, and is what the E14 fixtures model.
 - HDF5 export/import: done (`hdf5.py`, `scan.to_hdf5()`, `.h5` accepted by the
-  loader, both axis kinds). `dev/hdf5`'s `converters.py` remains unmerged — its CLI
-  for bulk CSV→HDF5/TIFF conversion is the part not covered by this work, and the
-  11.57 MB → 0.069 MB TRPL result is a decent argument for having one.
+  loader, both axis kinds).
+- ~~`dev/hdf5`'s `converters.py` remains unmerged~~ **image half landed 2026-08-21.**
+  `converters.py` converts real-space image CSVs to TIFF, one file per frame or one
+  multi-page stack, and carries the `tmdc-convert` command. It reuses
+  `loaders._classify_csv` and `loaders._order_by_iter`; the branch's own copies of
+  both reimplemented A9 and A7. Output goes to a `processed/` folder
+  (`dev/decisions/0032-converted-files-land-in-a-processed-folder.md`).
+    - **Still owed: bulk spectral CSV → HDF5 on the command line.** Route it through
+      `AttoCubeSpectralSweep` + `hdf5.write_sweep`, not the branch's private layout —
+      that one writes an `.h5` the loader cannot reopen, and re-decodes the block
+      stride a third time. Needs a `--spectra-type` flag, `spectra_type=` having no
+      default by decision. The 11.57 MB → 0.069 MB TRPL result is the argument for
+      finishing it.
 - AttoCubeRealSpace ...
     - Select the range of frames of interest -> work on a subset
     - ~~**File ordering is lexicographic** (A7)~~ **fixed 2026-08-07.**

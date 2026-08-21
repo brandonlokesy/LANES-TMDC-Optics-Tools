@@ -632,6 +632,10 @@ def plot_spectral_map(
     Returns
     -------
     fig, ax, mesh
+        *mesh* is a :class:`~matplotlib.collections.QuadMesh` whose array runs
+        ``(n_sweep_points, n_pixels)`` — matplotlib's row-major order, one row
+        per sweep point — the transpose of the ``(n_pixels, n)`` block the scan
+        serves.
 
     Raises
     ------
@@ -669,13 +673,6 @@ def plot_spectral_map(
         what="plot_spectral_map()",
     )
 
-    # (n_pixels, 1) and (1, n) tiled to the mesh's (n_pixels, n) grid: one x per
-    # detector pixel down every column, one y per sweep point across every row.
-    # n is the points actually drawn, which a pinned nest shortens — reading
-    # scan.n_sweeps here would describe the whole flat sweep instead.
-    x_m = np.tile(x[:, np.newaxis], (1, y.size))
-    y_m = np.tile(y[np.newaxis, :], (scan.n_pixels, 1))
-
     # Copied because the filters below build on it, and because a pinned nest
     # arrives as a view into the scan's own array — see get_spectrum_at — which
     # the never-mutate-after-load rule reaches.
@@ -688,8 +685,15 @@ def plot_spectral_map(
         data = rescale_intensity(data, in_range="image", out_range=(0, 1))
 
     vmin, vmax = clim if clim is not None else (None, None)
+
+    # 1-D x and y: pcolormesh builds the mesh itself, so no (n_pixels, n)
+    # coordinate arrays are allocated here.  It reads C as (rows=y, cols=x) and
+    # data is (n_pixels, n), so the block goes in transposed.  A 2-D coordinate
+    # pair draws the same quads; what the 1-D pair adds is that matplotlib
+    # checks both lengths against C, rather than accepting any two arrays of
+    # equal shape.
     mesh = ax.pcolormesh(
-        x_m, y_m, data,
+        x, y, data.T,
         cmap=get_cmap(cmap), shading="auto",
         vmin=vmin, vmax=vmax,
     )

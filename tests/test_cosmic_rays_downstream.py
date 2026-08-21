@@ -129,8 +129,11 @@ def _map_column(scan) -> np.ndarray:
     # across sweeps, and the question here is which array reached the mesh.
     _, _, mesh = plotting.plot_spectral_map(scan, x_axis="wavelength",
                                             median_kernel=1)
-    data = np.asarray(mesh.get_array()).reshape(scan.n_pixels, scan.n_sweeps)
-    return data[:, CR_SWEEP].astype(float)
+    # get_array() is (n_sweeps, n_pixels): pcolormesh reads C as (rows=y,
+    # cols=x) and the map's y is the sweep axis. Indexing the row rather than
+    # reshaping matters — a reshape to (n_pixels, n_sweeps) would scramble.
+    data = np.asarray(mesh.get_array())
+    return data[CR_SWEEP, :].astype(float)
 
 
 def _line_column(scan) -> np.ndarray:

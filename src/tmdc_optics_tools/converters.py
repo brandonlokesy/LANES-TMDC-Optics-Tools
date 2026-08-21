@@ -1,6 +1,12 @@
 # tmdc_optics_tools/converters.py
 """
-Convert AttoCube real-space image CSV exports to TIFF.
+Convert AttoCube CSV exports to compact formats.
+
+Three export shapes, three destinations: a real-space frame becomes TIFF, a
+spectral sweep becomes HDF5, and a directory of TRPL decays becomes one HDF5
+archive.  Nothing here interprets a measurement — no correction is applied and no
+axis is derived; this module rewrites a file in a better format and leaves the
+deciding to the loaders.
 
 The AttoCube software writes a real-space frame as a bare ``H x W`` grid of
 comma-separated numbers with no header — a text encoding of what is a binary
@@ -26,6 +32,11 @@ convert_image_csv_to_tiff
     Single image CSV -> ``.tif``.
 convert_image_dir_to_tiff_stack
     A directory of image CSVs -> one multi-page ``.tif``, in acquisition order.
+convert_spectral_csv_to_hdf5
+    Single spectral export -> ``.h5``, through the loader and
+    :func:`tmdc_optics_tools.hdf5.write_sweep`.
+convert_trpl_dir_to_hdf5
+    A directory of TRPL decays -> one ``.h5``.
 convert_path
     Convert a file, directory, or tree in one call, continuing past failures.
 main
@@ -33,9 +44,16 @@ main
 
 Notes
 -----
-Spectral and temporal exports are a different shape entirely and are not handled
-here; they are read by the loaders and archived with
-:func:`tmdc_optics_tools.hdf5.write_sweep`.
+The HDF5 side loads with :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep`
+or :class:`~tmdc_optics_tools.loaders.AttoCubeTRPLSweep` and writes with
+:func:`tmdc_optics_tools.hdf5.write_sweep`, so there is one archive format in the
+package and a converted sweep reopens by handing the ``.h5`` back to its loader.
+
+Only *spectra_type* is declared at conversion time, because a raw spectral export
+records no measurement type and none can be inferred.  What was swept, which
+channel reached which gate, and the device stack are read-time arguments: the
+loader takes each from its argument when given and from the file otherwise, so an
+archive is declared against exactly as the CSV was.
 """
 
 from __future__ import annotations
@@ -48,7 +66,14 @@ from typing import NamedTuple
 import numpy as np
 import tifffile
 
-from .loaders import _CSV_KIND_REASON, _classify_csv, _order_by_iter
+from .constants import SPECTROSCOPY_TYPES
+from .loaders import (
+    AttoCubeSpectralSweep,
+    AttoCubeTRPLSweep,
+    _CSV_KIND_REASON,
+    _classify_csv,
+    _order_by_iter,
+)
 
 # The folder a source has to sit in for its output to become a sibling, and the
 # folder output always lands in.  Fixed names rather than parameters: a setting
@@ -58,6 +83,23 @@ _RAW_DIR = "raw"
 _OUT_DIR = "processed"
 
 _DTYPES = ("auto", "uint16", "uint32", "float32")
+
+# A directory of temporal files is one sweep, not a file kind, so it needs a
+# reason of its own alongside the CSV kinds the loaders name.
+_TRPL_DIR_KIND = "trpl_directory"
+
+_SKIP_REASON = {
+    **_CSV_KIND_REASON,
+    _TRPL_DIR_KIND: "a TRPL sweep directory — name it on its own to convert it, "
+                    "with prefix= if it holds more than one measurement",
+}
+
+# How a refusal names the kind it wanted.  Only the kinds this module converts
+# need an entry; anything else is a programming error, not a user's.
+_KIND_ARTICLE = {
+    "image"   : "a real-space image CSV",
+    "spectral": "a spectral export CSV",
+}
 
 # Largest value uint16 holds.  Integer counts above it need uint32, because
 # float32 cannot represent every integer past 2**24.
@@ -131,14 +173,51 @@ def _default_output(src, new_suffix: str, out=None) -> Path:
     return root / _OUT_DIR / name
 
 
-def _claim_target(target: Path, overwrite: bool) -> Path:
+def _dir_output(directory, stem: str, new_suffix: str, out=None) -> Path:
     """
-    Refuse *target* if it already exists, then create its parent directory.
+    Resolve where converting a whole *directory* to one file should write.
+
+    The same rule as :func:`_default_output`, applied to a folder rather than a
+    file, so a directory-wide output lands where the folder's own per-file output
+    would have.  ``scan/raw/`` gives ``scan/processed/``; ``scan/frames/`` gives
+    ``scan/frames/processed/``.
+
+    Parameters
+    ----------
+    directory : str or Path
+        The folder being converted.
+    stem : str
+        Filename stem for the single output, e.g. ``"raw_stack"``.
+    new_suffix : str
+        Suffix of the output, leading dot included.
+    out : str or Path, optional
+        Explicit destination, read as in :func:`_default_output`.
+
+    Returns
+    -------
+    pathlib.Path
+        Nothing is created; see :func:`_claim_target`.
+    """
+    directory = Path(directory)
+    name      = stem + new_suffix
+
+    if out is not None:
+        out = Path(out)
+        return out / name if (out.suffix == "" or out.is_dir()) else out
+
+    root = directory.parent if directory.name.lower() == _RAW_DIR else directory
+    return root / _OUT_DIR / name
+
+
+def _refuse_existing(target: Path, overwrite: bool) -> Path:
+    """
+    Refuse *target* if it already exists, creating nothing.
 
     Overwriting is opt-in for the same reason it is in
-    :func:`tmdc_optics_tools.hdf5.write_sweep`: the file being replaced may be
-    the only copy.  The existence check runs first, so a refused conversion
-    leaves no empty ``processed/`` folder behind.
+    :func:`tmdc_optics_tools.hdf5.write_sweep`: the file being replaced may be the
+    only copy.  This is the check on its own, for writers that create their own
+    parent directory — calling it before a decode is what lets a re-run refuse in
+    milliseconds instead of parsing tens of MB and then refusing.
 
     Raises
     ------
@@ -150,6 +229,23 @@ def _claim_target(target: Path, overwrite: bool) -> Path:
             f"'{target}' already exists. Pass overwrite=True (or --overwrite) to "
             f"replace it, or give a different out= path."
         )
+    return target
+
+
+def _claim_target(target: Path, overwrite: bool) -> Path:
+    """
+    Refuse *target* if it already exists, then create its parent directory.
+
+    For writers that do not create their own directory — ``tifffile.imwrite`` does
+    not, ``hdf5.write_sweep`` does.  The refusal runs first, so a refused
+    conversion leaves no empty ``processed/`` folder behind.
+
+    Raises
+    ------
+    FileExistsError
+        If *target* exists and *overwrite* is False.
+    """
+    _refuse_existing(target, overwrite)
     target.parent.mkdir(parents=True, exist_ok=True)
     return target
 
@@ -157,6 +253,30 @@ def _claim_target(target: Path, overwrite: bool) -> Path:
 # ---------------------------------------------------------------------------
 # Frame discovery
 # ---------------------------------------------------------------------------
+
+def _folder_kinds(directory, prefix=None) -> dict:
+    """
+    Name every CSV in *directory*, as ``{Path: kind}``.
+
+    One classification pass per folder, so routing a mixed folder — frames beside
+    a spectral export, which is what an acquisition writes — reads the opening
+    lines of each file once rather than once per output kind.
+
+    Parameters
+    ----------
+    directory : str or Path
+    prefix : str, optional
+        Filename prefix to select.  Omitted, every ``*.csv`` is considered.
+
+    Returns
+    -------
+    dict
+        ``{Path: kind}`` in filename order, kinds as
+        :func:`tmdc_optics_tools.loaders._classify_csv` names them.
+    """
+    pattern = f"{prefix}*.csv" if prefix else "*.csv"
+    return {f: _classify_csv(f) for f in sorted(Path(directory).glob(pattern))}
+
 
 def _image_frames(directory, prefix=None, *, stacklevel: int) -> tuple:
     """
@@ -182,9 +302,7 @@ def _image_frames(directory, prefix=None, *, stacklevel: int) -> tuple:
     (frames, skipped) : (list of Path, dict)
         Ordered image paths, and ``{Path: kind}`` for everything excluded.
     """
-    pattern = f"{prefix}*.csv" if prefix else "*.csv"
-    kinds   = {f: _classify_csv(f) for f in sorted(Path(directory).glob(pattern))}
-
+    kinds   = _folder_kinds(directory, prefix)
     images  = [f for f, kind in kinds.items() if kind == "image"]
     skipped = {f: kind for f, kind in kinds.items() if kind != "image"}
     if not images:
@@ -195,26 +313,34 @@ def _image_frames(directory, prefix=None, *, stacklevel: int) -> tuple:
 def _describe(skipped: dict) -> str:
     """One indented ``name — why`` line per entry of a ``{Path: kind}`` map."""
     return "\n".join(
-        f"  {f.name} — {_CSV_KIND_REASON.get(kind, kind)}"
+        f"  {f.name} — {_SKIP_REASON.get(kind, kind)}"
         for f, kind in skipped.items()
     )
 
 
-def _require_image(path: Path) -> None:
+def _require_kind(path: Path, kind: str) -> None:
     """
-    Raise unless *path* is a real-space image CSV.
+    Raise unless *path* is a CSV of the given kind.
+
+    Parameters
+    ----------
+    path : Path
+    kind : str
+        The kind :func:`tmdc_optics_tools.loaders._classify_csv` must return, e.g.
+        ``"image"`` or ``"spectral"``.
 
     Raises
     ------
     ValueError
         Naming what the file is instead, in the same words the loaders use, so a
-        spectrum is never silently written out as a two-pixel-tall image.
+        spectrum is never silently written out as a two-pixel-tall image and a
+        frame is never handed to a sweep loader.
     """
-    kind = _classify_csv(path)
-    if kind != "image":
+    found = _classify_csv(path)
+    if found != kind:
         raise ValueError(
-            f"'{path}' is not a real-space image CSV: "
-            f"{_CSV_KIND_REASON.get(kind, kind)}."
+            f"'{path}' is not {_KIND_ARTICLE[kind]}: "
+            f"{_SKIP_REASON.get(found, found)}."
         )
 
 
@@ -303,7 +429,7 @@ def convert_image_csv_to_tiff(
         If the output exists and *overwrite* is False.
     """
     path = Path(path)
-    _require_image(path)
+    _require_kind(path, "image")
     target = _claim_target(_default_output(path, ".tif", out), overwrite)
     tifffile.imwrite(target, _as_image_dtype(np.loadtxt(path, delimiter=","), dtype))
     return target
@@ -368,16 +494,9 @@ def convert_image_dir_to_tiff_stack(
         raise ValueError(f"No CSV files matching '{pattern}' in '{directory}'.")
 
     stem = (prefix.rstrip("_- ") if prefix else directory.name) + "_stack"
-    if out is None:
-        # The frames' own processed/ folder, so a stack sits beside the per-frame
-        # output rather than in a second place.
-        target = _default_output(frames[0], ".tif").parent / (stem + ".tif")
-    elif Path(out).suffix == "" or Path(out).is_dir():
-        target = Path(out) / (stem + ".tif")
-    else:
-        target = Path(out)
-
-    target = _claim_target(target, overwrite)
+    # One rule for every directory-wide output, so a stack sits beside the
+    # per-frame output rather than in a second place.
+    target = _claim_target(_dir_output(directory, stem, ".tif", out), overwrite)
     # (n_frames, ny, nx) — every frame read once, cast as one block so the whole
     # stack shares a pixel type.
     stack = np.stack([np.loadtxt(f, delimiter=",") for f in frames])
@@ -389,23 +508,176 @@ def convert_image_dir_to_tiff_stack(
 
 
 # ---------------------------------------------------------------------------
+# Spectral and temporal CSV -> HDF5
+# ---------------------------------------------------------------------------
+
+def convert_spectral_csv_to_hdf5(
+    path,
+    spectra_type : str,
+    out          = None,
+    overwrite    : bool = False,
+    compression  : str  = "gzip",
+) -> Path:
+    """
+    Convert a spectral export CSV to a self-describing HDF5 archive.
+
+    Loads the file with :class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep`
+    and writes it with :func:`tmdc_optics_tools.hdf5.write_sweep`, so the result is
+    the package's one archive format and reopens by handing the ``.h5`` back to the
+    loader.  Every signal array and parameter row is stored in file units.
+
+    What was swept, which channel reached which gate, and the device stack are
+    **not** declared here.  They are read-time arguments: the loader takes each
+    from its argument when given and from the file's metadata otherwise, so an
+    archive written by this function is declared against exactly as the CSV was.
+
+    Parameters
+    ----------
+    path : str or Path
+        Source spectral CSV.  Anything else is refused rather than converted.
+    spectra_type : str
+        Required, and the one measurement fact that cannot be recovered later: a
+        raw export records no type and none can be inferred from the data.  One of
+        the keys of :data:`tmdc_optics_tools.constants.SPECTROSCOPY_TYPES`.
+    out : str or Path, optional
+        Destination file or directory.  Omitted, the archive lands in a
+        ``processed/`` folder — see the module docstring.
+    overwrite : bool
+        Replace an existing archive.  Default False, which raises.
+    compression : str or None
+        Passed to :func:`~tmdc_optics_tools.hdf5.write_sweep`, which applies it to
+        the two spectra arrays.  ``None`` disables it.
+
+    Returns
+    -------
+    pathlib.Path
+        The ``.h5`` written.
+
+    Raises
+    ------
+    ValueError
+        If *path* is not a spectral export, or *spectra_type* is not recognised.
+    FileExistsError
+        If the archive exists and *overwrite* is False.
+
+    Examples
+    --------
+    >>> h5 = convert_spectral_csv_to_hdf5("scan/raw/sweep.csv", "PL")
+    >>> scan = AttoCubeSpectralSweep(h5, spectra_type="PL", sweep="V_A")
+    """
+    path = Path(path)
+    _require_kind(path, "spectral")
+    # Validated through the loader's own resolver, against the empty metadata a raw
+    # export has, so a missing or mistyped type raises the message the loader would
+    # have raised — before tens of MB are parsed, and with no second copy of it.
+    AttoCubeSpectralSweep._resolve_spectra_type(spectra_type, {})
+    # Checked before the decode too, so a re-run refuses in milliseconds.
+    target = _refuse_existing(_default_output(path, ".h5", out), overwrite)
+    scan   = AttoCubeSpectralSweep(path, spectra_type=spectra_type)
+    return scan.to_hdf5(target, overwrite=overwrite, compression=compression)
+
+
+def convert_trpl_dir_to_hdf5(
+    directory,
+    prefix      = None,
+    out         = None,
+    overwrite   : bool = False,
+    compression : str  = "gzip",
+) -> Path:
+    """
+    Convert a directory of TRPL exports to one self-describing HDF5 archive.
+
+    A TRPL sweep is a *directory* — one TCSPC decay per file — so this collapses
+    many files into a single archive.  Which files count is
+    :class:`~tmdc_optics_tools.loaders.AttoCubeTRPLSweep`'s decision, not this
+    function's: it excludes an IRF reference by name, reads a spectral-header file
+    in the folder as the parameter-table companion rather than a sweep, and orders
+    the rest by their ``_iter_N`` suffix.
+
+    No *spectra_type* argument, because the loader defaults it to ``"TRPL"`` — the
+    class already declares the modality.
+
+    Parameters
+    ----------
+    directory : str or Path
+        Folder holding the per-point exports.
+    prefix : str, optional
+        Filename prefix to select, e.g. ``"TRPL_"``.  **Required in practice when
+        the folder holds more than one measurement**: without it every temporal
+        file is taken as a point of one sweep, and two measurements sharing a
+        folder merge.  The loader warns when they claim the same iteration
+        indices, but a warning is not a refusal.
+    out : str or Path, optional
+        Destination file or directory.  Omitted, the archive lands in a
+        ``processed/`` folder, named after *prefix* with trailing separators
+        stripped, or after the folder.
+    overwrite : bool
+        Replace an existing archive.  Default False, which raises.
+    compression : str or None
+        Passed to :func:`~tmdc_optics_tools.hdf5.write_sweep`.
+
+    Returns
+    -------
+    pathlib.Path
+        The ``.h5`` written.
+
+    Raises
+    ------
+    ValueError
+        If the folder holds no TRPL data file matching *prefix*.  The loader's
+        message counts what it looked at and why each file was excluded.
+    FileExistsError
+        If the archive exists and *overwrite* is False.
+    """
+    directory = Path(directory)
+    stem      = prefix.rstrip("_- ") if prefix else directory.name
+    target    = _refuse_existing(_dir_output(directory, stem, ".h5", out), overwrite)
+    scan      = AttoCubeTRPLSweep(directory, prefix=prefix)
+    return scan.to_hdf5(target, overwrite=overwrite, compression=compression)
+
+
+# ---------------------------------------------------------------------------
 # Batch conversion
 # ---------------------------------------------------------------------------
 
 def convert_path(
     path,
-    out       = None,
-    recursive : bool = False,
-    stack     : bool = False,
-    dtype     : str  = "auto",
-    overwrite : bool = False,
+    out          = None,
+    recursive    : bool = False,
+    stack        : bool = False,
+    dtype        : str  = "auto",
+    overwrite    : bool = False,
+    spectra_type : str  = None,
+    prefix       : str  = None,
+    compression  : str  = "gzip",
 ) -> ConversionReport:
     """
     Convert a file, a directory, or a tree, continuing past failures.
 
-    Every failure is collected rather than raised, so one unreadable frame does
-    not abandon a sweep.  Call :func:`convert_image_csv_to_tiff` directly to have
-    the exception instead.
+    Every failure is collected rather than raised, so one unreadable frame does not
+    abandon a sweep.  Call a single-purpose converter directly to have the
+    exception instead.
+
+    Routing is by content, per folder:
+
+    ==========================  ==================================================
+    what the folder holds       what is written
+    ==========================  ==================================================
+    image CSVs                  one ``.tif`` each, or one stack with *stack*
+    temporal CSVs               one ``.h5`` for the whole folder — but only if this
+                                is the directory that was named; see below
+    spectral CSVs               one ``.h5`` each, unless the folder is a TRPL
+                                sweep, in which case a spectral file is that
+                                sweep's parameter-table companion
+    anything else               reported in ``skipped``
+    ==========================  ==================================================
+
+    **A TRPL directory converts only when you name it.** A folder reached by
+    *recursive* is reported in ``skipped`` instead, because which files form one
+    sweep is a declaration rather than something to infer: two measurements in one
+    folder merge into a single wrong archive, and the loader warns about the
+    colliding iteration indices without refusing.  Name that folder on its own,
+    with *prefix*, to convert it.
 
     Parameters
     ----------
@@ -420,9 +692,18 @@ def convert_path(
     stack : bool
         Write one multi-page TIFF per folder instead of one file per frame.
     dtype : {"auto", "uint16", "uint32", "float32"}
-        Pixel type.
+        Pixel type for image output.
     overwrite : bool
         Replace existing output files.
+    spectra_type : str, optional
+        Measurement type for spectral exports, which cannot record their own.
+        Without it a spectral CSV becomes an entry in ``errors`` carrying the
+        loader's message, and the images in the same folder still convert.
+    prefix : str, optional
+        Filename prefix to select, applied in every folder.  Narrows which files
+        form a TRPL sweep, and names a TIFF stack.
+    compression : str or None
+        Passed to :func:`~tmdc_optics_tools.hdf5.write_sweep` for HDF5 output.
 
     Returns
     -------
@@ -437,52 +718,74 @@ def convert_path(
     path = Path(path)
     outputs, skipped, errors = [], {}, []
 
-    if path.is_file():
+    def attempt(convert, source):
+        """Run one conversion, recording its output or its failure."""
         try:
-            outputs.append(
-                convert_image_csv_to_tiff(
-                    path, out=out, dtype=dtype, overwrite=overwrite
-                )
-            )
+            outputs.append(convert())
         except Exception as exc:              # a batch reports and carries on
-            errors.append((path, str(exc)))
+            errors.append((source, str(exc)))
+
+    if path.is_file():
+        kind = _classify_csv(path)
+        if kind == "spectral":
+            attempt(lambda: convert_spectral_csv_to_hdf5(
+                path, spectra_type, out=out, overwrite=overwrite,
+                compression=compression), path)
+        else:
+            attempt(lambda: convert_image_csv_to_tiff(
+                path, out=out, dtype=dtype, overwrite=overwrite), path)
         return ConversionReport(outputs, skipped, errors)
 
     if not path.is_dir():
         raise FileNotFoundError(f"No such file or directory: '{path}'")
 
-    # Every folder holding a CSV, deduplicated: a stack is built per folder, and
-    # an omitted out= resolves per folder too.  Which of those CSVs are frames is
-    # settled inside the loop, by content.
+    # Every folder holding a CSV, deduplicated: output is resolved per folder, and
+    # a stack and a TRPL sweep are both per folder.
     csvs = path.rglob("*.csv") if recursive else path.glob("*.csv")
 
     for folder in sorted({csv.parent for csv in csvs}):
-        # 3 frames out from the ordering helper: itself, _image_frames, this loop.
-        frames, folder_skipped = _image_frames(folder, stacklevel=3)
-        skipped.update(folder_skipped)
-        if not frames:
-            continue
+        kinds = _folder_kinds(folder, prefix)
+        # A temporal file makes the whole folder one sweep, which is what decides
+        # whether its spectral files are sweeps or that sweep's companion.
+        is_trpl = any(kind == "temporal" for kind in kinds.values())
+        named   = folder == path
 
+        # image, spectral and temporal are each either converted below or absorbed
+        # into a sweep the loader reads for itself.  Everything else is reported.
+        for f, kind in kinds.items():
+            if kind not in ("image", "spectral", "temporal"):
+                skipped[f] = kind
+
+        if is_trpl:
+            if named:
+                attempt(lambda: convert_trpl_dir_to_hdf5(
+                    folder, prefix=prefix, out=out, overwrite=overwrite,
+                    compression=compression), folder)
+            else:
+                skipped[folder] = _TRPL_DIR_KIND
+        else:
+            for f, kind in kinds.items():
+                if kind == "spectral":
+                    attempt(lambda f=f: convert_spectral_csv_to_hdf5(
+                        f, spectra_type, out=out, overwrite=overwrite,
+                        compression=compression), f)
+
+        images = [f for f, kind in kinds.items() if kind == "image"]
+        if not images:
+            continue
         if stack:
-            try:
-                outputs.append(
-                    convert_image_dir_to_tiff_stack(
-                        folder, out=out, dtype=dtype, overwrite=overwrite
-                    )
-                )
-            except Exception as exc:
-                errors.append((folder, str(exc)))
-            continue
-
-        for frame in frames:
-            try:
-                outputs.append(
-                    convert_image_csv_to_tiff(
-                        frame, out=out, dtype=dtype, overwrite=overwrite
-                    )
-                )
-            except Exception as exc:
-                errors.append((frame, str(exc)))
+            attempt(lambda: convert_image_dir_to_tiff_stack(
+                folder, prefix=prefix, out=out, dtype=dtype,
+                overwrite=overwrite), folder)
+        else:
+            # Filename order, not acquisition order: each frame becomes its own
+            # file named after itself, so nothing here depends on the sequence.
+            # Ordering would only add _order_by_iter's warning about frames that
+            # carry no _iter_N — which two standalone reference images beside a
+            # sweep legitimately do not.
+            for frame in images:
+                attempt(lambda frame=frame: convert_image_csv_to_tiff(
+                    frame, out=out, dtype=dtype, overwrite=overwrite), frame)
 
     return ConversionReport(outputs, skipped, errors)
 
@@ -508,16 +811,31 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         prog="tmdc-convert",
         description=(
-            "Convert AttoCube real-space image CSV exports to TIFF. Output lands "
-            "in a processed/ folder: the sibling of raw/ when the source is in "
-            "one, and a folder beside the source otherwise."
+            "Convert AttoCube CSV exports to compact formats: real-space images to "
+            "TIFF, spectral and TRPL sweeps to HDF5. Output lands in a processed/ "
+            "folder: the sibling of raw/ when the source is in one, and a folder "
+            "beside the source otherwise."
         ),
     )
-    parser.add_argument("path", help="Image CSV, or a directory of them.")
+    parser.add_argument("path", help="A CSV, or a directory of them.")
     parser.add_argument(
         "--out", default=None,
         help="Destination directory (or file, for a single input). "
              "Default: a processed/ folder per source folder.",
+    )
+    parser.add_argument(
+        "--spectra-type", default=None, choices=sorted(SPECTROSCOPY_TYPES),
+        help="Measurement type for spectral exports, which record none of their "
+             "own. Required to convert one; images and TRPL need it not.",
+    )
+    parser.add_argument(
+        "--prefix", default=None,
+        help="Filename prefix to select. Narrows which files form a TRPL sweep, "
+             "and names a TIFF stack.",
+    )
+    parser.add_argument(
+        "--compression", default="gzip",
+        help="HDF5 compression filter, or 'none' (default: gzip).",
     )
     parser.add_argument(
         "--stack", action="store_true",
@@ -542,11 +860,17 @@ def main(argv=None) -> int:
     try:
         report = convert_path(
             args.path,
-            out       = args.out,
-            recursive = args.recursive,
-            stack     = args.stack,
-            dtype     = args.dtype,
-            overwrite = args.overwrite,
+            out          = args.out,
+            recursive    = args.recursive,
+            stack        = args.stack,
+            dtype        = args.dtype,
+            overwrite    = args.overwrite,
+            spectra_type = args.spectra_type,
+            prefix       = args.prefix,
+            # argparse cannot express "a filter name or nothing", so the word is
+            # spelled on the command line and turned into None here.
+            compression  = None if args.compression.lower() == "none"
+                           else args.compression,
         )
     except FileNotFoundError as exc:
         print(f"ERROR {exc}", file=sys.stderr)
@@ -554,12 +878,17 @@ def main(argv=None) -> int:
 
     for target in report.outputs:
         print(f"wrote {target}")
+    # A deferred TRPL folder is the one skip that asks the caller to do something,
+    # so it is named rather than left inside a count.
+    for folder, kind in report.skipped.items():
+        if kind == _TRPL_DIR_KIND:
+            print(f"deferred {folder}: {_SKIP_REASON[_TRPL_DIR_KIND]}")
     for src, message in report.errors:
         print(f"ERROR {src}: {message}", file=sys.stderr)
 
     summary = f"\n{len(report.outputs)} file(s) written"
     if report.skipped:
-        summary += f", {len(report.skipped)} not image CSV(s)"
+        summary += f", {len(report.skipped)} not converted"
     summary += f", {len(report.errors)} error(s)."
     print(summary)
     return 1 if report.errors else 0

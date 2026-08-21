@@ -131,5 +131,6 @@ Ordered by number, which is allocation order — see the `Date` column for chron
 | [0030](0030-clim-and-rescale-img-are-refused-together.md) | `clim` and `rescale_img` are refused together, in both functions | 2026-08-21 | Accepted |
 | [0031](0031-the-spectral-maps-mesh-runs-one-row-per-sweep-point.md) | The spectral map's mesh runs one row per sweep point | 2026-08-21 | Accepted |
 | [0032](0032-converted-files-land-in-a-processed-folder.md) | Converted files land in a `processed/` folder | 2026-08-21 | Accepted |
+| [0033](0033-a-trpl-directory-converts-only-when-named.md) | A TRPL directory converts only when it is named | 2026-08-21 | Accepted |
 
 This table is the one mutable part of the folder.

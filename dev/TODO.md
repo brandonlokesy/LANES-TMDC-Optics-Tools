@@ -37,12 +37,19 @@
   `loaders._classify_csv` and `loaders._order_by_iter`; the branch's own copies of
   both reimplemented A9 and A7. Output goes to a `processed/` folder
   (`dev/decisions/0032-converted-files-land-in-a-processed-folder.md`).
-    - **Still owed: bulk spectral CSV → HDF5 on the command line.** Route it through
-      `AttoCubeSpectralSweep` + `hdf5.write_sweep`, not the branch's private layout —
-      that one writes an `.h5` the loader cannot reopen, and re-decodes the block
-      stride a third time. Needs a `--spectra-type` flag, `spectra_type=` having no
-      default by decision. The 11.57 MB → 0.069 MB TRPL result is the argument for
-      finishing it.
+    - ~~Still owed: bulk spectral CSV → HDF5 on the command line~~ **done 2026-08-21.**
+      `convert_spectral_csv_to_hdf5` loads with `AttoCubeSpectralSweep` and writes
+      with `hdf5.write_sweep`, so the package has one archive format and a converted
+      sweep reopens in the loader — unlike the branch's private layout.
+      `convert_trpl_dir_to_hdf5` collapses a directory of decays into one archive.
+      Measured: 4.59 MB → 0.142 MB spectral (32×), and 11.57 MB → 0.070 MB for
+      TRPL (165×, the 11.14 MB parameter-table companion being what the archive
+      makes unnecessary).
+        - `--spectra-type` is the only measurement fact declared at conversion time;
+          sweep, gates and geometry are read-time arguments, since the loader takes
+          each from its argument and only falls back to stored metadata.
+        - A TRPL directory converts only when named, never when reached by
+          `--recursive`: `dev/decisions/0033-a-trpl-directory-converts-only-when-named.md`.
 - AttoCubeRealSpace ...
     - Select the range of frames of interest -> work on a subset
     - ~~**File ordering is lexicographic** (A7)~~ **fixed 2026-08-07.**

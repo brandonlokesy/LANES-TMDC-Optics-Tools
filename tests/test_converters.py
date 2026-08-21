@@ -22,6 +22,18 @@ import pytest
 import tifffile
 
 from tmdc_optics_tools import converters
+from tmdc_optics_tools.loaders import (
+    AttoCubeSpectralSweep,
+    AttoCubeTRPLSweep,
+    DeviceGeometry,
+    StackLayer,
+)
+
+from test_loaders import GATES, PARAMS, make_spectral_csv
+from test_loaders_trpl import _synth_decay
+from _paths import DATA
+
+TRPL_DIR = str(DATA / "TRPL")
 
 SHAPE = (4, 5)                      # (ny, nx) — small; no frame content is analysed
 
@@ -377,3 +389,212 @@ def test_cli_returns_one_on_failure(tmp_path):
 
 def test_cli_returns_one_on_a_missing_path(tmp_path):
     assert converters.main([str(tmp_path / "nope")]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Spectral export -> HDF5
+# ---------------------------------------------------------------------------
+
+def test_spectral_csv_round_trips_through_the_archive(tmp_path):
+    # The point of routing through the loader and write_sweep rather than a
+    # private layout: the archive is the package's one format, so the loader
+    # reopens it.  The dev/hdf5 branch's version wrote an .h5 that could not be.
+    csv = tmp_path / "sweep.csv"
+    make_spectral_csv(csv)
+
+    h5 = converters.convert_spectral_csv_to_hdf5(csv, "PL", out=tmp_path)
+    assert h5.suffix == ".h5"
+
+    original = AttoCubeSpectralSweep(csv, spectra_type="PL")
+    reopened = AttoCubeSpectralSweep(h5, spectra_type="PL")
+
+    assert np.array_equal(reopened.wavelength, original.wavelength)
+    assert np.array_equal(reopened.spectra_roi1, original.spectra_roi1)
+    assert np.array_equal(reopened.spectra_roi2, original.spectra_roi2)
+    assert reopened.parameter_labels == original.parameter_labels
+    for label in original.parameter_labels:
+        assert np.array_equal(reopened[label], original[label])
+
+
+def test_the_archive_takes_declarations_it_was_not_converted_with(tmp_path):
+    # Only spectra_type is declared at conversion time.  This is what makes that
+    # safe: the loader takes sweep, gates and geometry from its arguments and only
+    # falls back to stored metadata, so the physics is declared at read time
+    # exactly as it is for the CSV.
+    csv = tmp_path / "sweep.csv"
+    make_spectral_csv(csv)
+    h5 = converters.convert_spectral_csv_to_hdf5(csv, "PL", out=tmp_path)
+
+    bare = AttoCubeSpectralSweep(h5, spectra_type="PL")
+    assert bare.sweep_type == "index"            # nothing was claimed for it
+
+    geom = DeviceGeometry(
+        tmdc_stack   = [StackLayer("MoSe2"), StackLayer("WSe2", n_layers=2)],
+        d_hbn_top    = 53.0,
+        d_hbn_bottom = 46.0,
+    )
+    declared = AttoCubeSpectralSweep(
+        h5, spectra_type="PL", sweep="V_A", gates=GATES, geometry=geom)
+
+    assert declared.sweep_type == "V_A"
+    assert np.array_equal(declared.v_top, PARAMS["V_A"])
+    assert declared.ef is not None               # needs both gates and a geometry
+
+
+def test_spectra_type_is_required_and_says_so(tmp_path):
+    csv = tmp_path / "sweep.csv"
+    make_spectral_csv(csv)
+
+    with pytest.raises(ValueError) as excinfo:
+        converters.convert_spectral_csv_to_hdf5(csv, None, out=tmp_path)
+
+    # The loader's own message, reached through its own resolver, so there is no
+    # second copy of the wording to drift.
+    assert "spectra_type is required" in str(excinfo.value)
+
+
+def test_an_unknown_spectra_type_is_refused_before_the_decode(tmp_path):
+    csv = tmp_path / "sweep.csv"
+    make_spectral_csv(csv)
+
+    with pytest.raises(ValueError, match="not a recognised measurement type"):
+        converters.convert_spectral_csv_to_hdf5(csv, "PLL", out=tmp_path)
+
+    assert not (tmp_path / "processed").exists()
+
+
+def test_converting_a_frame_as_spectral_is_refused(tmp_path):
+    _frame(tmp_path, "img.csv", 1)
+
+    with pytest.raises(ValueError) as excinfo:
+        converters.convert_spectral_csv_to_hdf5(tmp_path / "img.csv", "PL")
+
+    assert "not a spectral export CSV" in str(excinfo.value)
+
+
+def test_an_archive_lands_in_processed(tmp_path):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    make_spectral_csv(raw / "sweep.csv")
+
+    h5 = converters.convert_spectral_csv_to_hdf5(raw / "sweep.csv", "PL")
+
+    assert h5 == tmp_path / "processed" / "sweep.h5"
+
+
+def test_an_existing_archive_is_refused(tmp_path):
+    csv = tmp_path / "sweep.csv"
+    make_spectral_csv(csv)
+    converters.convert_spectral_csv_to_hdf5(csv, "PL", out=tmp_path)
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        converters.convert_spectral_csv_to_hdf5(csv, "PL", out=tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# A mixed folder: frames beside a spectral export, which is what is exported
+# ---------------------------------------------------------------------------
+
+def test_a_mixed_folder_writes_both_kinds(tmp_path):
+    for i in (0, 1):
+        _frame(tmp_path, f"pl_iter_{i}.csv", i)
+    make_spectral_csv(tmp_path / "sweep.csv")
+
+    report = converters.convert_path(tmp_path, spectra_type="PL")
+
+    assert sorted(p.name for p in report.outputs) == [
+        "pl_iter_0.tif", "pl_iter_1.tif", "sweep.h5"
+    ]
+    assert not report.errors
+
+
+def test_without_spectra_type_the_frames_still_convert(tmp_path):
+    for i in (0, 1):
+        _frame(tmp_path, f"pl_iter_{i}.csv", i)
+    make_spectral_csv(tmp_path / "sweep.csv")
+
+    report = converters.convert_path(tmp_path)
+
+    assert sorted(p.name for p in report.outputs) == ["pl_iter_0.tif", "pl_iter_1.tif"]
+    assert len(report.errors) == 1
+    assert report.errors[0][0].name == "sweep.csv"
+    assert "spectra_type is required" in report.errors[0][1]
+
+
+# ---------------------------------------------------------------------------
+# TRPL: a directory is one sweep
+# ---------------------------------------------------------------------------
+
+def _trpl_dir(directory, prefix="TRPL_", n=3):
+    """Write *n* synthetic decays sharing one time axis into *directory*."""
+    directory.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        _synth_decay(directory / f"{prefix}iter_{i}.csv",
+                     params={"V_A": float(i), "Excitation Power": 1e-4})
+    return directory
+
+
+def test_trpl_directory_becomes_one_archive(tmp_path):
+    folder = _trpl_dir(tmp_path / "raw")
+
+    h5 = converters.convert_trpl_dir_to_hdf5(folder)
+
+    assert h5 == tmp_path / "processed" / "raw.h5"
+    original = AttoCubeTRPLSweep(folder)
+    reopened = AttoCubeTRPLSweep(h5)
+    assert np.array_equal(reopened.time, original.time)
+    assert np.array_equal(reopened.decays, original.decays)
+    assert reopened.n_sweeps == 3
+
+
+def test_a_named_trpl_directory_converts(tmp_path):
+    folder = _trpl_dir(tmp_path / "sweep")
+
+    report = converters.convert_path(folder)
+
+    assert [p.name for p in report.outputs] == ["sweep.h5"]
+    assert not report.errors
+
+
+def test_a_discovered_trpl_directory_defers(tmp_path):
+    # Which files form one sweep is a declaration, not something to infer, so a
+    # folder reached by recursion is reported rather than guessed at.
+    folder = _trpl_dir(tmp_path / "sweep")
+
+    report = converters.convert_path(tmp_path, recursive=True)
+
+    assert not report.outputs
+    assert report.skipped == {folder: "trpl_directory"}
+
+
+def test_prefix_picks_one_of_two_measurements_sharing_a_folder(tmp_path):
+    # The right_spots case: two measurements in one folder claim the same
+    # _iter_N indices, so without a prefix they merge into a single wrong sweep.
+    folder = tmp_path / "raw"
+    _trpl_dir(folder, prefix="right1_")
+    _trpl_dir(folder, prefix="right2_")
+
+    h5 = converters.convert_trpl_dir_to_hdf5(folder, prefix="right1_")
+
+    assert h5.name == "right1.h5"
+    assert AttoCubeTRPLSweep(h5).n_sweeps == 3        # not 6
+
+
+def test_a_committed_trpl_folder_writes_one_archive_not_two(tmp_path):
+    # The real folder holds an IRF, a laser-spot image and the sweep's
+    # parameter-table companion.  The companion has a spectral header, and must be
+    # read as part of the sweep rather than converted as a sweep of its own.
+    report = converters.convert_path(TRPL_DIR, out=tmp_path, spectra_type="PL")
+
+    archives = [p for p in report.outputs if p.suffix == ".h5"]
+    assert len(archives) == 1
+    assert AttoCubeTRPLSweep(archives[0]).n_sweeps == 3
+
+
+def test_the_cli_reports_a_deferred_directory(tmp_path, capsys):
+    _trpl_dir(tmp_path / "sweep")
+
+    assert converters.main([str(tmp_path), "--recursive"]) == 0
+    out = capsys.readouterr().out
+    assert "deferred" in out
+    assert "name it on its own" in out

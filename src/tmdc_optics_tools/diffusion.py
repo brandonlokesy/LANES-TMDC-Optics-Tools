@@ -55,12 +55,12 @@ class DiffusionResult:
         convention).  Use :meth:`centroid_px` / :meth:`centroid_real` for a
         convenient ``(x, y)`` tuple.
     x_real, y_real : float or None
-        Centroid in real-space coordinates (same units as *pixel_scale*).
+        Centroid in real-space coordinates, in :attr:`scale_units`.
         ``None`` when no scale was supplied.
     area_px2 : float
         Effective cloud area in px².
     area_real : float or None
-        Effective cloud area in real-space units² (``pixel_scale²``).
+        Effective cloud area in :attr:`scale_units` squared (``pixel_scale²``).
         ``None`` when no scale was supplied.
     contours : list of np.ndarray
         Boundary contours as ``(N, 2)`` arrays of ``(row, col)`` coordinates,
@@ -83,6 +83,15 @@ class DiffusionResult:
     origin : str
         Origin convention used for real-space conversion
         (``"corner"`` | ``"center"`` | ``"image_center"``).
+    scale_units : str
+        Unit *pixel_scale* was given in, and therefore the unit of
+        :attr:`x_real` / :attr:`y_real`; :attr:`area_real` is in its square.
+        Carried so that a reader of the result — ``__repr__``, or
+        :func:`~tmdc_optics_tools.plotting.plot_centroid_trajectory`'s axis
+        label — can say what the real-space numbers are in. The scale is
+        typically calibrated per session against a known laser-spot size, so
+        the unit is the caller's choice rather than a property of the
+        instrument.
     """
 
     x_pixel    : float
@@ -98,6 +107,10 @@ class DiffusionResult:
     pixel_scale: float | None = None
     origin     : str          = "corner"
     roi        : tuple | None = None   # (row_slice, col_slice), echoed from the call
+    # Pairs with pixel_scale: the unit that scale is expressed in.  Appended
+    # rather than placed next to it, because a dataclass can be constructed
+    # positionally and inserting a field silently changes what such a call means.
+    scale_units: str          = "µm"
 
     @property
     def centroid_px(self) -> tuple[float, float]:
@@ -110,21 +123,29 @@ class DiffusionResult:
         return (self.x_real, self.y_real)
 
     def __repr__(self) -> str:
-        lines = [
-            f"DiffusionResult",
-            f"  Centroid (px)   : ({self.x_pixel:.2f}, {self.y_pixel:.2f})",
-        ]
+        unit = self.scale_units
+        # (label, value) pairs first, so the colons align on the widest label
+        # rather than on a hardcoded width -- the real-space labels carry a
+        # caller-supplied unit and so have no fixed length.  A real-space row is
+        # present only when the conversion actually happened, which is what stops
+        # a unit being printed beside a number that is still in pixels.
+        rows = [("Centroid (px)", f"({self.x_pixel:.2f}, {self.y_pixel:.2f})")]
         if self.x_real is not None:
-            lines.append(
-                f"  Centroid (real) : ({self.x_real:.4g}, {self.y_real:.4g})"
-                f"  [origin='{self.origin}']"
-            )
-        lines.append(f"  Area            : {self.area_px2:.1f} px²")
+            rows.append((
+                f"Centroid ({unit})",
+                f"({self.x_real:.4g}, {self.y_real:.4g})  [origin='{self.origin}']",
+            ))
+        rows.append(("Area", f"{self.area_px2:.1f} px²"))
         if self.area_real is not None:
-            lines.append(f"  Area (real)     : {self.area_real:.4g}")
-        lines.append(f"  Threshold       : {self.threshold:.4g}")
-        lines.append(f"  Contours        : {len(self.contours)}")
-        return "\n".join(lines)
+            rows.append((f"Area ({unit}²)", f"{self.area_real:.4g}"))
+        rows.append(("Threshold", f"{self.threshold:.4g}"))
+        rows.append(("Contours",  f"{len(self.contours)}"))
+
+        width = max(len(label) for label, _ in rows)
+        return "\n".join(
+            ["DiffusionResult"]
+            + [f"  {label:<{width}} : {value}" for label, value in rows]
+        )
 
 
 @dataclass
@@ -191,6 +212,16 @@ class DiffusionSequenceResult:
         return np.array(vals) if vals[0] is not None else None
 
     @property
+    def scale_units(self) -> str:
+        """
+        Unit of :attr:`x_real` / :attr:`y_real`; :attr:`area_real` is its square.
+
+        Read off the first frame: one call analyses the whole sequence, so every
+        frame carries the same unit.
+        """
+        return self.frames[0].scale_units
+
+    @property
     def n_frames(self) -> int:
         return len(self.frames)
 
@@ -253,7 +284,11 @@ def analyse_diffusion_cloud(
         When supplied, ``x_real``, ``y_real``, and ``area_real`` are
         populated in the returned :class:`DiffusionResult`.
     scale_units : str
-        Unit label for *pixel_scale* (used only in ``__repr__``).
+        Unit *pixel_scale* is given in. Carried on the result, which is what
+        lets its ``__repr__`` and
+        :func:`~tmdc_optics_tools.plotting.plot_centroid_trajectory` say what
+        the real-space numbers are in. Ignored when *pixel_scale* is ``None``,
+        since nothing is converted.
     origin : {``"corner"``, ``"center"``, ``"image_center"``}
         Origin convention for real-space coordinates:
         - ``"corner"``       — ``(0, 0)`` is the top-left pixel.
@@ -358,6 +393,7 @@ def analyse_diffusion_cloud(
         pixel_scale= pixel_scale,
         origin     = origin,
         roi        = roi,
+        scale_units= scale_units,
     )
 
 

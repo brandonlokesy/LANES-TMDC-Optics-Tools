@@ -3635,7 +3635,8 @@ def plot_centroid_trajectory(
         Which centroid coordinate(s) to plot.
     use_real : bool
         If ``True`` and real-space coordinates are available, plot those
-        instead of pixel coordinates.
+        instead of pixel coordinates. The axis and line labels then carry the
+        result's ``scale_units`` rather than ``px``.
     color_x, color_y : str
         Line/marker colours for x and y coordinates.
     marker, markersize : str / float
@@ -3663,7 +3664,9 @@ def plot_centroid_trajectory(
     if use_real and sr.x_real is not None:
         cx = sr.x_real
         cy = sr.y_real
-        coord_unit = " (real)"
+        # The unit the caller calibrated pixel_scale in, carried on the result --
+        # it is not fixed by the instrument, so it cannot be spelled here.
+        coord_unit = f" ({sr.scale_units})"
     else:
         cx = sr.x_pixel
         cy = sr.y_pixel

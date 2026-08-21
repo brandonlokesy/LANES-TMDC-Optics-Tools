@@ -2558,12 +2558,22 @@ deprecation cost — which is the argument for taking them now rather than later
 
 **E22 was worked around before it was fixed.** scikit-learn was installed into
 `viz-sci-plot` on 2026-08-19 so the suite could run; the module-level import went on
-2026-08-20. *That install has since been lost:* on 2026-08-21
+2026-08-20. *That install went missing again, and the cause is not the one E4
+describes.* On 2026-08-21
 `tests/test_import_cost.py::test_the_function_that_needs_sklearn_can_still_reach_it`
-fails in `viz-sci-plot` with `ModuleNotFoundError: No module named 'sklearn'`, and the
-suite is otherwise green. scikit-learn is not declared in any extra in
-`pyproject.toml`, which is the same undeclared-dependency shape **E4** records — an
-environment cannot announce what it is missing, and this one drifted back.
+failed in `viz-sci-plot` with `ModuleNotFoundError: No module named 'sklearn'`, the suite
+otherwise green. **scikit-learn is correctly declared** — `pyproject.toml` lists it in
+`[project] dependencies`, not in an extra, so it is required rather than optional, and CI
+installs `".[test,colormaps]"` which pulls the base list. The environment was simply
+never re-installed after the line was added, so the package was present while one of its
+required dependencies was not.
+
+The lesson is the mirror of E4's, and worth keeping separate from it: a *declared*
+dependency still does not reach an environment built before the declaration, and the
+only signal is a test failing on a machine where the file says it should pass. Cleared by
+`pip install -e ".[docs]"` on 2026-08-21, which resolved the base list and brought
+scikit-learn 1.9.0 with it; the suite is 917 passed, 0 failed, and
+`mkdocs build --strict` is green.
 
 **Opened 2026-08-21 while closing E3:** **A30**. Same class as A25 — a figure drawn from
 values that are not measurements — and it rides along with whatever next touches

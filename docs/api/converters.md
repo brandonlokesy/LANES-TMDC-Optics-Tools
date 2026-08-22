@@ -101,11 +101,63 @@ scan = AttoCubeSpectralSweep(
 So an archive is declared against exactly as the CSV was, and nothing is lost by
 converting before you have decided how to analyse.
 
+## The command
+
+Installing the package provides `tmdc-convert`. An editable install needs
+re-installing once for the command to appear:
+
+```
+conda activate viz-sci-plot
+pip install -e ".[docs,test,colormaps]"
+```
+
+```
+tmdc-convert PATH [--out ROOT | --from-raw | --beside]
+             [--spectra-type {A,PL,R,RC,T,TRPL}] [--prefix P] [--stack]
+             [--recursive] [--dtype auto|uint16|uint32|float32]
+             [--compression gzip|none] [--overwrite]
+```
+
+`PATH` is a CSV file or a directory of them. The command returns a non-zero exit
+status if anything failed, and a batch continues past a failure rather than
+stopping at it.
+
+### Every flag
+
+| Flag | Takes | Default | What it does |
+|---|---|---|---|
+| `--out` | a path | off | Output root. The tree under `PATH` is copied beneath it. A path with a suffix is taken as one filename instead. |
+| `--beside` | — | off | Write each output into the folder its source came from, with no `converted/` level. |
+| `--from-raw` | — | off | Search *upward* for the nearest `raw/` folder and place output relative to that. |
+| `--spectra-type` | `A` `PL` `R` `RC` `T` `TRPL` | none | Measurement type for spectral exports. Required to convert one; images and TRPL do not need it. |
+| `--prefix` | a string | none | Filename prefix to select. Narrows which files form a TRPL sweep, and names a stack. |
+| `--stack` | — | off | One multi-page TIFF per folder, in `_iter_N` order, instead of one file per frame. |
+| `--recursive` | — | off | Descend into subdirectories. |
+| `--dtype` | `auto` `uint16` `uint32` `float32` | `auto` | Pixel type for images. `auto` keeps integer counts exactly. |
+| `--compression` | a filter name, or `none` | `gzip` | HDF5 compression. |
+| `--overwrite` | — | off | Replace existing output. Off means an existing file raises. |
+
+`--out`, `--beside` and `--from-raw` are **mutually exclusive** — all three answer
+where output goes, so giving two names both in the refusal.
+
+### How a run works
+
+Three steps, in order:
+
+1. **Collect.** Every `*.csv` under `PATH`, or under `PATH` and its subfolders with
+   `--recursive`. `--prefix` narrows this. Non-CSV files are ignored.
+2. **Classify by content, per folder.** Not by filename. A numeric grid of three
+   rows or more is an image; a block header decides spectral or temporal; a two-row
+   grid is a single spectrum and is skipped. Images become TIFF, spectral exports
+   become HDF5, and a folder holding temporal files is one TRPL sweep.
+3. **Place.** A destination is worked out once for the whole run, then each output
+   keeps its source's position within it.
+
 ## Where output lands
 
 Output goes into a **`converted/`** folder, created if it is not already there.
 Which `converted/` depends on **the folder you name in the command** — nothing is
-searched for, so you can work the answer out from what you typed.
+searched for unless you ask, so you can work the answer out from what you typed.
 
 !!! note "`converted/`, not `processed/`"
     A conversion is not an analysis. `processed/` is for what an analysis pulls
@@ -115,136 +167,209 @@ searched for, so you can work the answer out from what you typed.
     deleted and regenerated at any time. Which folder a file is in tells you which
     kind it is.
 
-### If you keep a `raw/` folder
+The rule, in order of precedence:
 
-Point at `raw/` and its **sibling** `converted/` is used, with your folder
-structure copied underneath:
+| Situation | Where output goes |
+|---|---|
+| `--beside` given | the source's own folder, no `converted/` at all |
+| `--out ROOT` given | `ROOT`, with the tree under `PATH` copied beneath it |
+| `--from-raw` given | the nearest `raw/` folder's sibling `converted/`, tree copied beneath |
+| the folder you named is `raw` | its sibling `converted/`, tree copied beneath |
+| anything else | a `converted/` inside each source folder |
+
+Whichever applies, a source's **position** is preserved. That is what lets two spot
+folders hold the same `laser_ref.csv` without one overwriting the other.
+
+## Worked examples
+
+Every tree below is real output. The starting point:
 
 ```
 EXP/
-├── converted/          ← created for you
-└── raw/
-    ├── spot01/{01-PL-Vbot/, ref/}
-    └── spot02/{01-PL-Vbot/, ref/}
+`-- raw/
+    |-- spot01/
+    |   |-- 01-PL-Vbot/
+    |   |   |-- PL_10uW_iter_0.csv
+    |   |   `-- PL_1uW_iter_0.csv
+    |   |-- 02-diffusion/
+    |   |   |-- pl_iter_0.csv
+    |   |   |-- pl_iter_1.csv
+    |   |   `-- pl_iter_2.csv
+    |   `-- ref/
+    |       |-- laser_ref.csv
+    |       `-- wl.csv
+    `-- spot02/
+        |-- 01-PL-Vbot/
+        |   `-- PL_1uW_iter_0.csv
+        `-- ref/
+            `-- laser_ref.csv
 ```
+
+Sweeps in `01-PL-Vbot`, a real-space frame sequence in `02-diffusion`, and
+reference frames in `ref`.
+
+### A. Point at `raw/` — the usual case
 
 ```
 tmdc-convert EXP/raw --recursive --spectra-type PL
-
-EXP/raw/spot01/01-PL-Vbot/sweep.csv  ->  EXP/converted/spot01/01-PL-Vbot/sweep.h5
-EXP/raw/spot01/ref/laser_ref.csv     ->  EXP/converted/spot01/ref/laser_ref.tif
-EXP/raw/spot02/ref/laser_ref.csv     ->  EXP/converted/spot02/ref/laser_ref.tif
 ```
 
-Your structure is copied, not flattened, so two spot folders can hold the same
-`laser_ref_*.csv` without one overwriting the other. `RAW/` and `Raw/` count too.
-
-### If you do not
-
-Nothing changes for you. A `converted/` folder appears next to your files:
-
 ```
-tmdc-convert Downloads/mydata --spectra-type PL
-
-Downloads/mydata/sweep.csv  ->  Downloads/mydata/converted/sweep.h5
+EXP/
+|-- converted/
+|   |-- spot01/
+|   |   |-- 01-PL-Vbot/
+|   |   |   |-- PL_10uW_iter_0.h5     <-- new
+|   |   |   `-- PL_1uW_iter_0.h5      <-- new
+|   |   |-- 02-diffusion/
+|   |   |   |-- pl_iter_0.tif         <-- new
+|   |   |   |-- pl_iter_1.tif         <-- new
+|   |   |   `-- pl_iter_2.tif         <-- new
+|   |   `-- ref/
+|   |       |-- laser_ref.tif         <-- new
+|   |       `-- wl.tif                <-- new
+|   `-- spot02/
+|       |-- 01-PL-Vbot/
+|       |   `-- PL_1uW_iter_0.h5      <-- new
+|       `-- ref/
+|           `-- laser_ref.tif         <-- new
+`-- raw/
+    ... unchanged ...
 ```
 
-### If you point *inside* `raw/`
+`9 file(s) written, 0 error(s).` The folder named is `raw`, so its sibling
+`converted/` is used and the spot and measurement folders are copied underneath.
+`raw/` is untouched. Sweeps became `.h5` and frames became `.tif` in the same run.
 
-The command only looks at the folder you actually named. Name a single measurement
-folder and that folder is not called `raw`, so output lands beside your files —
-which means inside `raw/`:
+### B. Point at one measurement folder
 
 ```
 tmdc-convert EXP/raw/spot01/01-PL-Vbot --spectra-type PL
-
-->  EXP/raw/spot01/01-PL-Vbot/converted/sweep.h5
 ```
 
-The same applies to converting one file. Two ways out:
+```
+spot01/
+|-- 01-PL-Vbot/
+|   |-- converted/
+|   |   |-- PL_10uW_iter_0.h5         <-- new
+|   |   `-- PL_1uW_iter_0.h5          <-- new
+|   |-- PL_10uW_iter_0.csv
+|   `-- PL_1uW_iter_0.csv
+|-- 02-diffusion/
+`-- ref/
+```
 
-**`--from-raw`** searches *upward* for the nearest folder called `raw` and places
-output relative to that:
+The folder named is `01-PL-Vbot`, not `raw`, so output lands beside the files —
+**inside `raw/`**. Nothing searched upward, which is deliberate: the destination is
+readable off the command. If that is not what you wanted, see C.
+
+### C. The same folder, with `--from-raw`
 
 ```
 tmdc-convert EXP/raw/spot01/01-PL-Vbot --spectra-type PL --from-raw
-
-->  EXP/converted/spot01/01-PL-Vbot/sweep.h5
 ```
 
-It is not the default because it reads folders you did not name. If a folder called
-`raw` sits high up an unrelated path — `X:/Brandon/raw/01_Projects/…` — then
-everything beneath it anchors there, and you could not tell from the command.
-Check your path, then use it. If no `raw` is found it warns and falls back.
-
-**`--out`** says where output goes outright, and mirrors the tree beneath the
-folder you named:
-
 ```
-tmdc-convert EXP/raw --recursive --spectra-type PL --out D:/archive
-->  D:/archive/spot01/01-PL-Vbot/sweep.h5
+EXP/
+|-- converted/
+|   `-- spot01/
+|       `-- 01-PL-Vbot/
+|           |-- PL_10uW_iter_0.h5     <-- new
+|           `-- PL_1uW_iter_0.h5      <-- new
+`-- raw/
+    ... unchanged ...
 ```
 
-`--out` and `--from-raw` cannot be combined — both answer the same question, so
-giving both is refused. An `--out` path carrying a suffix is taken as one filename
-instead of a root, which is meaningful with `--stack`.
+Now the command walks up from `01-PL-Vbot` until it finds `raw`, and places output
+relative to that — so this one measurement lands in exactly the slot it would have
+had in run A. Convert one folder today and the rest next week, and they stack up in
+the same tree.
 
-### If you just want the file right there
+!!! warning "Why `--from-raw` is not the default"
+    It reads folders you did not name. If a folder called `raw` sits high up an
+    unrelated path — `X:/Brandon/raw/01_Projects/…` — then everything beneath it
+    anchors there, and you could not tell from the command you typed. Check your
+    path, then use it. If no `raw` is found it warns and falls back to the default.
 
-`--beside` drops the `converted/` level altogether and writes each output into the
-folder its source came from. For a targeted conversion — one file you want an
-archive of, next to the CSV, the way the committed `examples/data` archives sit:
+### D. One file, with `--beside`
 
 ```
-tmdc-convert examples/data/stark-shift/sweep.csv --spectra-type PL --beside
-
-examples/data/stark-shift/sweep.csv
-examples/data/stark-shift/sweep.h5     ← right next to it
+tmdc-convert EXP/raw/spot01/01-PL-Vbot/PL_1uW_iter_0.csv --spectra-type PL --beside
 ```
 
-It works over a folder too, in which case every output lands with its own source
-and no `converted/` folder appears anywhere.
+```
+01-PL-Vbot/
+|-- PL_10uW_iter_0.csv
+|-- PL_1uW_iter_0.csv
+`-- PL_1uW_iter_0.h5                  <-- new
+```
 
-This is shorthand: `--out <that same folder>` does the identical thing. Prefer
-`--beside` for a one-off, because a boolean cannot be mistyped into a path that is
-wrong but still valid. It will write inside `raw/` if that is where the source is,
-and does not warn — you asked for it explicitly.
+No `converted/` folder at all — the archive sits next to its CSV. This is for
+targeted conversions, and it is how the committed `examples/data` archives are laid
+out.
 
-`--out`, `--from-raw` and `--beside` are mutually exclusive; giving two names both
-in the refusal.
+`--beside` is shorthand: `--out EXP/raw/spot01/01-PL-Vbot` does the identical
+thing. Prefer `--beside` for a one-off, because a mistyped path is still a valid
+destination and the output would land somewhere else without complaint, whereas a
+flag cannot be mistyped that way.
 
-### All of it at a glance
+### E. A whole tree, with `--beside`
 
-| You run | You get |
-|---|---|
-| `tmdc-convert EXP/raw --recursive` | `EXP/converted/spot01/…` |
-| `tmdc-convert EXP/raw --recursive --out D:/a` | `D:/a/spot01/…` |
-| `tmdc-convert EXP/raw/spot01/01-PL` | `EXP/raw/spot01/01-PL/converted/…` |
-| `tmdc-convert EXP/raw/spot01/01-PL --from-raw` | `EXP/converted/spot01/01-PL/…` |
-| `tmdc-convert Downloads/mydata` (no `raw/`) | `Downloads/mydata/converted/…` |
-| `tmdc-convert EXP/raw/spot01/01-PL/sweep.csv --beside` | `EXP/raw/spot01/01-PL/sweep.h5` |
+```
+tmdc-convert EXP/raw --recursive --spectra-type PL --beside
+```
 
-!!! note "An existing output is refused"
-    Every writer takes `overwrite=False` and raises `FileExistsError`, matching
-    [`write_sweep`](hdf5.md). The file being replaced may be the only copy. For an
-    HDF5 output the check runs *before* the decode, so a re-run over a folder of
-    12 MB exports refuses immediately rather than parsing each one first.
+```
+raw/
+|-- spot01/
+|   |-- 01-PL-Vbot/
+|   |   |-- PL_10uW_iter_0.csv
+|   |   |-- PL_10uW_iter_0.h5         <-- new
+|   |   |-- PL_1uW_iter_0.csv
+|   |   `-- PL_1uW_iter_0.h5          <-- new
+|   |-- 02-diffusion/
+|   |   |-- pl_iter_0.csv
+|   |   |-- pl_iter_0.tif             <-- new
+|   |   |-- pl_iter_1.csv
+|   |   |-- pl_iter_1.tif             <-- new
+|   |   |-- pl_iter_2.csv
+|   |   `-- pl_iter_2.tif             <-- new
+|   `-- ref/
+|       |-- laser_ref.csv
+|       |-- laser_ref.tif             <-- new
+|       |-- wl.csv
+|       `-- wl.tif                    <-- new
+`-- spot02/
+    ...
+```
+
+Every output lands with its own source and no `converted/` appears anywhere. This
+converts a tree in place. Note it writes **inside `raw/`**, which the default goes
+out of its way to avoid — the flag does not warn, because you asked for it.
+
+### F. A frame sequence as one stack
+
+```
+tmdc-convert EXP/raw/spot01/02-diffusion --stack
+```
+
+```
+02-diffusion/
+|-- converted/
+|   `-- 02-diffusion_stack.tif        <-- new
+|-- pl_iter_0.csv
+|-- pl_iter_1.csv
+`-- pl_iter_2.csv
+```
+
+One multi-page TIFF instead of three files, named after the folder, with pages in
+`_iter_N` order. `--prefix pl_iter_` would name it `pl_stack.tif` and select only
+those frames. No `--spectra-type` was needed: nothing here is a spectral export.
 
 ## Walking a measurement tree
 
-`--recursive` descends the tree and picks the converter per file by content, so a
-benchmarking run converts in one command:
-
-```
-EXP-2026-08-05-PL-benchmarking/raw/
-├── spot01/
-│   ├── 01-PL-Vbot-sweep/   PL_*.csv        -> .h5
-│   ├── 03-R-Vbot-sweep/    R_*.csv         -> .h5
-│   └── ref/                wl_*, laser_*   -> .tif
-└── spot02/ …
-```
-
-Empty folders and non-CSV files (a stray `.stackdump`) are ignored.
+`--recursive` picks the converter per file, so a benchmarking run converts in one
+command. Empty folders and non-CSV files (a stray `.stackdump`) are ignored.
 
 **Two things to watch.**
 
@@ -253,10 +378,13 @@ reflectance sweeps needs one pass per type, or the reflectance sweeps are archiv
 as PL:
 
 ```powershell
-Get-ChildItem raw -Recurse -Directory -Filter "*PL*" | ForEach-Object { tmdc-convert $_.FullName --spectra-type PL }
-Get-ChildItem raw -Recurse -Directory -Filter "*R-*" | ForEach-Object { tmdc-convert $_.FullName --spectra-type R }
-Get-ChildItem raw -Recurse -Directory -Filter "ref"  | ForEach-Object { tmdc-convert $_.FullName }
+Get-ChildItem raw -Recurse -Directory -Filter "*PL*" | ForEach-Object { tmdc-convert $_.FullName --spectra-type PL --from-raw }
+Get-ChildItem raw -Recurse -Directory -Filter "*R-*" | ForEach-Object { tmdc-convert $_.FullName --spectra-type R  --from-raw }
+Get-ChildItem raw -Recurse -Directory -Filter "ref"  | ForEach-Object { tmdc-convert $_.FullName --from-raw }
 ```
+
+`--from-raw` is what makes that work: each command names a folder inside `raw/`,
+and they all land in the same `converted/` tree.
 
 Asking for no `--spectra-type` at all is not fatal: the frames still convert, and
 each spectral export is reported as an error carrying the loader's own message,
@@ -264,30 +392,13 @@ which names the flag and lists the valid types.
 
 **A TRPL directory converts only when you name it.** Reached by `--recursive` it is
 reported as deferred and printed, because two measurements in one folder would
-merge into a single archive with nothing in the file saying so. Take them one at a
-time:
+merge into a single archive with nothing in the file saying so:
 
 ```
 tmdc-convert data/trpl-sweep                    # converts
 tmdc-convert data --recursive                   # defers, and names the folder
 tmdc-convert data/right_spots --prefix right1_  # converts just right1
 ```
-
-## From the command line
-
-Installing the package provides `tmdc-convert`. An editable install needs
-re-installing once for the command to appear.
-
-```
-tmdc-convert PATH [--out ROOT | --from-raw | --beside]
-             [--spectra-type {A,PL,R,RC,T,TRPL}] [--prefix P] [--stack]
-             [--recursive] [--dtype auto|uint16|uint32|float32]
-             [--compression gzip|none] [--overwrite]
-```
-
-It returns a non-zero exit status if anything failed. One folder can produce both
-kinds of output at once — `examples/data/stark-shift` holds 14 frames beside a
-spectral export, and a single command writes 14 TIFFs and one `.h5`.
 
 ## Which files are converted
 

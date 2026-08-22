@@ -22,22 +22,32 @@ belong together, so it is asked for rather than assumed.
 
 Where output lands
 ------------------
-A converted file goes into a ``converted/`` folder: the sibling of ``raw/`` when
-the source sits in one, and one inside the source's own folder otherwise.  The
-folder is created if it does not exist.  The two names are fixed and take no
-parameter.  ``convert_path(beside=True)`` drops the ``converted/`` level entirely
-and writes each output next to its source, for a targeted conversion.
+Into a ``converted/`` folder, created if it does not exist.  ``converted/`` rather
+than ``processed/`` because a conversion is not an analysis: the output holds the
+same numbers the export held, so it can be deleted and regenerated, whereas what
+an analysis extracts from the raw data cannot.  Both names are fixed and take no
+parameter.
 
-``converted/`` rather than ``processed/`` because a conversion is not an analysis:
-the output holds the same numbers the export held.  A ``processed/`` folder is for
-what an analysis extracts from the raw data, and keeping the two apart is what
-makes either one meaningful.
+The single-file converters read the source's **immediate parent**: a file in a
+folder called ``raw`` writes to that folder's sibling ``converted/``, and anything
+else writes to a ``converted/`` inside its own folder.  *out* overrides, naming
+either a directory or a file.
 
-Pass *out* to send output elsewhere.  For a directory run it is an output **root**
-and the tree is mirrored beneath it, so ``raw/spot01/01-PL/sweep.csv`` becomes
-``<out>/spot01/01-PL/sweep.h5``.  Either way a source's position is preserved,
-which is what keeps two folders holding an identically named frame from
-overwriting one another.
+:func:`convert_path` resolves a **root** once for the whole run and gives every
+output its source's position within it, so two folders holding an identically
+named frame cannot overwrite one another:
+
+| argument | root |
+|---|---|
+| ``beside=True`` | the source's own folder — no ``converted/`` level |
+| ``out=`` | that path, with the tree mirrored beneath it |
+| ``from_raw=True`` | nearest **ancestor** ``raw``'s sibling ``converted/`` |
+| none, and the named folder is ``raw`` | that folder's sibling ``converted/`` |
+| none, otherwise | no root; the per-file rule above applies |
+
+The default reads only the folder the call names, never one it searches for, so a
+destination is readable off the call; ``from_raw=`` is the opt-in that looks
+upward.  The three are mutually exclusive.
 
 Public functions
 ----------------

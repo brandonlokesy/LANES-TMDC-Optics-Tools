@@ -2519,6 +2519,78 @@ It stacks the whole sequence: for `examples/data/position-xy-scan` that is 58 fr
 `load_frame` precisely so an animation does not hold the sequence in memory, and routing a
 grid animation through `as_image_grid` defeats that.
 
+**E25. Every `:func:`/`:class:` cross-reference renders literally on the docs site.**
+The docstrings use reStructuredText roles — ``:func:`write_sweep` ``,
+``:class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` `` — **504 of them** across
+eight modules:
+
+| module | roles | | role | count |
+|---|---|---|---|---|
+| `loaders.py` | 210 | | `:attr:` | 168 |
+| `plotting.py` | 129 | | `:func:` | 150 |
+| `fitting.py` | 68 | | `:class:` | 97 |
+| `converters.py` | 19 | | `:meth:` | 63 |
+| `diffusion.py` | 15 | | `:data:` | 26 |
+| `hdf5.py` | 9 | | `:mod:` | 1 |
+| `processing.py` | 7 | | | |
+| `constants.py` | 2 | | | |
+
+None of them render. mkdocstrings parses the *sections* of a NumPy docstring with griffe,
+then renders each section's **text as Markdown**. An RST role is not Markdown, so nothing
+interprets it and it passes through verbatim. What a reader gets on the site, from
+`hdf5.read_sweep`:
+
+```html
+Read an HDF5 file written by :func:<code>write_sweep</code>.
+```
+
+— the `:func:` shown as prose, the name in code style, and **no link**. Every one of the
+504 is a cross-reference that silently is not one, which is the whole point of putting
+them there.
+
+*This is not a configuration problem.* Cross-references work on these pages when something
+else generates them: `signature_crossrefs: true` produces four real
+`<a class="autorefs">` links on the `hdf5` page alone, pointing at `write_sweep`,
+`read_sweep`, `AttoCubeSpectralSweep` and `AttoCubeTRPLSweep`. The linking machinery is
+present and working; the docstrings are simply written in a syntax it does not read.
+
+*Fix, measured rather than assumed.* mkdocstrings' own cross-reference syntax is
+`[text][fully.qualified.path]`. Changing one line and rebuilding:
+
+```
+before   Read an HDF5 file written by :func:`write_sweep`.
+after    Read an HDF5 file written by [`write_sweep`][tmdc_optics_tools.hdf5.write_sweep]
+```
+
+```html
+<a class="autorefs autorefs-internal" href="#tmdc_optics_tools.hdf5.write_sweep">
+  <code>write_sweep</code></a>
+```
+
+A working link. The experiment was reverted; nothing in the tree carries it.
+
+*Why this is not a quick sweep.* Three reasons to do it deliberately rather than with one
+regular expression:
+
+- **The target has to be fully qualified.** `:func:`write_sweep`` resolves by context in
+  Sphinx; `[...][...]` does not. Every one of the 504 needs its module path worked out,
+  and a wrong path produces a *silently dead* link rather than a build error.
+- **`~` means something.** `:class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep``
+  displays only the last component. The Markdown form needs that split by hand into link
+  text and target.
+- **Some are private.** A role pointing at `_classify_csv` or `_order_by_iter` has no
+  rendered page to link to, and `dev/design-principles.md` says never to cite a private
+  helper from a public docstring — so those are not translations but deletions, decided
+  one at a time.
+
+*Not urgent.* The docstrings read correctly in the source, which is where most of this
+package is read today, and the text around each role still says what it says. The cost is
+navigability on the site and a `:func:` prefix that looks like a typo to anyone who does
+not know RST. **Its own pass, per module, not a character changed while passing through** —
+the same standing rule as the `stacklevel` audit, and for the same reason: a mechanical
+sweep over 504 sites with a silent failure mode is how a plausible-looking wrong link gets
+committed.
+
 
 ## Settled design decisions
 

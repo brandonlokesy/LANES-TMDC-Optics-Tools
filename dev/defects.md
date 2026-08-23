@@ -2573,8 +2573,9 @@ A working link. The experiment was reverted; nothing in the tree carries it.
 regular expression:
 
 - **The target has to be fully qualified.** `:func:`write_sweep`` resolves by context in
-  Sphinx; `[...][...]` does not. Every one of the 504 needs its module path worked out,
-  and a wrong path produces a *silently dead* link rather than a build error.
+  Sphinx; `[...][...]` does not. Every one of the 504 needs its module path worked out.
+  A wrong path is *caught*, though — see the note below — so this is tedious rather than
+  dangerous.
 - **`~` means something.** `:class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep``
   displays only the last component. The Markdown form needs that split by hand into link
   text and target.
@@ -2583,13 +2584,33 @@ regular expression:
   helper from a public docstring — so those are not translations but deletions, decided
   one at a time.
 
+*A mistyped target cannot reach `main`.* Measured, after an earlier draft of this entry
+claimed the opposite: `mkdocs_autorefs` logs `Could not find cross-reference target
+'...'` naming the **source file and line**, and `mkdocs build --strict` turns that
+warning into a failed build.
+
+```
+WARNING - mkdocs_autorefs: api\hdf5.md: from src\tmdc_optics_tools\hdf5.py:442:
+          (tmdc_optics_tools.hdf5.read_sweep) Could not find cross-reference target
+          'tmdc_optics_tools.hdf5.no_such_function'
+Aborted with 1 warnings in strict mode!
+```
+
+`docs.yml`'s `build` job runs that command on every pull request, so the check is
+automatic. This removes the main hazard of the conversion: an unresolvable target fails
+loudly. What the build cannot catch is a target that resolves to the **wrong existing
+object**, which is why the pass still wants reading rather than a regular expression.
+
 *Not urgent.* The docstrings read correctly in the source, which is where most of this
 package is read today, and the text around each role still says what it says. The cost is
 navigability on the site and a `:func:` prefix that looks like a typo to anyone who does
-not know RST. **Its own pass, per module, not a character changed while passing through** —
-the same standing rule as the `stacklevel` audit, and for the same reason: a mechanical
-sweep over 504 sites with a silent failure mode is how a plausible-looking wrong link gets
-committed.
+not know RST. **Its own pass, per module** — the same standing rule as the `stacklevel`
+audit, though for a weaker reason than that one: here the build is a real safety net, and
+what remains is the `~` handling and the judgement calls about private helpers.
+
+*Worth deciding first: MkDocs or Sphinx.* These 504 roles are Sphinx syntax, so the entry
+assumes the answer is "convert them". Sphinx would make them work as written. That trade
+belongs in a decision record before the conversion starts, not after it.
 
 
 ## Settled design decisions

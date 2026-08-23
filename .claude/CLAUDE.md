@@ -99,8 +99,10 @@ any environment. **CI runs the suite** — `.github/workflows/tests.yml`, on eve
 request and every push to `main`, on `ubuntu-latest`, `windows-latest` and
 `macos-latest`, Python 3.12 only, installing `".[test,colormaps]"`. The `colormaps`
 extra is included because without it eight `tests/test_plotting_cmap.py` tests skip.
-`docs.yml` builds and deploys the docs and runs **only** on pushes to `main`, so a pull
-request cannot validate a change to it.
+`docs.yml` runs on pull requests, pushes to `main`, and `workflow_dispatch`. Its
+**`build`** job runs `mkdocs build --strict` every time, so a pull request *does*
+validate the docs; only its **`deploy`** job is gated behind
+`if: github.event_name != 'pull_request'`. `build` is not a required check on `main`.
 
 Three checks are **required** on `main`: `pytest (ubuntu-latest)`,
 `pytest (windows-latest)`, `pytest (macos-latest)`. Reasoning and rejected alternatives:

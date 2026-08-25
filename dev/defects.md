@@ -262,6 +262,14 @@ package was depending on a filename convention it does not control and has alrea
 seen vary. Committed frame counts are 11, 18, 46, 47 and 57 — all past the 10 where
 this begins.
 
+**Second caller, 2026-08-21.** `converters.convert_image_dir_to_tiff_stack` orders
+its pages with the same `_order_by_iter`, rather than the `sorted(glob(...))` the
+unmerged `dev/hdf5` branch used. A stack built in filename order carries the sweep
+scrambled inside a single file, where it is harder to notice than a mislabelled
+animation. `tests/test_converters.py::test_unpadded_stack_is_in_acquisition_order`
+pins it with **unpadded** names, which is the case the branch's own fixture could not
+exhibit.
+
 *Fixed* by **moving** `AttoCubeTRPLSweep._order_by_iter` and `_ITER_INDEX` to a
 module-level helper (after `_drop_unwritten_blocks`, where the other
 "what is this file" logic lives) and calling it from both loaders — not copying it,
@@ -425,6 +433,14 @@ Note the contrast with `_read_block_layout`, which was given exactly this
 discrimination on 2026-07-31 — a bare grid of two rows is named as `SingleSpectrum`,
 more than two as an image sequence — so the rule to copy already existed in the
 package.
+
+**Second caller, 2026-08-21.** `converters` selects frames with the same
+`_classify_csv`, so a spectrum sitting beside the frames is reported as skipped
+rather than written out as a two-pixel-tall TIFF, and `convert_image_csv_to_tiff`
+refuses one outright using the existing `_CSV_KIND_REASON` wording. The helper moved
+from a `staticmethod` on `AttoCubePLScanRealSpace` to module level in that change so
+a second caller could reach it. Pinned by
+`tests/test_converters.py::test_spectrum_beside_frames_is_not_converted`.
 
 **Fixed by replacing the predicate with a classifier.** `_is_image_csv` is gone;
 `_classify_csv` returns the kind, because a bool cannot carry the reason a file was
@@ -2502,6 +2518,99 @@ It stacks the whole sequence: for `examples/data/position-xy-scan` that is 58 fr
 `processing.reorder_grid`. `ImageSequencePanel` pulls one frame at a time through
 `load_frame` precisely so an animation does not hold the sequence in memory, and routing a
 grid animation through `as_image_grid` defeats that.
+
+**E25. Every `:func:`/`:class:` cross-reference renders literally on the docs site.**
+The docstrings use reStructuredText roles — ``:func:`write_sweep` ``,
+``:class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep` `` — **504 of them** across
+eight modules:
+
+| module | roles | | role | count |
+|---|---|---|---|---|
+| `loaders.py` | 210 | | `:attr:` | 168 |
+| `plotting.py` | 129 | | `:func:` | 150 |
+| `fitting.py` | 68 | | `:class:` | 97 |
+| `converters.py` | 19 | | `:meth:` | 63 |
+| `diffusion.py` | 15 | | `:data:` | 26 |
+| `hdf5.py` | 9 | | `:mod:` | 1 |
+| `processing.py` | 7 | | | |
+| `constants.py` | 2 | | | |
+
+None of them render. mkdocstrings parses the *sections* of a NumPy docstring with griffe,
+then renders each section's **text as Markdown**. An RST role is not Markdown, so nothing
+interprets it and it passes through verbatim. What a reader gets on the site, from
+`hdf5.read_sweep`:
+
+```html
+Read an HDF5 file written by :func:<code>write_sweep</code>.
+```
+
+— the `:func:` shown as prose, the name in code style, and **no link**. Every one of the
+504 is a cross-reference that silently is not one, which is the whole point of putting
+them there.
+
+*This is not a configuration problem.* Cross-references work on these pages when something
+else generates them: `signature_crossrefs: true` produces four real
+`<a class="autorefs">` links on the `hdf5` page alone, pointing at `write_sweep`,
+`read_sweep`, `AttoCubeSpectralSweep` and `AttoCubeTRPLSweep`. The linking machinery is
+present and working; the docstrings are simply written in a syntax it does not read.
+
+*Fix, measured rather than assumed.* mkdocstrings' own cross-reference syntax is
+`[text][fully.qualified.path]`. Changing one line and rebuilding:
+
+```
+before   Read an HDF5 file written by :func:`write_sweep`.
+after    Read an HDF5 file written by [`write_sweep`][tmdc_optics_tools.hdf5.write_sweep]
+```
+
+```html
+<a class="autorefs autorefs-internal" href="#tmdc_optics_tools.hdf5.write_sweep">
+  <code>write_sweep</code></a>
+```
+
+A working link. The experiment was reverted; nothing in the tree carries it.
+
+*Why this is not a quick sweep.* Three reasons to do it deliberately rather than with one
+regular expression:
+
+- **The target has to be fully qualified.** `:func:`write_sweep`` resolves by context in
+  Sphinx; `[...][...]` does not. Every one of the 504 needs its module path worked out.
+  A wrong path is *caught*, though — see the note below — so this is tedious rather than
+  dangerous.
+- **`~` means something.** `:class:`~tmdc_optics_tools.loaders.AttoCubeSpectralSweep``
+  displays only the last component. The Markdown form needs that split by hand into link
+  text and target.
+- **Some are private.** A role pointing at `_classify_csv` or `_order_by_iter` has no
+  rendered page to link to, and `dev/design-principles.md` says never to cite a private
+  helper from a public docstring — so those are not translations but deletions, decided
+  one at a time.
+
+*A mistyped target cannot reach `main`.* Measured, after an earlier draft of this entry
+claimed the opposite: `mkdocs_autorefs` logs `Could not find cross-reference target
+'...'` naming the **source file and line**, and `mkdocs build --strict` turns that
+warning into a failed build.
+
+```
+WARNING - mkdocs_autorefs: api\hdf5.md: from src\tmdc_optics_tools\hdf5.py:442:
+          (tmdc_optics_tools.hdf5.read_sweep) Could not find cross-reference target
+          'tmdc_optics_tools.hdf5.no_such_function'
+Aborted with 1 warnings in strict mode!
+```
+
+`docs.yml`'s `build` job runs that command on every pull request, so the check is
+automatic. This removes the main hazard of the conversion: an unresolvable target fails
+loudly. What the build cannot catch is a target that resolves to the **wrong existing
+object**, which is why the pass still wants reading rather than a regular expression.
+
+*Not urgent.* The docstrings read correctly in the source, which is where most of this
+package is read today, and the text around each role still says what it says. The cost is
+navigability on the site and a `:func:` prefix that looks like a typo to anyone who does
+not know RST. **Its own pass, per module** — the same standing rule as the `stacklevel`
+audit, though for a weaker reason than that one: here the build is a real safety net, and
+what remains is the `~` handling and the judgement calls about private helpers.
+
+*Worth deciding first: MkDocs or Sphinx.* These 504 roles are Sphinx syntax, so the entry
+assumes the answer is "convert them". Sphinx would make them work as written. That trade
+belongs in a decision record before the conversion starts, not after it.
 
 
 ## Settled design decisions

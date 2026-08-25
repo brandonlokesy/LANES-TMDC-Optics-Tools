@@ -14,7 +14,11 @@ import warnings
 import numpy as np
 import pytest
 
-from tmdc_optics_tools.loaders import AttoCubePLScanRealSpace, _resolve_frame
+from tmdc_optics_tools.loaders import (
+    AttoCubePLScanRealSpace,
+    _classify_csv,
+    _resolve_frame,
+)
 
 from _paths import DATA
 
@@ -211,7 +215,7 @@ def test_committed_single_spectrum_is_not_an_image(tmp_path):
     # wavelength axis, so a first-line float test takes it for a frame.
     shutil.copy(REAL_SPECTRUM, tmp_path / "pl_iter_0.csv")
 
-    assert AttoCubePLScanRealSpace._classify_csv(tmp_path / "pl_iter_0.csv") == "spectrum"
+    assert _classify_csv(tmp_path / "pl_iter_0.csv") == "spectrum"
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +230,7 @@ def test_three_rows_is_the_image_boundary(tmp_path):
     for n_rows, expected in ((3, "image"), (2, "spectrum"), (1, "too_short")):
         name = f"grid_{n_rows}.csv"
         np.savetxt(tmp_path / name, np.ones((n_rows, 5)), delimiter=",")
-        assert AttoCubePLScanRealSpace._classify_csv(tmp_path / name) == expected
+        assert _classify_csv(tmp_path / name) == expected
 
 
 def test_exports_are_named_by_their_block_layout(tmp_path):
@@ -236,7 +240,7 @@ def test_exports_are_named_by_their_block_layout(tmp_path):
     _export(tmp_path, "pl_temporal.csv", TEMPORAL_ROLES)
     _export(tmp_path, "pl_unknown.csv", ("Par_0", "Wavelength0", "Foo_0"))
 
-    classify = AttoCubePLScanRealSpace._classify_csv
+    classify = _classify_csv
     assert classify(tmp_path / "pl_spectral.csv") == "spectral"
     assert classify(tmp_path / "pl_temporal.csv") == "temporal"
     assert classify(tmp_path / "pl_unknown.csv") == "unrecognised"

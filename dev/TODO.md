@@ -30,9 +30,29 @@
     - Field × power (a genuinely 2-parameter sweep) still unseen in a real file —
       though it is now expressible, and is what the E14 fixtures model.
 - HDF5 export/import: done (`hdf5.py`, `scan.to_hdf5()`, `.h5` accepted by the
-  loader, both axis kinds). `dev/hdf5`'s `converters.py` remains unmerged — its CLI
-  for bulk CSV→HDF5/TIFF conversion is the part not covered by this work, and the
-  11.57 MB → 0.069 MB TRPL result is a decent argument for having one.
+  loader, both axis kinds).
+- ~~`dev/hdf5`'s `converters.py` remains unmerged~~ **image half landed 2026-08-21.**
+  `converters.py` converts real-space image CSVs to TIFF, one file per frame or one
+  multi-page stack, and carries the `tmdc-convert` command. It reuses
+  `loaders._classify_csv` and `loaders._order_by_iter`; the branch's own copies of
+  both reimplemented A9 and A7. Output goes to a `converted/` folder
+  (`dev/decisions/0034-converted-files-land-in-a-converted-folder.md`, superseding
+  0032 on the name only — `processed/` is for what an analysis extracts, a
+  conversion decides nothing). With `out=` a directory run mirrors the source tree
+  beneath it (`dev/decisions/0035-out-is-an-output-root-and-the-tree-is-mirrored.md`).
+    - ~~Still owed: bulk spectral CSV → HDF5 on the command line~~ **done 2026-08-21.**
+      `convert_spectral_csv_to_hdf5` loads with `AttoCubeSpectralSweep` and writes
+      with `hdf5.write_sweep`, so the package has one archive format and a converted
+      sweep reopens in the loader — unlike the branch's private layout.
+      `convert_trpl_dir_to_hdf5` collapses a directory of decays into one archive.
+      Measured: 4.59 MB → 0.142 MB spectral (32×), and 11.57 MB → 0.070 MB for
+      TRPL (165×, the 11.14 MB parameter-table companion being what the archive
+      makes unnecessary).
+        - `--spectra-type` is the only measurement fact declared at conversion time;
+          sweep, gates and geometry are read-time arguments, since the loader takes
+          each from its argument and only falls back to stored metadata.
+        - A TRPL directory converts only when named, never when reached by
+          `--recursive`: `dev/decisions/0033-a-trpl-directory-converts-only-when-named.md`.
 - AttoCubeRealSpace ...
     - Select the range of frames of interest -> work on a subset
     - ~~**File ordering is lexicographic** (A7)~~ **fixed 2026-08-07.**

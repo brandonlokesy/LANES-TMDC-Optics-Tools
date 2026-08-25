@@ -30,7 +30,7 @@ numbers, because names survive edits and line numbers rot silently.
 
 # 1. The shape of the package
 
-Eight modules, ~9.5k lines, one dependency direction. Nothing below imports
+Nine modules, ~10k lines, one dependency direction. Nothing below imports
 anything above it.
 
 ```
@@ -39,6 +39,7 @@ anything above it.
              ▼
         loaders.py           I/O + device geometry.  Turns files into objects.
         ├── hdf5.py          one archive format, both axis kinds
+        ├── converters.py    CSV exports → TIFF / HDF5, and the CLI
         └── processing.py    pure array functions — no objects, no files
              │
              ├──► fitting.py     arrays → dataclasses (FitResult, DipoleResult)
@@ -56,6 +57,10 @@ The contracts, in one line each:
   or matplotlib. This is where maths goes so that plotting can't reimplement it.
 - **`hdf5`** — serialise a loader object and read it back. Imported *lazily* inside
   `loaders._decode` so `h5py` is only needed if you actually touch an `.h5`.
+- **`converters`** — rewrites an export in a better format without interpreting it.
+  Images become TIFF; spectral and TRPL sweeps become HDF5, through the loaders and
+  `hdf5.write_sweep`. Owns the `tmdc-convert` command. Decides nothing a loader
+  already decides — see §9.1.
 - **`fitting`** — curve fits, returning dataclasses that carry parameters,
   uncertainties, and diagnostics.
 - **`plotting`** — draws. Returns `(fig, ax, <artist>)`, or a named tuple when it
@@ -1115,6 +1120,151 @@ Four design points a maintainer needs:
 `FORMAT_VERSION` is gated on the **major** on read. Bump the minor when adding a
 field; bump the major only for a change an older reader would mis-read (2.0 moved the
 auxiliary spectra out of `/metadata`, which an old reader would silently drop).
+
+---
+
+# 9.1 CSV conversion
+
+`converters.py` rewrites an export in a better format. It does not interpret one:
+nothing here corrects, calibrates or reorders counts, and no measurement decision is
+taken. That is what keeps it out of `loaders` despite reading files.
+
+Three export shapes, three destinations:
+
+```
+scan/raw/frame_iter_0.csv …   ──►  scan/converted/frame_iter_0.tif …  (default)
+                              └─►  scan/converted/raw_stack.tif       (--stack)
+
+scan/raw/sweep.csv            ──►  scan/converted/sweep.h5
+trpl/  (a directory of decays) ─►  converted/trpl.h5
+```
+
+The HDF5 side owns no format of its own. It loads with `AttoCubeSpectralSweep` or
+`AttoCubeTRPLSweep` and writes with `hdf5.write_sweep`, so a converted sweep reopens
+by handing the `.h5` back to its loader. Measured on committed data: 4.59 MB →
+0.142 MB for the `stark-shift` spectral sweep, and 11.57 MB → 0.070 MB for
+`examples/data/TRPL` — the bulk of that being the 11.14 MB parameter-table
+companion, which the archive makes unnecessary because each point's parameters are
+stored with its decay.
+
+## Only `spectra_type` is declared at conversion time
+
+A raw spectral export records no measurement type and none can be inferred, so
+`--spectra-type` is required for one. Nothing else about the measurement is asked
+for, because nothing else has to be:
+
+| Declaration | Argument wins over stored metadata at |
+|---|---|
+| `sweep` / `sweep_label` / `sweep_unit` | `_bind_sweep_axis` |
+| `geometry` | `_decode_and_describe` |
+| `gates` | `_decode_and_describe` |
+
+All three read `argument if argument is not None else meta.get(...)`, and every
+parameter row is stored verbatim, so an archive is declared against exactly as the
+CSV was. An archive written with `--spectra-type PL` alone comes back with
+`sweep_type == "index"`, and `sweep="V_A", gates=…, geometry=…` at read time work
+on it unchanged. `AttoCubeTRPLSweep` needs no flag at all — it defaults the type to
+`"TRPL"`, the class name having already declared the modality.
+
+## A TRPL directory converts only when named
+
+A sweep is a whole directory, so converting one means deciding which files belong
+to one measurement. The loader settles most of that — IRF by name, the spectral
+companion by position — but not how many measurements are present, and
+`examples/data/TRPL/right_spots` holds two. They merge, with a warning that a
+`--recursive` run would bury. So a named directory converts and a discovered one is
+reported in `skipped` under `"trpl_directory"`, named on stdout because it is the
+one skip that asks the caller to act. Full argument:
+`dev/decisions/0033-a-trpl-directory-converts-only-when-named.md`.
+
+## Where output lands
+
+Always a **`converted/`** folder, created when missing at any depth. Fixed names,
+no setting: `dev/decisions/0034-converted-files-land-in-a-converted-folder.md`.
+
+`converted/` and not `processed/` on purpose. `processed/` is what an analysis pulls
+*out* of the raw data — fitted positions, integrated intensities, diffusion lengths
+— and is not reproducible by re-running anything. A conversion decides nothing: the
+`.h5` holds the counts the CSV held. Which folder a file sits in therefore says
+whether it can be thrown away and regenerated.
+
+Placement is a **root plus an anchor**, resolved once per call in `convert_path`
+and handed down as an ordinary `out=`. The single-file converters never see it and
+still read their own immediate parent.
+
+| | root | anchor |
+|---|---|---|
+| `beside=True` | the source's own folder | the same folder |
+| `out=` given | `Path(out)` | the folder named in the call |
+| default, named folder is `raw` | its sibling `converted/` | that `raw` folder |
+| `from_raw=True` | nearest ancestor `raw`'s sibling `converted/` | that `raw` folder |
+| otherwise | none — per-file `_default_output` | — |
+
+Each source folder's path relative to the anchor is appended to the root, so
+`raw/spot01/01-PL/sweep.csv` becomes `<root>/spot01/01-PL/sweep.h5`. A folder
+sitting *at* the anchor has relative path `.`, which `joinpath` drops, so a run
+with nothing below it addresses the root directly.
+
+The default anchors on the folder the call **names**, never on one it searches for:
+the destination has to be readable off the command. `from_raw=` is the opt-in that
+searches upward, for a call pointing inside `raw/` — at one measurement folder, or
+at a single file — and it warns and falls back when no `raw` is found. `beside=` is shorthand for `out=` naming the source's own folder — root and anchor
+the same, so every relative path is `.` and each output lands with its source. Any
+two of `out=`, `from_raw=` and `beside=` together raise, since all three answer the
+same question.
+`dev/decisions/0035-out-is-an-output-root-and-the-tree-is-mirrored.md` and
+`dev/decisions/0036-the-default-root-comes-from-the-folder-you-named.md`.
+
+However it is resolved, a source's **position** is preserved, which is the point:
+two spot folders holding the same `laser_ref_*.csv` keep their own output instead
+of one refusing on top of the other.
+
+## What it does not decide for itself
+
+Two questions the converter could have answered on its own, and does not:
+
+| Question | Answered by | Why not here |
+|---|---|---|
+| Is this CSV a frame? | `loaders._classify_csv` | A two-row spectrum is numeric on its first line exactly like an image. Deciding again is how **A9** happened the first time. |
+| What order do frames go in? | `loaders._order_by_iter` | Filename order puts `iter_10` before `iter_2`, and export padding widths vary. Deciding again is **A7**. |
+| Which files are one TRPL sweep? | `AttoCubeTRPLSweep._decode_dir` | IRF exclusion is by name and the companion by position; both are facts about the export, not about conversion. |
+| Is this `spectra_type` valid? | `AttoCubeSpectralSweep._resolve_spectra_type` | Called with empty metadata before the decode, so a mistyped type raises the loader's own message with no second copy of the wording. |
+| What layout does an archive have? | `hdf5.write_sweep` | One archive format in the package. The `dev/hdf5` branch's second layout could not be reopened by the loader. |
+
+Ordering is applied only where it changes the output. A stack's page order is its
+sweep order, so it goes through `_order_by_iter`; per-frame conversion names each
+output after its input, so it does not — which also keeps the helper's
+"no `_iter_N`" warning off two standalone reference images beside a sweep.
+
+Both were promoted to module-level helpers in `loaders.py` precisely so a second
+caller could reach them. `_classify_csv` moved when `converters` arrived;
+`_order_by_iter` moved when A7 was fixed. A third caller adds no new copy.
+
+## Pixel type
+
+`dtype="auto"` keeps integer counts exactly — `uint16` to 65535, `uint32` above —
+and narrows anything else to `float32`. The narrowing is real: `np.loadtxt` reads
+`float64`, so a background-subtracted or non-integer frame loses precision. It is
+stated in the docstring rather than hidden behind the word *lossless*.
+
+A stack is written with `photometric="minisblack"`. Left to guess, `tifffile`
+stores a `(3, ny, nx)` array as one RGB image with separate colour planes, so a
+three-point sweep would open as a single colour frame instead of three pages.
+
+## Overwriting
+
+`overwrite=False` on both writers, raising `FileExistsError`, matching
+`hdf5.write_sweep`. The path is resolved before anything is created, so a refused
+conversion leaves no empty `processed/` behind.
+
+## The command
+
+`tmdc-convert` is declared in `pyproject.toml` under `[project.scripts]` and
+points at `converters:main`. It appears in the environment's `Scripts/` directory
+at install time, so an existing editable install needs re-installing once before
+the command exists. `main` returns an exit status rather than raising, and
+`convert_path` collects failures into a `ConversionReport` so one unreadable frame
+does not abandon a sweep.
 
 ---
 

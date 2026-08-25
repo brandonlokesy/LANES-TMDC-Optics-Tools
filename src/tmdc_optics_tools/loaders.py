@@ -5834,6 +5834,66 @@ _CSV_KIND_REASON = {
 _EXPECTED_NON_IMAGE_KINDS = frozenset(_CLASS_FOR_KIND)
 
 
+def _classify_csv(path: Path) -> str:
+    """
+    Name what kind of CSV *path* is, from its opening lines alone.
+
+    Cheap enough to run over a whole directory: at most three lines are read,
+    so a multi-hundred-MB export costs the same as a small one.
+
+    Parameters
+    ----------
+    path : Path
+
+    Returns
+    -------
+    str
+        ``"image"`` for a numeric grid of at least three rows;
+        ``"spectrum"`` for one of exactly two (a wavelength axis and its
+        counts); ``"too_short"`` for one of a single row; ``"spectral"`` or
+        ``"temporal"`` for an AttoCube export, named as in its header;
+        ``"unrecognised"`` for a header matching no known block layout; and
+        ``"unreadable"`` for an empty or unopenable file.
+
+    See Also
+    --------
+    _read_block_layout : names the two export layouts, and is what this
+        defers to once a text header is seen.
+    """
+    try:
+        with open(path, "r") as fh:
+            first_line = fh.readline()
+            if not first_line.strip():
+                return "unreadable"
+            try:
+                # Only the first field, and split no further: a frame's row is
+                # wide, and one field is all that separates a numeric grid from
+                # a header whose leading column reads "Parameters Labels".
+                float(first_line.split(",", 1)[0].strip())
+            except ValueError:
+                header = True
+            else:
+                header = False
+                # The handle sits on row 1, so two more lines settle whether a
+                # third exists.  Nothing beyond _IMAGE_MIN_ROWS is read, so this
+                # is a threshold test and not a row count.
+                n_rows = 1 + _n_rows_upto(fh, _IMAGE_MIN_ROWS - 1)
+    except OSError:
+        return "unreadable"
+
+    if not header:
+        if n_rows >= _IMAGE_MIN_ROWS:
+            return "image"
+        return "spectrum" if n_rows == 2 else "too_short"
+
+    # Headed files are classified where every other loader classifies them,
+    # so "spectral" and "temporal" keep meaning the block layouts they name.
+    try:
+        return _read_block_layout(path)["kind"]
+    except ValueError:
+        return "unrecognised"
+
+
 class AttoCubePLScanRealSpace:
     """
     Loader for a gate-dependent sequence of real-space PL images from the
@@ -5895,7 +5955,7 @@ class AttoCubePLScanRealSpace:
         self.bg_stat   = bg_stat
 
         candidates = sorted(Path(path).glob(f"{prefix}*.csv"))
-        kinds      = {f: self._classify_csv(f) for f in candidates}
+        kinds      = {f: _classify_csv(f) for f in candidates}
         images     = [f for f, kind in kinds.items() if kind == "image"]
         skipped    = {f: kind for f, kind in kinds.items() if kind != "image"}
         if not images:
@@ -5924,66 +5984,6 @@ class AttoCubePLScanRealSpace:
         # analyse_diffusion_sequence(var_array=…).
         # stacklevel 3: the helper, this __init__, the caller's line.
         self.files = _order_by_iter(images, path, stacklevel=3)
-
-    @staticmethod
-    def _classify_csv(path: Path) -> str:
-        """
-        Name what kind of CSV *path* is, from its opening lines alone.
-
-        Cheap enough to run over a whole directory: at most three lines are read,
-        so a multi-hundred-MB export costs the same as a small one.
-
-        Parameters
-        ----------
-        path : Path
-
-        Returns
-        -------
-        str
-            ``"image"`` for a numeric grid of at least three rows;
-            ``"spectrum"`` for one of exactly two (a wavelength axis and its
-            counts); ``"too_short"`` for one of a single row; ``"spectral"`` or
-            ``"temporal"`` for an AttoCube export, named as in its header;
-            ``"unrecognised"`` for a header matching no known block layout; and
-            ``"unreadable"`` for an empty or unopenable file.
-
-        See Also
-        --------
-        _read_block_layout : names the two export layouts, and is what this
-            defers to once a text header is seen.
-        """
-        try:
-            with open(path, "r") as fh:
-                first_line = fh.readline()
-                if not first_line.strip():
-                    return "unreadable"
-                try:
-                    # Only the first field, and split no further: a frame's row is
-                    # wide, and one field is all that separates a numeric grid from
-                    # a header whose leading column reads "Parameters Labels".
-                    float(first_line.split(",", 1)[0].strip())
-                except ValueError:
-                    header = True
-                else:
-                    header = False
-                    # The handle sits on row 1, so two more lines settle whether a
-                    # third exists.  Nothing beyond _IMAGE_MIN_ROWS is read, so this
-                    # is a threshold test and not a row count.
-                    n_rows = 1 + _n_rows_upto(fh, _IMAGE_MIN_ROWS - 1)
-        except OSError:
-            return "unreadable"
-
-        if not header:
-            if n_rows >= _IMAGE_MIN_ROWS:
-                return "image"
-            return "spectrum" if n_rows == 2 else "too_short"
-
-        # Headed files are classified where every other loader classifies them,
-        # so "spectral" and "temporal" keep meaning the block layouts they name.
-        try:
-            return _read_block_layout(path)["kind"]
-        except ValueError:
-            return "unrecognised"
 
     @staticmethod
     def _describe_skipped(skipped: dict) -> str:

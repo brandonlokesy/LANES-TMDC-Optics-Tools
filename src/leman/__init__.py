@@ -56,6 +56,7 @@ from .loaders import (
     SingleImage,
     RamanSpectrum,
     RamanMap,
+    DektakScan,
 )
 from . import converters, hdf5, processing
 from .converters import (
@@ -80,6 +81,7 @@ __all__ = [
     "SingleImage",
     "RamanSpectrum",
     "RamanMap",
+    "DektakScan",
     "convert_image_csv_to_tiff",
     "convert_image_dir_to_tiff_stack",
     "convert_spectral_csv_to_hdf5",

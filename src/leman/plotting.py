@@ -1197,6 +1197,69 @@ def plot_single_spectrum(
     return fig, ax, line
 
 
+# ---------------------------------------------------------------------------
+# Dektak profilometer
+# ---------------------------------------------------------------------------
+
+_DEKTAK_HEIGHT_UNITS = {
+    "angstrom": ("Height (Å)",  "height"),
+    "nm":       ("Height (nm)", "height_nm"),
+}
+
+
+def plot_dektak_profile(
+    scan,
+    *,
+    height_unit : str   = "angstrom",
+    ax          = None,
+    figsize     : tuple = (7, 3),
+    dpi         : int   = None,
+    **line_kwargs,
+) -> tuple:
+    """
+    Plot a Dektak surface profile (lateral position vs. height).
+
+    Parameters
+    ----------
+    scan : DektakScan
+        A loaded Dektak profilometer scan.
+    height_unit : {"angstrom", "nm"}
+        Unit for the y-axis.  ``"angstrom"`` (default) plots the raw height
+        in Å; ``"nm"`` plots :attr:`~leman.loaders.DektakScan.height_nm`.
+    ax : matplotlib.axes.Axes, optional
+        Axes to draw into.  Creates a new figure if ``None``.
+    figsize : tuple
+        Figure size when creating a new figure.
+    dpi : int, optional
+        Figure DPI when creating a new figure.
+    **line_kwargs
+        Passed directly to ``ax.plot``.
+
+    Returns
+    -------
+    fig, ax, line
+    """
+    if height_unit not in _DEKTAK_HEIGHT_UNITS:
+        raise ValueError(
+            f"height_unit must be one of {set(_DEKTAK_HEIGHT_UNITS)}, "
+            f"got {height_unit!r}."
+        )
+
+    ylabel, attr = _DEKTAK_HEIGHT_UNITS[height_unit]
+    y = getattr(scan, attr)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    else:
+        fig = ax.get_figure()
+
+    line, = ax.plot(scan.lateral, y, **line_kwargs)
+    ax.set_xlabel("Lateral position (µm)")
+    ax.set_ylabel(ylabel)
+
+    return fig, ax, line
+
+
 def plot_spectra_overlay(
     entries           : dict,
     x                 = None,

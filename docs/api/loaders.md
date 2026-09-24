@@ -3,7 +3,8 @@
 Data loaders for device geometry and confocal scans — spectral sweeps over any
 scanned parameter, time-resolved PL, real-space image sequences, and single spectra
 or images — plus separate loaders for single Raman spectra and 2-D Raman maps from
-a LabRAM-style ``.txt`` export, unrelated to the other instruments.
+a LabRAM-style ``.txt`` export, and Bruker Dektak profilometer surface profiles from
+a CSV export, both unrelated to the other instruments.
 
 The sweep classes share private bases and differ only in what is genuinely
 different about them, which is the whole reason they are separate:

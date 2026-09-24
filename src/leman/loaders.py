@@ -21,6 +21,8 @@ RamanSpectrum
     Single Raman spectrum from a LabRAM-style ``.txt`` export.
 RamanMap
     2-D spatial Raman map from a LabRAM-style ``.txt`` export.
+DektakScan
+    Bruker Dektak profilometer surface profile from a CSV export.
 ACImgSweep
     Loads a sequence of real-space PL image CSVs swept over gate voltage.
 _ACImg
@@ -35,6 +37,7 @@ ACLaserRefImg
 from __future__ import annotations
 
 import inspect
+import io
 import re
 import warnings
 from pathlib import Path
@@ -7402,3 +7405,295 @@ class ACImg(_ACImg):
     for spot-checking one file without building a full sequence."""
     def __init__(self, path, laser_ref=None, bg_region=None, bg_stat="median"):
         super().__init__(path, laser_ref=laser_ref, bg_region=bg_region, bg_stat=bg_stat)
+
+
+# ---------------------------------------------------------------------------
+# DektakScan — Bruker Dektak profilometer
+# ---------------------------------------------------------------------------
+
+_DEKTAK_SECTIONS = frozenset({
+    "Meta Data", "Analytical Results", "Data Leveling Position", "Data",
+})
+
+
+def _parse_dektak_numeric(raw: str) -> float:
+    """Extract the leading number from a Dektak metadata value string.
+
+    Splits on whitespace and converts the first token, so unit suffixes
+    (``"608.31 µm"``, ``"15 s"``) are discarded.
+    """
+    return float(raw.split()[0])
+
+
+class DektakScan:
+    """
+    Bruker Dektak profilometer scan loaded from a CSV export.
+
+    The file is a multi-section CSV exported by the Dektak's Vision software.
+    Four sections, each starting with a header line and separated by blank
+    lines:
+
+    * **Meta Data** — instrument settings (scan length, resolution, stylus
+      force and type, profile mode, date).
+    * **Analytical Results** — cursor-based measurements computed by the
+      instrument (e.g. total average step height).
+    * **Data Leveling Position** — reference and measurement cursor positions
+      used for data leveling.
+    * **Data** — the profile: lateral position in µm (column 0) and surface
+      height in Å (column 1).
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the ``.csv`` file.
+
+    Attributes
+    ----------
+    path : str
+    lateral : np.ndarray, shape (n_points,)
+        Lateral position in µm.
+    height : np.ndarray, shape (n_points,)
+        Surface height in Å.  Never modified after loading.
+    metadata : dict
+        Key–value pairs from the Meta Data section, values as raw strings
+        (units embedded, e.g. ``"608.31 µm"``).
+    analytical_results : dict
+        Keyed by measurement label (e.g. ``"Total_ASH"``), each value a dict
+        of ``{column_header: value_string}``.
+    leveling : dict
+        Key–value pairs from the Data Leveling Position section.
+    scan_length_um : float
+        Scan length in µm, parsed from metadata.  Falls back to the lateral
+        span of the data if the metadata key is absent.
+    scan_resolution_um : float
+        Scan resolution in µm, parsed from metadata.  Falls back to the
+        median point spacing if the metadata key is absent.
+
+    Raises
+    ------
+    ValueError
+        If the file is missing any of the four expected sections, the data
+        section has fewer than two columns, or the lateral positions are not
+        monotonically increasing.
+    """
+
+    def __init__(self, path: str):
+        self.path = str(path)
+
+        with open(self.path, encoding="utf-8-sig") as fh:
+            raw_lines = fh.readlines()
+
+        lines = [line.rstrip("\n\r") for line in raw_lines]
+
+        # ---- split file into sections by recognising headers ----
+        sections: dict[str, list[str]] = {}
+        current: str | None = None
+        buf: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped in _DEKTAK_SECTIONS:
+                if current is not None:
+                    sections[current] = buf
+                current = stripped
+                buf = []
+            elif stripped == "":
+                continue
+            else:
+                buf.append(line)
+
+        if current is not None:
+            sections[current] = buf
+
+        missing = _DEKTAK_SECTIONS - sections.keys()
+        if missing:
+            raise ValueError(
+                f"Dektak CSV is missing section(s): "
+                f"{', '.join(sorted(missing))}. "
+                f"Expected all of {sorted(_DEKTAK_SECTIONS)} in '{path}'."
+            )
+
+        # ---- Meta Data: skip "Label,Value," header, then key-value pairs ----
+        meta_lines = sections["Meta Data"]
+        self.metadata: dict[str, str] = {}
+        for line in meta_lines[1:]:
+            parts = line.split(",", maxsplit=1)
+            if len(parts) == 2:
+                key = parts[0].strip()
+                val = parts[1].strip().rstrip(",")
+                if key:
+                    self.metadata[key] = val
+
+        # ---- Analytical Results: header row, then data rows ----
+        ar_lines = sections["Analytical Results"]
+        ar_header = [h.strip() for h in ar_lines[0].split(",")]
+        self.analytical_results: dict[str, dict[str, str]] = {}
+        for line in ar_lines[1:]:
+            fields = [f.strip() for f in line.split(",")]
+            label = fields[0] if fields else ""
+            if label:
+                row: dict[str, str] = {}
+                for i, h in enumerate(ar_header[1:], start=1):
+                    if i < len(fields) and h:
+                        row[h] = fields[i]
+                self.analytical_results[label] = row
+
+        # ---- Data Leveling Position: key-value pairs, no header ----
+        self.leveling: dict[str, str] = {}
+        for line in sections["Data Leveling Position"]:
+            parts = line.split(",", maxsplit=1)
+            if len(parts) == 2:
+                key = parts[0].strip()
+                val = parts[1].strip()
+                if key:
+                    self.leveling[key] = val
+
+        # ---- Data: column header then numeric rows ----
+        data_lines = sections["Data"]
+        if not data_lines:
+            raise ValueError(f"Data section is empty in '{path}'.")
+
+        # usecols=(0, 1) ignores the trailing empty columns from commas.
+        data_text = "\n".join(data_lines[1:])
+        arr = np.loadtxt(
+            io.StringIO(data_text), delimiter=",", usecols=(0, 1),
+        )
+
+        if arr.ndim != 2 or arr.shape[1] != 2:
+            raise ValueError(
+                f"Expected 2 data columns (lateral, height), got array of "
+                f"shape {arr.shape} from '{path}'."
+            )
+
+        self.lateral: np.ndarray = arr[:, 0]
+        self.height: np.ndarray = arr[:, 1]
+
+        if self.lateral.size > 1 and not np.all(np.diff(self.lateral) > 0):
+            raise ValueError(
+                f"Lateral positions are not monotonically increasing "
+                f"in '{path}'."
+            )
+
+        # ---- convenience attributes parsed from metadata ----
+        try:
+            self.scan_length_um = _parse_dektak_numeric(
+                self.metadata["ScanLength"],
+            )
+        except (KeyError, ValueError):
+            self.scan_length_um = float(
+                self.lateral[-1] - self.lateral[0],
+            )
+
+        try:
+            self.scan_resolution_um = _parse_dektak_numeric(
+                self.metadata["ScanResolution"],
+            )
+        except (KeyError, ValueError):
+            self.scan_resolution_um = float(np.median(np.diff(self.lateral)))
+
+    # ---- properties ----
+
+    @property
+    def n_points(self) -> int:
+        """Number of data points in the profile."""
+        return self.lateral.size
+
+    @property
+    def gradient(self) -> np.ndarray:
+        """Numerical derivative dh/dx in Å/µm.
+
+        Uses ``np.gradient`` with the lateral spacing.  The result is the raw
+        derivative — apply :func:`~leman.processing.smooth_savgol` to
+        :attr:`height` first if the scan is noisy.
+
+        Returns
+        -------
+        np.ndarray, shape (n_points,)
+        """
+        return np.gradient(self.height, self.lateral)
+
+    @property
+    def height_nm(self) -> np.ndarray:
+        """Surface height converted to nm (Å / 10).
+
+        Returns
+        -------
+        np.ndarray, shape (n_points,)
+        """
+        return self.height / 10.0
+
+    # ---- methods ----
+
+    def get_value(self, x_pos: float) -> tuple[float, float]:
+        """Height at the lateral position nearest to *x_pos*.
+
+        Parameters
+        ----------
+        x_pos : float
+            Target lateral position in µm.
+
+        Returns
+        -------
+        matched_x : float
+            The actual lateral position of the nearest data point, in µm.
+        height : float
+            Surface height at that point, in Å.
+        """
+        idx = int(np.argmin(np.abs(self.lateral - x_pos)))
+        return float(self.lateral[idx]), float(self.height[idx])
+
+    def step_height(
+        self,
+        region_a: tuple[float, float],
+        region_b: tuple[float, float],
+    ) -> float:
+        """Mean height difference between two lateral regions.
+
+        Computes ``mean(height in region_b) − mean(height in region_a)``.
+        A positive result means *region_b* is higher than *region_a*.
+
+        Parameters
+        ----------
+        region_a : (x_min, x_max)
+            First lateral range in µm (reference level).
+        region_b : (x_min, x_max)
+            Second lateral range in µm.
+
+        Returns
+        -------
+        float
+            Height difference in Å.
+
+        Raises
+        ------
+        ValueError
+            If either region contains no data points.
+        """
+        mask_a = (self.lateral >= region_a[0]) & (self.lateral <= region_a[1])
+        mask_b = (self.lateral >= region_b[0]) & (self.lateral <= region_b[1])
+
+        if not np.any(mask_a):
+            raise ValueError(
+                f"region_a ({region_a[0]}, {region_a[1]}) µm contains no "
+                f"data points.  Lateral range is "
+                f"{self.lateral[0]:.1f} – {self.lateral[-1]:.1f} µm."
+            )
+        if not np.any(mask_b):
+            raise ValueError(
+                f"region_b ({region_b[0]}, {region_b[1]}) µm contains no "
+                f"data points.  Lateral range is "
+                f"{self.lateral[0]:.1f} – {self.lateral[-1]:.1f} µm."
+            )
+
+        return float(np.mean(self.height[mask_b]) - np.mean(self.height[mask_a]))
+
+    def __repr__(self) -> str:
+        return (
+            f"DektakScan — {self.n_points} points\n"
+            f"  File       : {self.path}\n"
+            f"  Lateral    : {self.lateral[0]:.1f} –"
+            f" {self.lateral[-1]:.1f} µm\n"
+            f"  Height     : {self.height.min():.1f} –"
+            f" {self.height.max():.1f} Å\n"
+            f"  Resolution : {self.scan_resolution_um:.3f} µm\n"
+        )
